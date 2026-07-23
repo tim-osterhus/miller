@@ -26,9 +26,10 @@ weights, tokenizers, phonemizers, voice packs, wake-word models, fonts, audio,
 artwork, and other shipped assets separately. A permissive repository license
 does not establish that every dependency or model asset is safe to redistribute.
 
-The default Miller distribution must not incorporate copyleft, noncommercial,
-source-available, field-of-use-restricted, or unknown-license material unless
-the project makes and documents an explicit distribution decision.
+Miller must not incorporate copyleft, noncommercial, source-available,
+field-of-use-restricted, or unknown-license source code or assets. External
+provider compatibility does not authorize Miller to copy, modify, bundle, or
+redistribute a provider's implementation or assets.
 
 ## Clean-room boundary
 

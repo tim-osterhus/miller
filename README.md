@@ -40,11 +40,11 @@ The protocol is a target, not an implemented API.
 No voice pipeline, desktop donor, messaging framework, model runtime, or model
 asset has been selected yet.
 
-Miller intends to use only Apache-2.0, MIT, BSD, or equivalently permissive
-source dependencies in its distributed product. Repository licenses alone are
-not sufficient: native binaries, transitive dependencies, model weights,
-tokenizers, phonemizers, voices, wake-word models, fonts, audio, and artwork
-must each pass provenance and redistribution review.
+Miller will source code and assets only from Apache-2.0, MIT, BSD, or
+equivalently permissive projects. Repository licenses alone are not sufficient:
+native binaries, transitive dependencies, model weights, tokenizers,
+phonemizers, voices, wake-word models, fonts, audio, and artwork must each pass
+provenance and redistribution review.
 
 See `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`.
 
