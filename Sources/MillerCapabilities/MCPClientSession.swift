@@ -5,6 +5,7 @@ import MillerCore
 
 public enum MCPClientSessionError: Error, Equatable, Sendable {
     case notConnected
+    case connectionClosed
     case startupTimedOut
     case callTimedOut
     case invalidArguments
@@ -64,17 +65,20 @@ public actor MCPClientSession: MCPClientSessionProtocol {
     private let configuration: MCPServerConfiguration
     private let client: Client
     private let processResources: StdioProcessResources?
+    private let transportFailureSignal: MCPTransportFailureSignal?
     private var connected = true
 
     private init(
         configuration: MCPServerConfiguration,
         client: Client,
-        processResources: StdioProcessResources?
+        processResources: StdioProcessResources?,
+        transportFailureSignal: MCPTransportFailureSignal?
     ) {
         self.serverID = configuration.id
         self.configuration = configuration
         self.client = client
         self.processResources = processResources
+        self.transportFailureSignal = transportFailureSignal
     }
 
     public static func connect(
@@ -97,6 +101,7 @@ public actor MCPClientSession: MCPClientSessionProtocol {
             name: "miller", version: "0.1.1", configuration: .strict
         )
         let resources: StdioProcessResources?
+        let failureSignal: MCPTransportFailureSignal?
         let transport: any Transport
 
         switch configuration.transport {
@@ -116,17 +121,24 @@ public actor MCPClientSession: MCPClientSessionProtocol {
                 throw MCPClientSessionError.processLaunchFailed
             }
             resources = stdio
+            let stdioFailureSignal = MCPTransportFailureSignal()
+            failureSignal = stdioFailureSignal
             transport = BoundedStdioTransport(
                 inputDescriptor: stdio.stdoutReadDescriptor,
                 outputDescriptor: stdio.stdinWriteDescriptor,
                 maximumInboundBytes: configuration.bounds.maximumInboundBytes,
-                failureHandler: { stdio.terminate() }
+                failureHandler: {
+                    stdioFailureSignal.fail(.connectionClosed)
+                    Task { await client.disconnect() }
+                    stdio.terminate()
+                }
             )
         case .http(let endpoint):
             let headers = try await resolvedHeaders(
                 configuration.secrets, resolver: credentialResolver
             )
             resources = nil
+            failureSignal = nil
             transport = BoundedHTTPTransport(
                 endpoint: endpoint,
                 headers: headers,
@@ -139,14 +151,16 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         do {
             _ = try await boundedAsync(
                 timeout: configuration.bounds.startupTimeout,
-                timeoutError: MCPClientSessionError.startupTimedOut
+                timeoutError: MCPClientSessionError.startupTimedOut,
+                failureSignal: failureSignal
             ) {
                 try await client.connect(transport: transport)
             }
             return MCPClientSession(
                 configuration: configuration,
                 client: client,
-                processResources: resources
+                processResources: resources,
+                transportFailureSignal: failureSignal
             )
         } catch {
             await client.disconnect()
@@ -164,7 +178,8 @@ public actor MCPClientSession: MCPClientSessionProtocol {
             let pageCursor = cursor
             let page = try await boundedAsync(
                 timeout: configuration.bounds.callTimeout,
-                timeoutError: MCPClientSessionError.callTimedOut
+                timeoutError: MCPClientSessionError.callTimedOut,
+                failureSignal: transportFailureSignal
             ) {
                 try await self.client.listTools(cursor: pageCursor)
             }
@@ -217,6 +232,7 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         let result: CallTool.Result = try await boundedAsync(
             timeout: configuration.bounds.callTimeout,
             timeoutError: MCPClientSessionError.callTimedOut,
+            failureSignal: transportFailureSignal,
             onCancel: {
                 try? await self.client.cancelRequest(
                     context.requestID, reason: "Miller call ended"
@@ -379,6 +395,7 @@ private final class StdioProcessResources: @unchecked Sendable {
 func boundedAsync<T: Sendable>(
     timeout: Duration,
     timeoutError: any Error & Sendable,
+    failureSignal: MCPTransportFailureSignal? = nil,
     onCancel: @escaping @Sendable () async -> Void = {},
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
@@ -386,6 +403,14 @@ func boundedAsync<T: Sendable>(
     return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { continuation in
             state.install(continuation)
+            if let failureSignal {
+                let token = failureSignal.subscribe { error in
+                    if state.resolve(.failure(error)) {
+                        Task { await onCancel() }
+                    }
+                }
+                state.setCleanup { failureSignal.unsubscribe(token) }
+            }
             let operationTask = Task {
                 do { state.resolve(.success(try await operation())) }
                 catch { state.resolve(.failure(error)) }
@@ -417,6 +442,7 @@ private final class AsyncRaceState<T: Sendable>: @unchecked Sendable {
     private var finished = false
     private var operationTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
+    private var cleanup: (@Sendable () -> Void)?
 
     func install(_ continuation: CheckedContinuation<T, Error>) {
         lock.lock()
@@ -441,10 +467,13 @@ private final class AsyncRaceState<T: Sendable>: @unchecked Sendable {
         if continuation == nil { pendingResult = result }
         let operation = operationTask
         let timeout = timeoutTask
+        let cleanup = self.cleanup
+        self.cleanup = nil
         lock.unlock()
         continuation?.resume(with: result)
         operation?.cancel()
         timeout?.cancel()
+        cleanup?()
         return true
     }
 
@@ -471,5 +500,56 @@ private final class AsyncRaceState<T: Sendable>: @unchecked Sendable {
         lock.unlock()
         operation?.cancel()
         timeout?.cancel()
+    }
+
+    func setCleanup(_ cleanup: @escaping @Sendable () -> Void) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            cleanup()
+        } else {
+            self.cleanup = cleanup
+            lock.unlock()
+        }
+    }
+}
+
+final class MCPTransportFailureSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failure: MCPClientSessionError?
+    private var subscribers: [UUID: @Sendable (MCPClientSessionError) -> Void] = [:]
+
+    func subscribe(
+        _ subscriber: @escaping @Sendable (MCPClientSessionError) -> Void
+    ) -> UUID {
+        let token = UUID()
+        lock.lock()
+        if let failure {
+            lock.unlock()
+            subscriber(failure)
+        } else {
+            subscribers[token] = subscriber
+            lock.unlock()
+        }
+        return token
+    }
+
+    func unsubscribe(_ token: UUID) {
+        lock.lock()
+        subscribers.removeValue(forKey: token)
+        lock.unlock()
+    }
+
+    func fail(_ error: MCPClientSessionError) {
+        lock.lock()
+        guard failure == nil else {
+            lock.unlock()
+            return
+        }
+        failure = error
+        let subscribers = Array(subscribers.values)
+        self.subscribers.removeAll()
+        lock.unlock()
+        for subscriber in subscribers { subscriber(error) }
     }
 }

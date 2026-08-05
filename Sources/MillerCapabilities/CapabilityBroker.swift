@@ -4,7 +4,6 @@ import MillerCore
 public enum CapabilityBrokerError: Error, Equatable, Sendable {
     case capabilityUnavailable
     case duplicateCallID
-    case callIDCapacityExceeded
     case invalidArguments
     case argumentsTooLarge
     case declined
@@ -49,9 +48,6 @@ private struct PendingConnection: Sendable {
 }
 
 public actor CapabilityBroker {
-    /// A broker remembers at most this many active or completed call identities.
-    /// Once exhausted, it fails closed instead of evicting IDs and permitting replay.
-    public nonisolated static let maximumRememberedCallIDs = 4_096
     public nonisolated static let maximumCatalogRows = 2_048
 
     private let configurations: [String: MCPServerConfiguration]
@@ -213,8 +209,6 @@ public actor CapabilityBroker {
         argumentsJSON: Data,
         providerProfileID: UUID
     ) async throws -> SanitizedCapabilityResult {
-        try reserve(callID: callID)
-        defer { complete(callID: callID) }
         guard let descriptor = visibleCatalog[capabilityID],
               descriptor.isAvailable(to: providerProfileID),
               let configuration = configurations[descriptor.serverID],
@@ -232,6 +226,15 @@ public actor CapabilityBroker {
             toolOverride: toolPolicies[capabilityID],
             readOnlyHint: descriptor.readOnlyHint
         )
+        guard let serverGate = serverGates[configuration.id] else {
+            throw CapabilityBrokerError.capabilityUnavailable
+        }
+
+        // Completed IDs are retained for this broker's lifetime so replay never
+        // becomes valid again. This intentionally trades linear identity memory
+        // for an unbounded process-lifetime call budget and exact replay safety.
+        try reserve(callID: callID)
+        defer { complete(callID: callID) }
         await emit(
             callID: callID, capabilityID: capabilityID,
             code: "tool_call_started", state: .started,
@@ -270,9 +273,6 @@ public actor CapabilityBroker {
             break
         }
 
-        guard let serverGate = serverGates[configuration.id] else {
-            throw CapabilityBrokerError.capabilityUnavailable
-        }
         var callLease: SessionLease?
         do {
             try await serverGate.acquire()
@@ -433,9 +433,6 @@ public actor CapabilityBroker {
         guard !activeCallIDs.contains(callID), !completedCallIDs.contains(callID) else {
             throw CapabilityBrokerError.duplicateCallID
         }
-        guard activeCallIDs.count + completedCallIDs.count
-                < Self.maximumRememberedCallIDs
-        else { throw CapabilityBrokerError.callIDCapacityExceeded }
         activeCallIDs.insert(callID)
     }
 

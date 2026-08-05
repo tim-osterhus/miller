@@ -111,7 +111,8 @@ actor BoundedStdioTransport: Transport {
                 }
             } else if count == 0 {
                 connected = false
-                continuation.finish()
+                failureHandler()
+                continuation.finish(throwing: MCPClientSessionError.connectionClosed)
                 return
             } else if errno == EAGAIN || errno == EWOULDBLOCK {
                 try? await Task.sleep(for: .milliseconds(2))
@@ -176,6 +177,8 @@ actor BoundedHTTPTransport: Transport {
     private let continuation: AsyncThrowingStream<Data, Error>.Continuation
     private var connected = false
     private var sessionID: String?
+    private var protocolVersion = Version.latest
+    private var initializeRequestID: String?
 
     init(
         endpoint: URL,
@@ -213,17 +216,18 @@ actor BoundedHTTPTransport: Transport {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.httpBody = data
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(
             "application/json, text/event-stream", forHTTPHeaderField: "Accept"
         )
-        request.setValue(Version.latest, forHTTPHeaderField: "MCP-Protocol-Version")
+        request.setValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
         if let sessionID {
             request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
         }
-        for (name, value) in headers {
-            request.setValue(value, forHTTPHeaderField: name)
-        }
+        observeOutbound(data)
 
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
@@ -262,12 +266,40 @@ actor BoundedHTTPTransport: Transport {
     func receive() -> AsyncThrowingStream<Data, Error> { messageStream }
 
     private func yield(_ data: Data) throws {
+        observeInbound(data)
         switch continuation.yield(data) {
         case .enqueued: return
         case .dropped: throw MCPClientSessionError.inboundTooLarge
         case .terminated: throw MCPClientSessionError.notConnected
         @unknown default: throw MCPClientSessionError.inboundTooLarge
         }
+    }
+
+    private func observeOutbound(_ data: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              object["method"] as? String == "initialize",
+              let id = Self.rpcID(object["id"])
+        else { return }
+        initializeRequestID = id
+    }
+
+    private func observeInbound(_ data: Data) {
+        guard let initializeRequestID,
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              Self.rpcID(object["id"]) == initializeRequestID,
+              let result = object["result"] as? [String: Any],
+              let version = result["protocolVersion"] as? String
+        else { return }
+        protocolVersion = version
+        self.initializeRequestID = nil
+    }
+
+    private static func rpcID(_ value: Any?) -> String? {
+        if let value = value as? String { return "s:\(value)" }
+        if let value = value as? NSNumber { return "n:\(value.stringValue)" }
+        return nil
     }
 }
 

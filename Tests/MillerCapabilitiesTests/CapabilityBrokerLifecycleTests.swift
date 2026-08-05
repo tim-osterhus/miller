@@ -143,26 +143,137 @@ struct CapabilityBrokerLifecycleTests {
     }
 
     @Test
-    func callIDMemoryCapFailsClosed() async throws {
+    func invalidCallsDoNotConsumeIdentityAndValidCallsHaveNoFiniteBudget() async throws {
+        let providerID = UUID()
+        let session = ControlledSession(tools: [Self.lookupTool])
         let broker = try CapabilityBroker(
-            configurations: [], approval: { _ in .allowOnce }, audit: { _ in }
+            configurations: [try Self.configuration(providerID: providerID)],
+            sessionFactory: { _ in session },
+            approval: { _ in .allowOnce }, audit: { _ in }
         )
+        _ = await broker.refresh()
         let missing = try CapabilityID(
             source: .millerMCP, serverID: "missing", toolName: "missing"
         )
-        for _ in 0..<CapabilityBroker.maximumRememberedCallIDs {
-            await #expect(throws: CapabilityBrokerError.capabilityUnavailable) {
+        let reusableID = CapabilityCallID()
+        for index in 0..<4_097 {
+            let expected: CapabilityBrokerError
+            let candidateCapability: CapabilityID
+            let candidateProvider: UUID
+            let candidateArguments: Data
+            switch index % 3 {
+            case 0:
+                expected = .capabilityUnavailable
+                candidateCapability = missing
+                candidateProvider = providerID
+                candidateArguments = Data("{}".utf8)
+            case 1:
+                expected = .capabilityUnavailable
+                candidateCapability = try Self.lookupID
+                candidateProvider = UUID()
+                candidateArguments = Data("{}".utf8)
+            default:
+                expected = .invalidArguments
+                candidateCapability = try Self.lookupID
+                candidateProvider = providerID
+                candidateArguments = Data("[]".utf8)
+            }
+            await #expect(throws: expected) {
                 try await broker.call(
-                    callID: CapabilityCallID(), capabilityID: missing,
-                    argumentsJSON: Data("{}".utf8), providerProfileID: UUID()
+                    callID: reusableID, capabilityID: candidateCapability,
+                    argumentsJSON: candidateArguments,
+                    providerProfileID: candidateProvider
                 )
             }
         }
-        await #expect(throws: CapabilityBrokerError.callIDCapacityExceeded) {
-            try await broker.call(
-                callID: CapabilityCallID(), capabilityID: missing,
-                argumentsJSON: Data("{}".utf8), providerProfileID: UUID()
+        _ = try await broker.call(
+            callID: reusableID, capabilityID: try Self.lookupID,
+            argumentsJSON: Data("{}".utf8), providerProfileID: providerID
+        )
+        for _ in 0..<4_097 {
+            _ = try await broker.call(
+                callID: CapabilityCallID(), capabilityID: try Self.lookupID,
+                argumentsJSON: Data("{}".utf8), providerProfileID: providerID
             )
+        }
+        #expect(await session.callCount == 4_098)
+    }
+
+    @Test
+    func stdioEOFDuringCallDiscardsLeaseAndReconnectsWithoutProcessLeak() async throws {
+        let fixtureURL = try #require(Bundle.module.url(
+            forResource: "eof-once-mcp-server", withExtension: "mjs",
+            subdirectory: "Fixtures"
+        ))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-mcp-eof-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sentinel = root.appendingPathComponent("sentinel")
+        let pidLog = root.appendingPathComponent("pids")
+        let sentinelReference = UUID()
+        let pidReference = UUID()
+        let providerID = UUID()
+        let configuration = try MCPServerConfiguration(
+            id: "notes", displayName: "Notes",
+            transport: .stdio(
+                executable: "/opt/homebrew/opt/node@22/bin/node",
+                arguments: [fixtureURL.path]
+            ),
+            secrets: [
+                try MCPSecretBinding(
+                    destination: .environment, name: "MILLER_MCP_EOF_SENTINEL",
+                    credentialReference: sentinelReference
+                ),
+                try MCPSecretBinding(
+                    destination: .environment, name: "MILLER_MCP_PID_LOG",
+                    credentialReference: pidReference
+                ),
+            ],
+            enabled: true, defaultPolicy: .fullyTrusted,
+            providerProfileIDs: [providerID],
+            bounds: MCPBounds(callTimeout: .seconds(2))
+        )
+        let connectionProbe = ConnectionCountProbe()
+        let broker = try CapabilityBroker(
+            configurations: [configuration],
+            sessionFactory: { configuration in
+                await connectionProbe.record()
+                return try await MCPClientSession.connect(
+                    configuration: configuration,
+                    credentialResolver: { reference in
+                        if reference == sentinelReference { return sentinel.path }
+                        if reference == pidReference { return pidLog.path }
+                        throw LifecycleTestFailure()
+                    }
+                )
+            },
+            approval: { _ in .allowOnce }, audit: { _ in }
+        )
+        _ = await broker.refresh()
+        let capabilityID = try Self.lookupID
+        let started = ContinuousClock.now
+        await #expect(throws: CapabilityBrokerError.callFailed) {
+            try await broker.call(
+                callID: CapabilityCallID(), capabilityID: capabilityID,
+                argumentsJSON: Data("{}".utf8), providerProfileID: providerID
+            )
+        }
+        #expect(started.duration(to: .now) < .seconds(1))
+        let firstPID = try #require(Self.recordedPIDs(at: pidLog).first)
+        try await eventually { !Self.processExists(firstPID) }
+
+        let result = try await broker.call(
+            callID: CapabilityCallID(), capabilityID: capabilityID,
+            argumentsJSON: Data("{}".utf8), providerProfileID: providerID
+        )
+        #expect(!result.isError)
+        #expect(await connectionProbe.count == 2)
+        await broker.disconnectAll()
+        for pid in Self.recordedPIDs(at: pidLog) {
+            try await eventually { !Self.processExists(pid) }
         }
     }
 
@@ -254,6 +365,19 @@ struct CapabilityBrokerLifecycleTests {
             enabled: true, defaultPolicy: .fullyTrusted,
             providerProfileIDs: [providerID]
         )
+    }
+
+    private static func recordedPIDs(at url: URL) -> [Int32] {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { return [] }
+        return text.split(separator: "\n").compactMap { Int32($0) }
+    }
+
+    private static func processExists(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
     }
 }
 
@@ -371,6 +495,11 @@ private actor DisconnectProbe {
         self.waiters.removeAll()
         for waiter in waiters { waiter.resume() }
     }
+}
+
+private actor ConnectionCountProbe {
+    private(set) var count = 0
+    func record() { count += 1 }
 }
 
 private func eventually(

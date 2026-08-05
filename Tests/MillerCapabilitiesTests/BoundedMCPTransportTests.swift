@@ -38,6 +38,34 @@ struct BoundedMCPTransportTests {
     }
 
     @Test
+    func unexpectedStdioEOFFailsInsteadOfFinishingNormally() async throws {
+        let input = Pipe()
+        let output = Pipe()
+        let failure = TransportFailureProbe()
+        let transport = BoundedStdioTransport(
+            inputDescriptor: input.fileHandleForReading.fileDescriptor,
+            outputDescriptor: output.fileHandleForWriting.fileDescriptor,
+            maximumInboundBytes: 64,
+            failureHandler: { failure.record() }
+        )
+        try await transport.connect()
+        let stream = await transport.receive()
+        let receive = Task {
+            var iterator = stream.makeAsyncIterator()
+            return try await iterator.next()
+        }
+
+        try input.fileHandleForWriting.close()
+        await #expect(throws: MCPClientSessionError.connectionClosed) {
+            _ = try await receive.value
+        }
+        #expect(failure.didFail)
+
+        await transport.disconnect()
+        try output.fileHandleForReading.close()
+    }
+
+    @Test
     func httpRejectsDeclaredAndStreamingBodiesAboveLimit() async throws {
         for plan in [
             HTTPFixturePlan(
@@ -96,6 +124,61 @@ struct BoundedMCPTransportTests {
         #expect(MCPHTTPClientFixtureURLProtocol.authorizationHeader
             == "Bearer fixture-token")
         await session.disconnect()
+    }
+
+    @Test
+    func boundedHTTPUsesNegotiatedProtocolVersionAfterInitialize() async throws {
+        MCPHTTPClientFixtureURLProtocol.reset(
+            negotiatedProtocolVersion: "2025-03-26"
+        )
+        let configuration = try MCPServerConfiguration(
+            id: "http-fixture", displayName: "HTTP Fixture",
+            transport: .http(endpoint: URL(string: "https://example.com/mcp")!),
+            enabled: true, providerProfileIDs: [UUID()]
+        )
+        let session = try await MCPClientSession.connect(
+            configuration: configuration,
+            credentialResolver: { _ in "unused" },
+            httpConfiguration: MCPHTTPTransportPolicy.ephemeralConfiguration(
+                protocolClasses: [MCPHTTPClientFixtureURLProtocol.self]
+            )
+        )
+
+        #expect(try await session.listTools().map(\.name) == ["lookup"])
+        #expect(MCPHTTPClientFixtureURLProtocol.postInitializeProtocolVersions
+            == ["2025-03-26", "2025-03-26"])
+        await session.disconnect()
+    }
+
+    @Test
+    func sseCombinesMultilineDataAndSeparatesMultipleEvents() async throws {
+        HTTPFixtureURLProtocol.setPlan(HTTPFixturePlan(
+            headers: ["Content-Type": "text/event-stream"],
+            chunks: [
+                Data("data: {\"jsonrpc\":\"2.0\",\n".utf8),
+                Data("data: \"id\":1}\n\n: ignored\n".utf8),
+                Data("data: {\"jsonrpc\":\"2.0\",\"id\":2}\n\n".utf8),
+            ]
+        ))
+        let transport = BoundedHTTPTransport(
+            endpoint: URL(string: "https://example.com/mcp")!,
+            headers: [:], maximumInboundBytes: 256,
+            configuration: MCPHTTPTransportPolicy.ephemeralConfiguration(
+                protocolClasses: [HTTPFixtureURLProtocol.self]
+            )
+        )
+        try await transport.connect()
+        let stream = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+
+        try await transport.send(Data(#"{"jsonrpc":"2.0"}"#.utf8))
+        let first = try #require(try await iterator.next())
+        let second = try #require(try await iterator.next())
+        #expect(String(decoding: first, as: UTF8.self)
+            == "{\"jsonrpc\":\"2.0\",\n\"id\":1}")
+        #expect(String(decoding: second, as: UTF8.self)
+            == "{\"jsonrpc\":\"2.0\",\"id\":2}")
+        await transport.disconnect()
     }
 
     @Test
@@ -249,6 +332,8 @@ private final class MCPHTTPClientFixtureURLProtocol: URLProtocol,
 {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var capturedAuthorization: String?
+    nonisolated(unsafe) private static var negotiatedProtocolVersion: String?
+    nonisolated(unsafe) private static var capturedPostInitializeVersions: [String] = []
 
     static var authorizationHeader: String? {
         lock.lock()
@@ -256,9 +341,17 @@ private final class MCPHTTPClientFixtureURLProtocol: URLProtocol,
         return capturedAuthorization
     }
 
-    static func reset() {
+    static var postInitializeProtocolVersions: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedPostInitializeVersions
+    }
+
+    static func reset(negotiatedProtocolVersion: String? = nil) {
         lock.lock()
         capturedAuthorization = nil
+        Self.negotiatedProtocolVersion = negotiatedProtocolVersion
+        capturedPostInitializeVersions = []
         lock.unlock()
     }
 
@@ -273,12 +366,26 @@ private final class MCPHTTPClientFixtureURLProtocol: URLProtocol,
             as? [String: Any]
         let method = object?["method"] as? String
         let id = object?["id"]
+        let requestVersion = request.value(
+            forHTTPHeaderField: "MCP-Protocol-Version"
+        )
+        Self.lock.lock()
+        let negotiatedVersion = Self.negotiatedProtocolVersion
+        if method != "initialize", let requestVersion {
+            Self.capturedPostInitializeVersions.append(requestVersion)
+        }
+        Self.lock.unlock()
+        let versionRejected = method != "initialize"
+            && negotiatedVersion != nil
+            && requestVersion != negotiatedVersion
         let result: [String: Any]?
         switch method {
         case "initialize":
             let parameters = object?["params"] as? [String: Any]
             result = [
-                "protocolVersion": parameters?["protocolVersion"] as? String ?? "2025-03-26",
+                "protocolVersion": negotiatedVersion
+                    ?? parameters?["protocolVersion"] as? String
+                    ?? "2025-03-26",
                 "capabilities": ["tools": [:]],
                 "serverInfo": ["name": "http-fixture", "version": "1"],
             ]
@@ -296,7 +403,8 @@ private final class MCPHTTPClientFixtureURLProtocol: URLProtocol,
         }
 
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: result == nil ? 202 : 200,
+            url: request.url!,
+            statusCode: versionRejected ? 400 : (result == nil ? 202 : 200),
             httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"]
         )!
