@@ -19,26 +19,26 @@ public struct MCPBounds: Hashable, Sendable {
     public let callTimeout: Duration
     public let maximumTools: Int
     public let maximumSchemaBytes: Int
+    public let maximumInboundBytes: Int
     public let maximumArgumentBytes: Int
     public let maximumResultBytes: Int
-    public let maximumStderrBytes: Int
 
     public init(
         startupTimeout: Duration = .seconds(10),
         callTimeout: Duration = .seconds(60),
         maximumTools: Int = 2_048,
         maximumSchemaBytes: Int = 64 * 1_024,
+        maximumInboundBytes: Int = 4 * 1_024 * 1_024,
         maximumArgumentBytes: Int = 64 * 1_024,
-        maximumResultBytes: Int = 256 * 1_024,
-        maximumStderrBytes: Int = 8 * 1_024
+        maximumResultBytes: Int = 256 * 1_024
     ) {
         self.startupTimeout = startupTimeout
         self.callTimeout = callTimeout
         self.maximumTools = maximumTools
         self.maximumSchemaBytes = maximumSchemaBytes
+        self.maximumInboundBytes = maximumInboundBytes
         self.maximumArgumentBytes = maximumArgumentBytes
         self.maximumResultBytes = maximumResultBytes
-        self.maximumStderrBytes = maximumStderrBytes
     }
 
     func validate() throws {
@@ -46,9 +46,9 @@ public struct MCPBounds: Hashable, Sendable {
               callTimeout > .zero, callTimeout <= .seconds(60),
               maximumTools > 0, maximumTools <= 2_048,
               maximumSchemaBytes > 0, maximumSchemaBytes <= 64 * 1_024,
+              maximumInboundBytes > 0, maximumInboundBytes <= 4 * 1_024 * 1_024,
               maximumArgumentBytes > 0, maximumArgumentBytes <= 64 * 1_024,
-              maximumResultBytes > 0, maximumResultBytes <= 256 * 1_024,
-              maximumStderrBytes > 0, maximumStderrBytes <= 8 * 1_024
+              maximumResultBytes > 0, maximumResultBytes <= 256 * 1_024
         else { throw MCPConfigurationError.invalidBounds }
     }
 }
@@ -217,7 +217,8 @@ public struct MCPServerConfiguration: Hashable, Codable, Sendable {
 extension MCPBounds: Codable {
     private enum CodingKeys: CodingKey {
         case startupTimeout, callTimeout, maximumTools, maximumSchemaBytes
-        case maximumArgumentBytes, maximumResultBytes, maximumStderrBytes
+        case maximumInboundBytes
+        case maximumArgumentBytes, maximumResultBytes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -229,14 +230,14 @@ extension MCPBounds: Codable {
             maximumSchemaBytes: try container.decode(
                 Int.self, forKey: .maximumSchemaBytes
             ),
+            maximumInboundBytes: try container.decode(
+                Int.self, forKey: .maximumInboundBytes
+            ),
             maximumArgumentBytes: try container.decode(
                 Int.self, forKey: .maximumArgumentBytes
             ),
             maximumResultBytes: try container.decode(
                 Int.self, forKey: .maximumResultBytes
-            ),
-            maximumStderrBytes: try container.decode(
-                Int.self, forKey: .maximumStderrBytes
             )
         )
         try validate()
@@ -248,8 +249,8 @@ extension MCPBounds: Codable {
         try container.encode(callTimeout, forKey: .callTimeout)
         try container.encode(maximumTools, forKey: .maximumTools)
         try container.encode(maximumSchemaBytes, forKey: .maximumSchemaBytes)
+        try container.encode(maximumInboundBytes, forKey: .maximumInboundBytes)
         try container.encode(maximumArgumentBytes, forKey: .maximumArgumentBytes)
         try container.encode(maximumResultBytes, forKey: .maximumResultBytes)
-        try container.encode(maximumStderrBytes, forKey: .maximumStderrBytes)
     }
 }

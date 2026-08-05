@@ -12,6 +12,8 @@ public enum MCPClientSessionError: Error, Equatable, Sendable {
     case tooManyTools
     case schemaTooLarge
     case invalidTool
+    case inboundTooLarge
+    case invalidSecret
     case processLaunchFailed
 }
 
@@ -79,6 +81,18 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         configuration: MCPServerConfiguration,
         credentialResolver: @escaping MCPCredentialResolver
     ) async throws -> MCPClientSession {
+        try await connect(
+            configuration: configuration,
+            credentialResolver: credentialResolver,
+            httpConfiguration: nil
+        )
+    }
+
+    static func connect(
+        configuration: MCPServerConfiguration,
+        credentialResolver: @escaping MCPCredentialResolver,
+        httpConfiguration: URLSessionConfiguration?
+    ) async throws -> MCPClientSession {
         let client = Client(
             name: "miller", version: "0.1.1", configuration: .strict
         )
@@ -93,8 +107,7 @@ public actor MCPClientSession: MCPClientSessionProtocol {
             let stdio = try StdioProcessResources(
                 executable: executable,
                 arguments: arguments,
-                environment: environment,
-                stderrLimit: configuration.bounds.maximumStderrBytes
+                environment: environment
             )
             do {
                 try stdio.run()
@@ -103,25 +116,22 @@ public actor MCPClientSession: MCPClientSessionProtocol {
                 throw MCPClientSessionError.processLaunchFailed
             }
             resources = stdio
-            transport = StdioTransport(
-                input: .init(rawValue: stdio.stdoutReadDescriptor),
-                output: .init(rawValue: stdio.stdinWriteDescriptor)
+            transport = BoundedStdioTransport(
+                inputDescriptor: stdio.stdoutReadDescriptor,
+                outputDescriptor: stdio.stdinWriteDescriptor,
+                maximumInboundBytes: configuration.bounds.maximumInboundBytes
             )
         case .http(let endpoint):
             let headers = try await resolvedHeaders(
                 configuration.secrets, resolver: credentialResolver
             )
             resources = nil
-            transport = HTTPClientTransport(
+            transport = BoundedHTTPTransport(
                 endpoint: endpoint,
-                sseInitializationTimeout: configuration.bounds.startupTimeout.timeInterval,
-                requestModifier: { request in
-                    var request = request
-                    for (name, value) in headers {
-                        request.setValue(value, forHTTPHeaderField: name)
-                    }
-                    return request
-                }
+                headers: headers,
+                maximumInboundBytes: configuration.bounds.maximumInboundBytes,
+                configuration: httpConfiguration
+                    ?? MCPHTTPTransportPolicy.ephemeralConfiguration()
             )
         }
 
@@ -237,7 +247,7 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         processResources?.terminate()
     }
 
-    private static func resolvedEnvironment(
+    static func resolvedEnvironment(
         _ bindings: [MCPSecretBinding],
         resolver: MCPCredentialResolver
     ) async throws -> [String: String] {
@@ -245,7 +255,9 @@ public actor MCPClientSession: MCPClientSessionProtocol {
             from: ProcessInfo.processInfo.environment
         )
         for binding in bindings where binding.destination == .environment {
-            environment[binding.name] = try await resolver(binding.credentialReference)
+            let value = try await resolver(binding.credentialReference)
+            try validateSecret(value, destination: .environment)
+            environment[binding.name] = value
         }
         return environment
     }
@@ -259,15 +271,31 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         })
     }
 
-    private static func resolvedHeaders(
+    static func resolvedHeaders(
         _ bindings: [MCPSecretBinding],
         resolver: MCPCredentialResolver
     ) async throws -> [String: String] {
         var headers: [String: String] = [:]
         for binding in bindings where binding.destination == .header {
-            headers[binding.name] = try await resolver(binding.credentialReference)
+            let value = try await resolver(binding.credentialReference)
+            try validateSecret(value, destination: .header)
+            headers[binding.name] = value
         }
         return headers
+    }
+
+    private static func validateSecret(
+        _ value: String,
+        destination: MCPSecretDestination
+    ) throws {
+        guard !value.isEmpty, value.utf8.count <= 16 * 1_024,
+              !value.contains("\0")
+        else { throw MCPClientSessionError.invalidSecret }
+        if destination == .header {
+            guard !value.unicodeScalars.contains(where: {
+                $0.value != 9 && !($0.value >= 32 && $0.value <= 126)
+            }) else { throw MCPClientSessionError.invalidSecret }
+        }
     }
 }
 
@@ -294,7 +322,6 @@ private final class StdioProcessResources: @unchecked Sendable {
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
-    private let stderrBuffer: BoundedByteBuffer
     private let lock = NSLock()
     private var didTerminate = false
 
@@ -308,20 +335,16 @@ private final class StdioProcessResources: @unchecked Sendable {
     init(
         executable: String,
         arguments: [String],
-        environment: [String: String],
-        stderrLimit: Int
+        environment: [String: String]
     ) throws {
-        stderrBuffer = BoundedByteBuffer(limit: stderrLimit)
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        let buffer = stderrBuffer
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty { buffer.append(data) }
+            _ = handle.availableData
         }
     }
 
@@ -350,27 +373,6 @@ private final class StdioProcessResources: @unchecked Sendable {
     }
 
     deinit { terminate() }
-}
-
-private final class BoundedByteBuffer: @unchecked Sendable {
-    private let limit: Int
-    private let lock = NSLock()
-    private var data = Data()
-    init(limit: Int) { self.limit = limit }
-    func append(_ incoming: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard data.count < limit else { return }
-        data.append(incoming.prefix(limit - data.count))
-    }
-}
-
-private extension Duration {
-    var timeInterval: TimeInterval {
-        let components = self.components
-        return TimeInterval(components.seconds)
-            + TimeInterval(components.attoseconds) / 1e18
-    }
 }
 
 func boundedAsync<T: Sendable>(

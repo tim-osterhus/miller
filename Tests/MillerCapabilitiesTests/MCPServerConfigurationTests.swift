@@ -70,9 +70,9 @@ struct MCPServerConfigurationTests {
         #expect(MCPBounds.standard.callTimeout == .seconds(60))
         #expect(MCPBounds.standard.maximumTools == 2_048)
         #expect(MCPBounds.standard.maximumSchemaBytes == 64 * 1_024)
+        #expect(MCPBounds.standard.maximumInboundBytes == 4 * 1_024 * 1_024)
         #expect(MCPBounds.standard.maximumArgumentBytes == 64 * 1_024)
         #expect(MCPBounds.standard.maximumResultBytes == 256 * 1_024)
-        #expect(MCPBounds.standard.maximumStderrBytes == 8 * 1_024)
     }
 
     @Test
@@ -97,6 +97,7 @@ struct MCPServerConfigurationTests {
             ),
             MCPBounds(startupTimeout: .zero),
             MCPBounds(callTimeout: .zero),
+            MCPBounds(maximumInboundBytes: 4 * 1_024 * 1_024 + 1),
         ] {
             #expect(throws: MCPConfigurationError.invalidBounds) {
                 try MCPServerConfiguration(
