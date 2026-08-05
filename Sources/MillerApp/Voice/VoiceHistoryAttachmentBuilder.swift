@@ -55,6 +55,9 @@ struct VoiceHistoryAttachmentBuilder {
     func build(
         from projection: VoiceHistoryAttachmentProjection
     ) throws -> PreparedVoiceHistoryAttachment {
+        guard projection.selectionIsValid else {
+            throw VoiceHistoryAttachmentBuilderError.selectedHistoryUnavailable
+        }
         guard !projection.sessionIDs.isEmpty else {
             throw VoiceHistoryAttachmentBuilderError.emptySelection
         }

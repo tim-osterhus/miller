@@ -7,6 +7,20 @@ import Testing
 @Suite
 struct VoiceHistoryAttachmentBuilderTests {
     @Test
+    func invalidProjectionCannotBeAttached() throws {
+        let projection = VoiceHistoryAttachmentProjection(
+            sessionIDs: [UUID()],
+            entries: [],
+            hasMore: false,
+            selectionIsValid: false
+        )
+
+        #expect(throws: VoiceHistoryAttachmentBuilderError.selectedHistoryUnavailable) {
+            try VoiceHistoryAttachmentBuilder().build(from: projection)
+        }
+    }
+
+    @Test
     func explicitSelectionIsChronologicalRoleLabeledAndXMLEscaped() throws {
         let laterID = UUID()
         let earlierID = UUID()

@@ -12,9 +12,14 @@ enum SQLiteValue: Equatable, Sendable {
 final class SQLiteDatabase {
     private var handle: OpaquePointer?
     private let path: String
+    private let statementObserver: ((String, Int) -> Void)?
 
-    init(path: String) throws {
+    init(
+        path: String,
+        statementObserver: ((String, Int) -> Void)? = nil
+    ) throws {
         self.path = path
+        self.statementObserver = statementObserver
         try reopen()
     }
 
@@ -108,6 +113,7 @@ final class SQLiteDatabase {
         _ sql: String,
         bindings: [SQLiteValue] = []
     ) throws -> [[SQLiteValue]] {
+        statementObserver?(sql, bindings.count)
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
@@ -130,6 +136,7 @@ final class SQLiteDatabase {
         bindings: [SQLiteValue] = [],
         _ consume: ([SQLiteValue]) throws -> Bool
     ) throws {
+        statementObserver?(sql, bindings.count)
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)

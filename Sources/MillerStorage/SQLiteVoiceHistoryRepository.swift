@@ -101,11 +101,18 @@ public struct VoiceHistoryAttachmentProjection: Equatable, Sendable {
     public let sessionIDs: [UUID]
     public let entries: [VoiceHistoryEntry]
     public let hasMore: Bool
+    public let selectionIsValid: Bool
 
-    public init(sessionIDs: [UUID], entries: [VoiceHistoryEntry], hasMore: Bool) {
+    public init(
+        sessionIDs: [UUID],
+        entries: [VoiceHistoryEntry],
+        hasMore: Bool,
+        selectionIsValid: Bool = true
+    ) {
         self.sessionIDs = sessionIDs
         self.entries = entries
         self.hasMore = hasMore
+        self.selectionIsValid = selectionIsValid
     }
 }
 
@@ -133,6 +140,14 @@ public actor SQLiteVoiceHistoryRepository {
     init(path: String, simulatedWriteFailure: SQLiteError) throws {
         database = try SQLiteDatabase(path: path)
         self.simulatedWriteFailure = simulatedWriteFailure
+    }
+
+    init(
+        path: String,
+        statementObserver: @escaping (String, Int) -> Void
+    ) throws {
+        database = try SQLiteDatabase(path: path, statementObserver: statementObserver)
+        simulatedWriteFailure = nil
     }
 
     public func startSession(
@@ -370,20 +385,19 @@ public actor SQLiteVoiceHistoryRepository {
         sessionIDs: [UUID],
         maximumContentBytes: Int
     ) throws -> VoiceHistoryAttachmentProjection {
-        let unique = Array(Set(sessionIDs))
+        let unique = Array(Set(sessionIDs)).sorted { Self.id($0) < Self.id($1) }
         guard !unique.isEmpty else {
             return .init(sessionIDs: [], entries: [], hasMore: false)
         }
-        let available = try sessions().filter { Set(unique).contains($0.id) }
-        let orderedIDs = available.map(\.id)
-        guard !orderedIDs.isEmpty else {
-            return .init(sessionIDs: [], entries: [], hasMore: false)
+        let encodedIDs = try JSONEncoder().encode(unique.map(Self.id))
+        guard let idsJSON = String(data: encodedIDs, encoding: .utf8) else {
+            throw VoiceHistoryRepositoryError.invalidEntry
         }
-        let placeholders = Array(repeating: "?", count: orderedIDs.count).joined(separator: ",")
         return try boundedAttachmentProjection(
-            sessionIDs: orderedIDs,
-            whereClause: "s.id IN (\(placeholders))",
-            bindings: orderedIDs.map { .text(Self.id($0)) },
+            explicitSessionIDs: unique,
+            selectionCTE: "requested(id) AS (SELECT value FROM json_each(?))",
+            sessionJoin: "JOIN requested r ON r.id = s.id",
+            bindings: [.text(idsJSON)],
             maximumContentBytes: maximumContentBytes
         )
     }
@@ -394,15 +408,13 @@ public actor SQLiteVoiceHistoryRepository {
         maximumContentBytes: Int
     ) throws -> VoiceHistoryAttachmentProjection {
         guard start <= end else { throw VoiceHistoryRepositoryError.invalidRange }
-        let selected = try sessions(from: start, through: end)
-        guard !selected.isEmpty else {
-            return .init(sessionIDs: [], entries: [], hasMore: false)
-        }
         return try boundedAttachmentProjection(
-            sessionIDs: selected.map(\.id),
-            whereClause: "s.started_at >= ? AND s.started_at <= ?",
+            explicitSessionIDs: nil,
+            selectionCTE: "requested(id) AS (SELECT NULL WHERE 0)",
+            sessionJoin: "",
             bindings: [.text(Self.timestamp(start)), .text(Self.timestamp(end))],
-            maximumContentBytes: maximumContentBytes
+            maximumContentBytes: maximumContentBytes,
+            rangePredicate: "s.started_at >= ? AND s.started_at <= ?"
         )
     }
 
@@ -457,26 +469,68 @@ public actor SQLiteVoiceHistoryRepository {
     }
 
     private func boundedAttachmentProjection(
-        sessionIDs: [UUID],
-        whereClause: String,
+        explicitSessionIDs: [UUID]?,
+        selectionCTE: String,
+        sessionJoin: String,
         bindings: [SQLiteValue],
-        maximumContentBytes: Int
+        maximumContentBytes: Int,
+        rangePredicate: String = "1 = 1"
     ) throws -> VoiceHistoryAttachmentProjection {
         var entries: [VoiceHistoryEntry] = []
+        var encounteredSessionIDs: [UUID] = []
+        var encountered = Set<UUID>()
         var bytes = 0
         var hasMore = false
+        var selectionIsValid = true
+        let maximumRows = max(2, maximumContentBytes / Self.minimumSerializedLineBytes + 1)
         try database.scan(
             """
-            SELECT e.id, e.session_id, e.sequence, e.role, e.text,
+            /* voice_history_attachment_projection */
+            WITH \(selectionCTE),
+            selected_sessions AS (
+                SELECT s.id, s.started_at
+                FROM voice_sessions s
+                \(sessionJoin)
+                WHERE s.save_choice = 'save' AND \(rangePredicate)
+            ),
+            selection_counts AS (
+                SELECT
+                    (SELECT COUNT(*) FROM requested) AS requested_count,
+                    (SELECT COUNT(*) FROM selected_sessions) AS matched_count
+            ),
+            selected_entries AS (
+                SELECT s.id AS selected_session_id,
+                       s.started_at AS session_started_at,
+                       e.id, e.session_id, e.sequence, e.role, e.text,
+                       e.completion_state, e.started_at, e.completed_at
+                FROM selected_sessions s
+                JOIN voice_entries e ON e.session_id = s.id
+            )
+            SELECT c.requested_count, c.matched_count, e.selected_session_id,
+                   e.id, e.session_id, e.sequence, e.role, e.text,
                    e.completion_state, e.started_at, e.completed_at
-            FROM voice_entries e
-            JOIN voice_sessions s ON s.id = e.session_id
-            WHERE \(whereClause)
-            ORDER BY e.started_at ASC, s.started_at ASC, e.sequence ASC, e.id ASC
+            FROM selection_counts c
+            LEFT JOIN selected_entries e ON 1 = 1
+            ORDER BY e.started_at ASC, e.session_started_at ASC,
+                     e.sequence ASC, e.id ASC, e.selected_session_id ASC
+            LIMIT ?
             """,
-            bindings: bindings
+            bindings: bindings + [.integer(Int64(maximumRows))]
         ) { row in
-            let entry = try Self.decodeEntry(row)
+            guard row.count == 11,
+                  case let .integer(requestedCount) = row[0],
+                  case let .integer(matchedCount) = row[1]
+            else { throw VoiceHistoryRepositoryError.malformedRecord }
+            selectionIsValid = requestedCount == 0 || requestedCount == matchedCount
+            if let sessionID = Self.uuid(row[2]), encountered.insert(sessionID).inserted {
+                encounteredSessionIDs.append(sessionID)
+            }
+            guard row[3] != .null else { return true }
+            let entry = try Self.decodeEntry(Array(row[3...10]))
+            if entries.count == maximumRows - 1 {
+                hasMore = true
+                return false
+            }
             if !entries.isEmpty, bytes >= maximumContentBytes {
                 hasMore = true
                 return false
@@ -485,7 +539,13 @@ public actor SQLiteVoiceHistoryRepository {
             bytes += entry.text.utf8.count
             return true
         }
-        return .init(sessionIDs: sessionIDs, entries: entries, hasMore: hasMore)
+        let sessionIDs = explicitSessionIDs ?? encounteredSessionIDs
+        return .init(
+            sessionIDs: sessionIDs,
+            entries: entries,
+            hasMore: hasMore,
+            selectionIsValid: selectionIsValid
+        )
     }
 
     private static func validateEntry(
@@ -618,4 +678,6 @@ public actor SQLiteVoiceHistoryRepository {
                started_at, completed_at
         FROM voice_entries
         """
+
+    private static let minimumSerializedLineBytes = 29
 }

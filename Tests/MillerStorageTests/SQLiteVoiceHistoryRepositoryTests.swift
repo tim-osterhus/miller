@@ -32,10 +32,125 @@ struct SQLiteVoiceHistoryRepositoryTests {
             sessionIDs: [second, first], maximumContentBytes: 10
         )
 
-        #expect(projection.sessionIDs == [first, second])
-        #expect(projection.entries.map(\.text) == ["aaaaaaaa", "bbbbbbbb"])
-        #expect(projection.entries.reduce(0) { $0 + $1.text.utf8.count } == 16)
+        #expect(
+            projection.sessionIDs
+                == [first, second].sorted { $0.uuidString < $1.uuidString }
+        )
+        #expect(projection.entries.map(\.text) == ["aaaaaaaa"])
         #expect(projection.hasMore)
+    }
+
+    @Test
+    func attachmentProjectionUsesOneBoundedSelectForLargeExplicitAndDateSelections() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let database = try SQLiteDatabase(path: fixture.path)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let base = Date(timeIntervalSince1970: 10_000)
+        let sessionIDs = (0..<1_500).map { _ in UUID() }
+        try database.transaction {
+            for (index, sessionID) in sessionIDs.enumerated().reversed() {
+                let startedAt = formatter.string(
+                    from: base.addingTimeInterval(Double(index))
+                )
+                try database.execute(
+                    """
+                    INSERT INTO voice_sessions
+                        (id, conversation_id, activation_source, started_at,
+                         ended_at, terminal_outcome, save_choice)
+                    VALUES (?, NULL, 'manual', ?, NULL, NULL, 'save')
+                    """,
+                    bindings: [
+                        .text(sessionID.uuidString.lowercased()),
+                        .text(startedAt),
+                    ]
+                )
+                try database.execute(
+                    """
+                    INSERT INTO voice_entries
+                        (id, session_id, sequence, role, text, completion_state,
+                         started_at, completed_at)
+                    VALUES (?, ?, 0, 'user', '', 'complete', ?, ?)
+                    """,
+                    bindings: [
+                        .text(UUID().uuidString.lowercased()),
+                        .text(sessionID.uuidString.lowercased()),
+                        .text(startedAt),
+                        .text(startedAt),
+                    ]
+                )
+            }
+        }
+        database.close()
+
+        let probe = SQLiteStatementProbe()
+        let repository = try SQLiteVoiceHistoryRepository(
+            path: fixture.path,
+            statementObserver: { sql, bindingCount in
+                probe.record(sql: sql, bindingCount: bindingCount)
+            }
+        )
+
+        let explicitStart = probe.count
+        let explicit = try await repository.attachmentProjection(
+            sessionIDs: Array(sessionIDs.reversed()),
+            maximumContentBytes: 32 * 1_024
+        )
+        let explicitStatements = probe.records(since: explicitStart)
+
+        #expect(explicitStatements.count == 1)
+        #expect(explicitStatements.first?.sql.contains("voice_history_attachment_projection") == true)
+        #expect(explicitStatements.first?.sql.contains("json_each(?)") == true)
+        #expect(explicitStatements.first?.bindingCount == 2)
+        #expect(explicit.selectionIsValid)
+        #expect(explicit.sessionIDs.count == sessionIDs.count)
+        #expect(explicit.entries.count == (32 * 1_024) / 29)
+        #expect(explicit.hasMore)
+        #expect(zip(explicit.entries, explicit.entries.dropFirst()).allSatisfy {
+            $0.0.startedAt <= $0.1.startedAt
+        })
+
+        let rangeStart = probe.count
+        let range = try await repository.attachmentProjection(
+            from: base.addingTimeInterval(-1),
+            through: base.addingTimeInterval(2_000),
+            maximumContentBytes: 32 * 1_024
+        )
+        let rangeStatements = probe.records(since: rangeStart)
+
+        #expect(rangeStatements.count == 1)
+        #expect(rangeStatements.first?.sql.contains("voice_history_attachment_projection") == true)
+        #expect(rangeStatements.first?.bindingCount == 3)
+        #expect(range.selectionIsValid)
+        #expect(range.entries.count == (32 * 1_024) / 29)
+        #expect(range.hasMore)
+    }
+
+    @Test
+    func explicitAttachmentProjectionRejectsMissingOrDiscardedSessionsInSameSelect() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteVoiceHistoryRepository(path: fixture.path)
+        let saved = UUID()
+        let discarded = UUID()
+        let missing = UUID()
+        for (sessionID, saveChoice) in [
+            (saved, VoiceTranscriptSaveChoice.save),
+            (discarded, VoiceTranscriptSaveChoice.discard),
+        ] {
+            try await repository.startSession(
+                id: sessionID, conversationID: nil, activationSource: .manual,
+                saveChoice: saveChoice
+            )
+        }
+
+        let projection = try await repository.attachmentProjection(
+            sessionIDs: [saved, discarded, missing],
+            maximumContentBytes: 32 * 1_024
+        )
+
+        #expect(!projection.selectionIsValid)
+        #expect(Set(projection.sessionIDs) == Set([saved, discarded, missing]))
+        #expect(projection.sessionIDs.count == 3)
     }
 
     @Test
@@ -317,5 +432,33 @@ struct SQLiteVoiceHistoryRepositoryTests {
             try await repository.session(id: sessionID)?.terminalOutcome
                 == .completed
         )
+    }
+}
+
+private final class SQLiteStatementProbe: @unchecked Sendable {
+    struct Record {
+        let sql: String
+        let bindingCount: Int
+    }
+
+    private let lock = NSLock()
+    private var storage: [Record] = []
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.count
+    }
+
+    func record(sql: String, bindingCount: Int) {
+        lock.lock()
+        storage.append(.init(sql: sql, bindingCount: bindingCount))
+        lock.unlock()
+    }
+
+    func records(since index: Int) -> [Record] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(storage.dropFirst(index))
     }
 }

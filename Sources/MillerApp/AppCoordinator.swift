@@ -1013,7 +1013,9 @@ final class AppPresentationModel: ObservableObject {
         let projection = try await voiceHistory.attachmentProjection(
             unique, VoiceHistoryAttachmentBuilder.maximumBytes
         )
-        guard Set(projection.sessionIDs) == Set(unique) else {
+        guard projection.selectionIsValid,
+              Set(projection.sessionIDs) == Set(unique)
+        else {
             throw VoiceHistoryAttachmentBuilderError.selectedHistoryUnavailable
         }
         return try voiceHistoryAttachmentBuilder.build(from: projection)
