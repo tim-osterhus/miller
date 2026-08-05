@@ -182,6 +182,92 @@ struct LiveVoiceTranscriptRecorderTests {
         #expect(await probe.sessions.count == 1)
     }
 
+    @Test
+    func concurrentBeginsPersistExactlyOneSession() async throws {
+        let probe = SuspendedAdmissionProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = Task {
+            try await recorder.begin(
+                sessionID: firstID,
+                conversationID: nil,
+                activationSource: .manual
+            )
+        }
+        await probe.waitUntilFirstStartIsSuspended()
+
+        await #expect(throws: LiveVoiceTranscriptRecorderError.sessionAlreadyActive) {
+            try await recorder.begin(
+                sessionID: secondID,
+                conversationID: nil,
+                activationSource: .manual
+            )
+        }
+        await probe.resumeFirstStart()
+        try await first.value
+
+        #expect(await probe.persistedSessionIDs == [firstID])
+        try await recorder.finish(outcome: .completed)
+    }
+
+    @Test
+    func failedBeginReleasesAdmissionForRetry() async throws {
+        let probe = RecorderPersistenceProbe(startFailures: 1)
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+
+        await #expect(throws: RecorderProbeError.startFailed) {
+            try await recorder.begin(
+                sessionID: UUID(),
+                conversationID: nil,
+                activationSource: .manual
+            )
+        }
+        let retryID = UUID()
+        try await recorder.begin(
+            sessionID: retryID,
+            conversationID: nil,
+            activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+
+        #expect(await probe.sessions.map(\.id) == [retryID])
+    }
+
+    @Test
+    func cancelledBeginReleasesAdmissionForRetry() async throws {
+        let probe = CancelledAdmissionProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let first = Task {
+            try await recorder.begin(
+                sessionID: UUID(),
+                conversationID: nil,
+                activationSource: .manual
+            )
+        }
+        await probe.waitUntilFirstReadIsSuspended()
+
+        first.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await first.value
+        }
+        let retryID = UUID()
+        try await recorder.begin(
+            sessionID: retryID,
+            conversationID: nil,
+            activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+
+        #expect(await probe.persistedSessionIDs == [retryID])
+    }
+
     @Test @MainActor
     func presentationStartsPersistenceOnlyAfterSessionAdmission() async throws {
         let probe = RecorderPersistenceProbe()
@@ -265,15 +351,21 @@ private actor RecorderPersistenceProbe {
 
     private let savingEnabled: Bool
     private var nextSessionSavingEnabled: Bool
+    private var remainingStartFailures: Int
     private(set) var sessions: [Session] = []
     private(set) var entries: [Entry] = []
     private(set) var terminalOutcomes: [VoiceSessionTerminalOutcome] = []
     private(set) var nextSessionResetCount = 0
     private(set) var completedEntryCount = 0
 
-    init(savingEnabled: Bool = true, nextSessionSavingEnabled: Bool = true) {
+    init(
+        savingEnabled: Bool = true,
+        nextSessionSavingEnabled: Bool = true,
+        startFailures: Int = 0
+    ) {
         self.savingEnabled = savingEnabled
         self.nextSessionSavingEnabled = nextSessionSavingEnabled
+        remainingStartFailures = startFailures
     }
 
     func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
@@ -283,7 +375,7 @@ private actor RecorderPersistenceProbe {
             restoreNextSessionSavingDefault: { [self] in await recordNextReset() },
             startSession: {
                 [self] id, conversationID, activationSource, saveChoice in
-                await recordSession(
+                try await recordSession(
                     id: id,
                     conversationID: conversationID,
                     activationSource: activationSource,
@@ -323,7 +415,11 @@ private actor RecorderPersistenceProbe {
         conversationID: ConversationID?,
         activationSource: VoiceActivationSource,
         saveChoice: VoiceTranscriptSaveChoice
-    ) {
+    ) throws {
+        if remainingStartFailures > 0 {
+            remainingStartFailures -= 1
+            throw RecorderProbeError.startFailed
+        }
         sessions.append(.init(
             id: id,
             conversationID: conversationID,
@@ -368,5 +464,89 @@ private actor RecorderPersistenceProbe {
 
     private func recordTerminal(_ outcome: VoiceSessionTerminalOutcome) {
         terminalOutcomes.append(outcome)
+    }
+}
+
+private enum RecorderProbeError: Error {
+    case startFailed
+}
+
+private actor SuspendedAdmissionProbe {
+    private var firstStartContinuation: CheckedContinuation<Void, Never>?
+    private var startAttempts = 0
+    private(set) var persistedSessionIDs: [UUID] = []
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { [self] id, _, _, _ in
+                await persistSession(id)
+            },
+            appendEntry: { _, _, _, _, _, _ in },
+            completeEntry: { _, _ in },
+            finalizeSession: { _, _ in },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func waitUntilFirstStartIsSuspended() async {
+        while firstStartContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func resumeFirstStart() {
+        firstStartContinuation?.resume()
+        firstStartContinuation = nil
+    }
+
+    private func persistSession(_ id: UUID) async {
+        startAttempts += 1
+        if startAttempts == 1 {
+            await withCheckedContinuation { continuation in
+                firstStartContinuation = continuation
+            }
+        }
+        persistedSessionIDs.append(id)
+    }
+}
+
+private actor CancelledAdmissionProbe {
+    private var savingEnabledReads = 0
+    private(set) var persistedSessionIDs: [UUID] = []
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { [self] in try await readSavingEnabled() },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { [self] id, _, _, _ in
+                await persistSession(id)
+            },
+            appendEntry: { _, _, _, _, _, _ in },
+            completeEntry: { _, _ in },
+            finalizeSession: { _, _ in },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func waitUntilFirstReadIsSuspended() async {
+        while savingEnabledReads == 0 {
+            await Task.yield()
+        }
+    }
+
+    private func readSavingEnabled() async throws -> Bool {
+        savingEnabledReads += 1
+        if savingEnabledReads == 1 {
+            try await Task.sleep(for: .seconds(60))
+        }
+        return true
+    }
+
+    private func persistSession(_ id: UUID) {
+        persistedSessionIDs.append(id)
     }
 }

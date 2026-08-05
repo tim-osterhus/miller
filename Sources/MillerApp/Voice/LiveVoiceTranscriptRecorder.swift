@@ -164,6 +164,7 @@ actor LiveVoiceTranscriptRecorder {
     private static let maximumEntryBytes = 64 * 1_024
 
     private let persistence: Persistence
+    private var admissionPending = false
     private var activeSession: ActiveSession?
 
     init(persistence: Persistence = .disabled) {
@@ -175,13 +176,19 @@ actor LiveVoiceTranscriptRecorder {
         conversationID: ConversationID?,
         activationSource: VoiceActivationSource
     ) async throws {
-        guard activeSession == nil else {
+        guard activeSession == nil, !admissionPending else {
             throw LiveVoiceTranscriptRecorderError.sessionAlreadyActive
         }
+        admissionPending = true
+        defer { admissionPending = false }
+        try Task.checkCancellation()
         let globallyEnabled = try await persistence.savingEnabled()
+        try Task.checkCancellation()
         let nextSessionEnabled = try await persistence.nextSessionSavingEnabled()
+        try Task.checkCancellation()
         if !nextSessionEnabled {
             try await persistence.restoreNextSessionSavingDefault()
+            try Task.checkCancellation()
         }
         let saveChoice: VoiceTranscriptSaveChoice =
             globallyEnabled && nextSessionEnabled ? .save : .discard
