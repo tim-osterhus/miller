@@ -14,19 +14,22 @@ struct LiveTranscriptProjection {
 
     private(set) var turns: [LiveTranscriptTurn] = []
     private var nextID = 0
-    private var lastCompletion: [LiveTranscriptRole: String] = [:]
+    private var lastCompletedRole: LiveTranscriptRole?
+    private var lastCompletedText: String?
 
     mutating func reset() {
         turns = []
         nextID = 0
-        lastCompletion = [:]
+        lastCompletedRole = nil
+        lastCompletedText = nil
     }
 
     mutating func record(_ event: LiveVoiceEvent) {
         switch event {
         case let .transcriptDelta(role, text):
             guard !text.isEmpty else { return }
-            lastCompletion[role] = nil
+            lastCompletedRole = nil
+            lastCompletedText = nil
             if let index = activeTurnIndex(for: role) {
                 turns[index].text = Self.bounded(
                     turns[index].text + text,
@@ -37,12 +40,14 @@ struct LiveTranscriptProjection {
             }
         case let .transcriptDone(role, text):
             if activeTurnIndex(for: role) == nil,
-               lastCompletion[role] == text {
+               lastCompletedRole == role,
+               lastCompletedText == text {
                 return
             }
             if let index = activeTurnIndex(for: role) {
+                let completedText = text.isEmpty ? turns[index].text : text
                 turns[index].text = Self.bounded(
-                    text,
+                    completedText,
                     maximumBytes: availableBytes(excluding: index)
                 )
                 if turns[index].text.isEmpty {
@@ -53,7 +58,8 @@ struct LiveTranscriptProjection {
             } else {
                 appendTurn(role: role, text: text, isComplete: true)
             }
-            lastCompletion[role] = text
+            lastCompletedRole = role
+            lastCompletedText = text
         case .sessionAdmitted, .state, .failed:
             break
         }
@@ -158,7 +164,13 @@ actor LiveVoiceTranscriptRecorder {
         let saveChoice: VoiceTranscriptSaveChoice
         var nextSequence = 0
         var pending: [LiveTranscriptRole: PendingEntry] = [:]
-        var lastCompletion: [LiveTranscriptRole: String] = [:]
+        var lastCompletedRole: LiveTranscriptRole?
+        var lastCompletedText: String?
+    }
+
+    private struct OperationWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
     }
 
     private static let maximumEntryBytes = 64 * 1_024
@@ -166,6 +178,8 @@ actor LiveVoiceTranscriptRecorder {
     private let persistence: Persistence
     private var admissionPending = false
     private var activeSession: ActiveSession?
+    private var operationInProgress = false
+    private var operationWaiters: [OperationWaiter] = []
 
     init(persistence: Persistence = .disabled) {
         self.persistence = persistence
@@ -181,6 +195,8 @@ actor LiveVoiceTranscriptRecorder {
         }
         admissionPending = true
         defer { admissionPending = false }
+        try await acquireOperation()
+        defer { releaseOperation() }
         try Task.checkCancellation()
         let globallyEnabled = try await persistence.savingEnabled()
         try Task.checkCancellation()
@@ -202,11 +218,15 @@ actor LiveVoiceTranscriptRecorder {
     }
 
     func record(_ event: LiveVoiceEvent) async throws {
+        try await acquireOperation()
+        defer { releaseOperation() }
+        try Task.checkCancellation()
         guard var active = activeSession else { return }
         switch event {
         case let .transcriptDelta(role, text):
             guard active.saveChoice == .save, !text.isEmpty else { return }
-            active.lastCompletion[role] = nil
+            active.lastCompletedRole = nil
+            active.lastCompletedText = nil
             if var pending = active.pending[role] {
                 pending.text = Self.bounded(pending.text + text)
                 active.pending[role] = pending
@@ -223,11 +243,17 @@ actor LiveVoiceTranscriptRecorder {
         case let .transcriptDone(role, text):
             guard active.saveChoice == .save else { return }
             if active.pending[role] == nil,
-               active.lastCompletion[role] == text {
+               active.lastCompletedRole == role,
+               active.lastCompletedText == text {
                 return
             }
             let pending = active.pending.removeValue(forKey: role)
-            let finalText = Self.bounded(text)
+            let finalText = Self.bounded(
+                text.isEmpty ? pending?.text ?? "" : text
+            )
+            active.lastCompletedRole = role
+            active.lastCompletedText = text
+            activeSession = active
             if !finalText.isEmpty {
                 let id = pending?.id ?? UUID()
                 let sequence = pending?.sequence ?? active.nextSequence
@@ -242,14 +268,15 @@ actor LiveVoiceTranscriptRecorder {
                 )
                 try await persistence.completeEntry(id, finalText)
             }
-            active.lastCompletion[role] = text
-            activeSession = active
         case .sessionAdmitted, .state, .failed:
             break
         }
     }
 
     func finish(outcome: VoiceSessionTerminalOutcome) async throws {
+        try await acquireOperation()
+        defer { releaseOperation() }
+        try Task.checkCancellation()
         guard let active = activeSession else { return }
         defer { activeSession = nil }
         if active.saveChoice == .save {
@@ -289,5 +316,47 @@ actor LiveVoiceTranscriptRecorder {
             byteCount += count
         }
         return result
+    }
+
+    private func acquireOperation() async throws {
+        try Task.checkCancellation()
+        guard operationInProgress else {
+            operationInProgress = true
+            return
+        }
+        let id = UUID()
+        let acquired = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    operationWaiters.append(.init(
+                        id: id,
+                        continuation: continuation
+                    ))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelOperationWaiter(id: id) }
+        }
+        guard acquired else { throw CancellationError() }
+        if Task.isCancelled {
+            releaseOperation()
+            throw CancellationError()
+        }
+    }
+
+    private func cancelOperationWaiter(id: UUID) {
+        guard let index = operationWaiters.firstIndex(where: { $0.id == id })
+        else { return }
+        operationWaiters.remove(at: index).continuation.resume(returning: false)
+    }
+
+    private func releaseOperation() {
+        guard !operationWaiters.isEmpty else {
+            operationInProgress = false
+            return
+        }
+        operationWaiters.removeFirst().continuation.resume(returning: true)
     }
 }

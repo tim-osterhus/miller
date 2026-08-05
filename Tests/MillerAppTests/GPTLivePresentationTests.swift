@@ -58,6 +58,57 @@ struct GPTLivePresentationTests {
         #expect(model.voiceStatusText == "Transcript could not be saved")
     }
 
+    @Test(arguments: TranscriptPersistenceFailureStage.allCases)
+    func transcriptWriteFailuresRemainTruthfulAndMediaSafe(
+        stage: TranscriptPersistenceFailureStage
+    ) async {
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: { true },
+                nextSessionSavingEnabled: { true },
+                restoreNextSessionSavingDefault: {},
+                startSession: { _, _, _, _ in },
+                appendEntry: { _, _, _, _, _, _ in
+                    if stage == .append {
+                        throw SyntheticTranscriptPersistenceError.failed
+                    }
+                },
+                completeEntry: { _, _ in
+                    if stage == .complete {
+                        throw SyntheticTranscriptPersistenceError.failed
+                    }
+                },
+                finalizeSession: { _, _ in
+                    if stage == .finalize {
+                        throw SyntheticTranscriptPersistenceError.failed
+                    }
+                },
+                recoverInterruptedSessions: {}
+            )
+        )
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: .unavailable,
+            liveTranscriptRecorder: recorder
+        )
+        await model.applyLiveEvent(.sessionAdmitted(id: UUID()))
+        await model.applyLiveEvent(.state(.listening))
+
+        switch stage {
+        case .append, .complete:
+            await model.applyLiveEvent(
+                .transcriptDone(role: .assistant, text: "auditable response")
+            )
+            #expect(model.voiceState == .listening)
+            await model.abandonLiveVoiceSession()
+            #expect(model.voiceState == .closed)
+        case .finalize:
+            await model.abandonLiveVoiceSession()
+            #expect(model.voiceState == .closed)
+        }
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+    }
+
     @Test
     func ordinaryModeRemainsTextOnlyAndVoiceUnavailable() {
         let model = AppPresentationModel(
@@ -2049,6 +2100,12 @@ struct GPTLivePresentationTests {
 
 private enum SyntheticTranscriptPersistenceError: Error {
     case failed
+}
+
+enum TranscriptPersistenceFailureStage: CaseIterable, Sendable {
+    case append
+    case complete
+    case finalize
 }
 
 private enum StartupStopAction {

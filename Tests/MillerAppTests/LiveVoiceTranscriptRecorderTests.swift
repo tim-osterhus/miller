@@ -115,8 +115,74 @@ struct LiveVoiceTranscriptRecorderTests {
         try await recorder.record(.transcriptDone(role: .assistant, text: "answer"))
         try await recorder.finish(outcome: .completed)
 
+        var projection = LiveTranscriptProjection()
+        projection.record(.transcriptDone(role: .assistant, text: "answer"))
+        projection.record(.transcriptDone(role: .assistant, text: "answer"))
+
         #expect(await probe.entries.count == 1)
         #expect(await probe.entries.first?.text == "answer")
+        #expect(projection.turns.map(\.text) == ["answer"])
+    }
+
+    @Test
+    func identicalTurnsSeparatedByTheOtherRoleRemainDistinct() async throws {
+        let probe = RecorderPersistenceProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        var projection = LiveTranscriptProjection()
+        let events: [LiveVoiceEvent] = [
+            .transcriptDone(role: .user, text: "Yes"),
+            .transcriptDone(role: .assistant, text: "Understood"),
+            .transcriptDone(role: .user, text: "Yes"),
+            .transcriptDone(role: .assistant, text: "Repeated answer"),
+            .transcriptDone(role: .user, text: "Again"),
+            .transcriptDone(role: .assistant, text: "Repeated answer"),
+        ]
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+
+        for event in events {
+            projection.record(event)
+            try await recorder.record(event)
+        }
+        try await recorder.finish(outcome: .completed)
+
+        let expected = [
+            "Yes", "Understood", "Yes", "Repeated answer", "Again",
+            "Repeated answer",
+        ]
+        #expect(await probe.entries.map(\.text) == expected)
+        #expect(projection.turns.map(\.text) == expected)
+    }
+
+    @Test
+    func emptyCompletionRetainsCapturedPartialText() async throws {
+        let probe = RecorderPersistenceProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        var projection = LiveTranscriptProjection()
+        let delta = LiveVoiceEvent.transcriptDelta(
+            role: .user,
+            text: "captured partial"
+        )
+        let completion = LiveVoiceEvent.transcriptDone(role: .user, text: "")
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+
+        projection.record(delta)
+        try await recorder.record(delta)
+        projection.record(completion)
+        try await recorder.record(completion)
+        try await recorder.finish(outcome: .completed)
+
+        #expect(await probe.entries.map(\.text) == ["captured partial"])
+        #expect(await probe.entries.map(\.completionState) == [.complete])
+        #expect(projection.turns.map(\.text) == ["captured partial"])
+        #expect(projection.turns.map(\.isComplete) == [true])
     }
 
     @Test(arguments: [VoiceSessionTerminalOutcome.stopped, .failed])
@@ -266,6 +332,97 @@ struct LiveVoiceTranscriptRecorderTests {
         try await recorder.finish(outcome: .completed)
 
         #expect(await probe.persistedSessionIDs == [retryID])
+    }
+
+    @Test
+    func finishWaitsForSuspendedRecordWithoutResurrectingTheSession() async throws {
+        let probe = SuspendedWriteProbe(suspend: [.append, .complete])
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        let record = Task {
+            try await recorder.record(.transcriptDone(role: .user, text: "saved"))
+        }
+        await probe.waitUntilSuspended(.append)
+        let finish = Task {
+            try await recorder.finish(outcome: .completed)
+        }
+
+        #expect(await probe.finalizeCallCount == 0)
+        await probe.resume(.append)
+        await probe.waitUntilSuspended(.complete)
+        #expect(await probe.finalizeCallCount == 0)
+        await probe.resume(.complete)
+        try await record.value
+        try await finish.value
+
+        #expect(await probe.finalizeCallCount == 1)
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+    }
+
+    @Test
+    func concurrentFinishesAdmitExactlyOneTerminalCleanup() async throws {
+        let probe = SuspendedWriteProbe(suspend: [.finalize])
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        let first = Task {
+            try await recorder.finish(outcome: .completed)
+        }
+        await probe.waitUntilSuspended(.finalize)
+        let second = Task {
+            try await recorder.finish(outcome: .failed)
+        }
+
+        #expect(await probe.finalizeCallCount == 1)
+        await probe.resume(.finalize)
+        try await first.value
+        try await second.value
+
+        #expect(await probe.finalizeCallCount == 1)
+        #expect(await probe.finalizedOutcomes == [.completed])
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+    }
+
+    @Test
+    func cancelledWaitingCleanupDoesNotBlockLaterCleanup() async throws {
+        let probe = SuspendedWriteProbe(suspend: [.append])
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        let record = Task {
+            try await recorder.record(.transcriptDone(role: .user, text: "saved"))
+        }
+        await probe.waitUntilSuspended(.append)
+        let cancelledFinish = Task {
+            try await recorder.finish(outcome: .failed)
+        }
+        await Task.yield()
+
+        cancelledFinish.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await cancelledFinish.value
+        }
+        await probe.resume(.append)
+        try await record.value
+        try await recorder.finish(outcome: .completed)
+
+        #expect(await probe.finalizedOutcomes == [.completed])
     }
 
     @Test @MainActor
@@ -548,5 +705,67 @@ private actor CancelledAdmissionProbe {
 
     private func persistSession(_ id: UUID) {
         persistedSessionIDs.append(id)
+    }
+}
+
+private actor SuspendedWriteProbe {
+    enum Stage: Hashable, Sendable {
+        case append
+        case complete
+        case finalize
+    }
+
+    private let suspendedStages: Set<Stage>
+    private var suspendedOnce: Set<Stage> = []
+    private var continuations: [Stage: CheckedContinuation<Void, Never>] = [:]
+    private(set) var finalizeCallCount = 0
+    private(set) var finalizedOutcomes: [VoiceSessionTerminalOutcome] = []
+
+    init(suspend suspendedStages: Set<Stage>) {
+        self.suspendedStages = suspendedStages
+    }
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { _, _, _, _ in },
+            appendEntry: { [self] _, _, _, _, _, _ in
+                await suspendOnce(.append)
+            },
+            completeEntry: { [self] _, _ in
+                await suspendOnce(.complete)
+            },
+            finalizeSession: { [self] _, outcome in
+                await finalize(outcome)
+            },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func waitUntilSuspended(_ stage: Stage) async {
+        while continuations[stage] == nil {
+            await Task.yield()
+        }
+    }
+
+    func resume(_ stage: Stage) {
+        continuations.removeValue(forKey: stage)?.resume()
+    }
+
+    private func suspendOnce(_ stage: Stage) async {
+        guard suspendedStages.contains(stage),
+              suspendedOnce.insert(stage).inserted
+        else { return }
+        await withCheckedContinuation { continuation in
+            continuations[stage] = continuation
+        }
+    }
+
+    private func finalize(_ outcome: VoiceSessionTerminalOutcome) async {
+        finalizeCallCount += 1
+        await suspendOnce(.finalize)
+        finalizedOutcomes.append(outcome)
     }
 }
