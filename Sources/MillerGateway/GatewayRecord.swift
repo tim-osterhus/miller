@@ -295,7 +295,7 @@ public struct GatewayRecord: Equatable, Sendable {
             "conversation_id": .uuid, "turn_id": .uuid,
             "generation": .nonnegativeInteger, "provider_profile": .object,
             "context": .objectArray, "user_text": .string, "tools": .anyArray,
-        ]),
+        ], optional: ["voice_history_attachment": .string]),
         "reasoning.cancel": .init(required: [
             "turn_id": .uuid, "target_generation": .nonnegativeInteger,
         ]),
@@ -399,6 +399,11 @@ public struct GatewayRecord: Equatable, Sendable {
         }
         if field == "user_text", case let .string(text) = value,
            text.unicodeScalars.count > 65_536
+        {
+            throw GatewayProtocolError.invalidField
+        }
+        if field == "voice_history_attachment", case let .string(text) = value,
+           text.utf8.count > 32 * 1_024
         {
             throw GatewayProtocolError.invalidField
         }

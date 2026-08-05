@@ -143,6 +143,60 @@ struct GatewaySupervisorTests {
     }
 
     @Test
+    func explicitVoiceHistoryTravelsSeparatelyAndOrdinaryRequestsOmitIt() async throws {
+        let supervisor = GatewaySupervisor(configuration: configuration(mode: "normal"))
+        let gateway = JSONLReasoningGateway(supervisor: supervisor, selectedProvider: providerProfile)
+        let attachment = try VoiceHistoryAttachment(
+            text: "<miller_voice_history selection=\"explicit\" truncated=\"false\">\n[history]\n</miller_voice_history>"
+        )
+
+        let attached = try await collect(try await gateway.start(request(text: "question", attachment: attachment)))
+        #expect(attached.contains(.textDelta(
+            ordinal: 0,
+            text: "fake: \(attachment.text)\n\nquestion"
+        )))
+        let ordinary = try await collect(try await gateway.start(request(text: "ordinary")))
+        #expect(ordinary.contains(.textDelta(ordinal: 0, text: "fake: ordinary")))
+        await supervisor.shutdown()
+    }
+
+    @Test
+    func swiftProtocolBoundsAndClosesVoiceHistoryAttachment() throws {
+        let sessionID = UUID().uuidString.lowercased()
+        let requestID = UUID().uuidString.lowercased()
+        var fields: [String: JSONValue] = [
+            "conversation_id": .string(UUID().uuidString.lowercased()),
+            "turn_id": .string(UUID().uuidString.lowercased()),
+            "generation": .integer(1),
+            "provider_profile": .object([
+                "kind": .string("fake"), "model": .string("fake"),
+                "credential_ref": .string(UUID().uuidString.lowercased()),
+            ]),
+            "context": .array([]), "user_text": .string("question"), "tools": .array([]),
+            "voice_history_attachment": .string(String(repeating: "é", count: 16_384)),
+        ]
+        _ = try GatewayRecord.make(
+            type: "reasoning.start", sessionID: sessionID,
+            requestID: requestID, fields: fields
+        )
+        fields["voice_history_attachment"] = .string(String(repeating: "é", count: 16_385))
+        #expect(throws: GatewayProtocolError.invalidField) {
+            try GatewayRecord.make(
+                type: "reasoning.start", sessionID: sessionID,
+                requestID: requestID, fields: fields
+            )
+        }
+        fields.removeValue(forKey: "voice_history_attachment")
+        fields["voice_history"] = .string("unexpected")
+        #expect(throws: GatewayProtocolError.unknownField) {
+            try GatewayRecord.make(
+                type: "reasoning.start", sessionID: sessionID,
+                requestID: requestID, fields: fields
+            )
+        }
+    }
+
+    @Test
     func unsupportedModelFailureIsPreservedForTheCore() async throws {
         let supervisor = GatewaySupervisor(
             configuration: configuration(mode: "unsupported-model")
@@ -370,13 +424,17 @@ struct GatewaySupervisorTests {
         )
     }
 
-    private func request(text: String) -> ReasoningRequest {
+    private func request(
+        text: String,
+        attachment: VoiceHistoryAttachment? = nil
+    ) -> ReasoningRequest {
         ReasoningRequest(
             conversationID: ConversationID(),
             turnID: TurnID(),
             generation: 1,
             context: [],
-            userText: text
+            userText: text,
+            voiceHistoryAttachment: attachment
         )
     }
 

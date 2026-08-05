@@ -170,6 +170,10 @@ struct VoiceHistoryDependencies: Sendable {
         @Sendable (Date?, Date?) async throws -> [VoiceHistorySession]
     let exportProjection:
         @Sendable ([UUID]) async throws -> [VoiceHistoryExportSession]
+    let attachmentProjection:
+        @Sendable ([UUID], Int) async throws -> VoiceHistoryAttachmentProjection
+    let rangeAttachmentProjection:
+        @Sendable (Date, Date, Int) async throws -> VoiceHistoryAttachmentProjection
     let deleteSession: @Sendable (UUID) async throws -> Void
     let deleteRange: @Sendable (Date, Date) async throws -> Void
     let deleteAll: @Sendable () async throws -> Void
@@ -177,6 +181,8 @@ struct VoiceHistoryDependencies: Sendable {
     static let unavailable = Self(
         sessions: { _, _ in [] },
         exportProjection: { _ in [] },
+        attachmentProjection: { _, _ in .init(sessionIDs: [], entries: [], hasMore: false) },
+        rangeAttachmentProjection: { _, _, _ in .init(sessionIDs: [], entries: [], hasMore: false) },
         deleteSession: { _ in },
         deleteRange: { _, _ in },
         deleteAll: {}
@@ -325,6 +331,7 @@ final class AppPresentationModel: ObservableObject {
     private var liveVoiceEventGeneration: UInt64 = 0
     private var providerSnapshotGeneration: UInt64 = 0
     private var conversationProjectionGeneration: UInt64 = 0
+    private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
 
     private struct PendingLiveTranscriptCleanup {
@@ -836,10 +843,15 @@ final class AppPresentationModel: ObservableObject {
         }
         let voiceHistoryAttachment: VoiceHistoryAttachment?
         if let pendingVoiceHistoryAttachment {
+            let generation = voiceHistoryGeneration
             do {
                 let refreshed = try await preparedVoiceHistoryAttachment(
                     sessionIDs: pendingVoiceHistoryAttachment.sessionIDs
                 )
+                guard generation == voiceHistoryGeneration,
+                      self.pendingVoiceHistoryAttachment?.sessionIDs
+                        == pendingVoiceHistoryAttachment.sessionIDs
+                else { return }
                 voiceHistoryAttachment = refreshed.attachment
             } catch {
                 self.pendingVoiceHistoryAttachment = nil
@@ -850,6 +862,7 @@ final class AppPresentationModel: ObservableObject {
             voiceHistoryAttachment = nil
         }
         pendingVoiceHistoryAttachment = nil
+        voiceHistoryGeneration &+= 1
         voiceHistoryStatus = nil
         draft = ""
         presentationState = .waiting
@@ -889,32 +902,44 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func prepareVoiceHistoryAttachment(sessionIDs: [UUID]) async {
+        voiceHistoryGeneration &+= 1
+        let generation = voiceHistoryGeneration
         do {
-            pendingVoiceHistoryAttachment = try await preparedVoiceHistoryAttachment(
+            let prepared = try await preparedVoiceHistoryAttachment(
                 sessionIDs: sessionIDs
             )
+            guard generation == voiceHistoryGeneration else { return }
+            pendingVoiceHistoryAttachment = prepared
             voiceHistoryStatus = pendingVoiceHistoryAttachment?.truncated == true
                 ? "Selection was truncated to 32 KiB."
                 : nil
         } catch {
+            guard generation == voiceHistoryGeneration else { return }
             pendingVoiceHistoryAttachment = nil
             voiceHistoryStatus = "Selected voice history is no longer available."
         }
     }
 
     func prepareVoiceHistoryAttachment(from start: Date, through end: Date) async {
+        voiceHistoryGeneration &+= 1
+        let generation = voiceHistoryGeneration
         do {
-            let sessions = try await voiceHistory.sessions(start, end)
-            try await prepareVoiceHistoryAttachmentThrowing(
-                sessionIDs: sessions.map(\.id)
+            let projection = try await voiceHistory.rangeAttachmentProjection(
+                start, end, VoiceHistoryAttachmentBuilder.maximumBytes
             )
+            let prepared = try voiceHistoryAttachmentBuilder.build(from: projection)
+            guard generation == voiceHistoryGeneration else { return }
+            pendingVoiceHistoryAttachment = prepared
+            voiceHistoryStatus = prepared.truncated ? "Selection was truncated to 32 KiB." : nil
         } catch {
+            guard generation == voiceHistoryGeneration else { return }
             pendingVoiceHistoryAttachment = nil
             voiceHistoryStatus = "Selected voice history is no longer available."
         }
     }
 
     func cancelVoiceHistoryAttachment() {
+        voiceHistoryGeneration &+= 1
         pendingVoiceHistoryAttachment = nil
         voiceHistoryStatus = nil
     }
@@ -943,6 +968,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteVoiceHistorySession(_ id: UUID) async {
+        voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteSession(id)
             clearPendingVoiceHistory(ifItContains: [id])
@@ -953,6 +979,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteVoiceHistory(from start: Date, through end: Date) async {
+        voiceHistoryGeneration &+= 1
         do {
             let deleted = try await voiceHistory.sessions(start, end).map(\.id)
             try await voiceHistory.deleteRange(start, end)
@@ -964,6 +991,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteAllVoiceHistory() async {
+        voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteAll()
             pendingVoiceHistoryAttachment = nil
@@ -973,23 +1001,18 @@ final class AppPresentationModel: ObservableObject {
         }
     }
 
-    private func prepareVoiceHistoryAttachmentThrowing(
-        sessionIDs: [UUID]
-    ) async throws {
-        pendingVoiceHistoryAttachment = try await preparedVoiceHistoryAttachment(
-            sessionIDs: sessionIDs
-        )
-        voiceHistoryStatus = pendingVoiceHistoryAttachment?.truncated == true
-            ? "Selection was truncated to 32 KiB."
-            : nil
-    }
-
     private func preparedVoiceHistoryAttachment(
         sessionIDs: [UUID]
     ) async throws -> PreparedVoiceHistoryAttachment {
-        try voiceHistoryAttachmentBuilder.build(
-            from: try await checkedProjection(sessionIDs: sessionIDs)
+        let unique = Array(Set(sessionIDs))
+        guard !unique.isEmpty else { throw VoiceHistoryAttachmentBuilderError.emptySelection }
+        let projection = try await voiceHistory.attachmentProjection(
+            unique, VoiceHistoryAttachmentBuilder.maximumBytes
         )
+        guard Set(projection.sessionIDs) == Set(unique) else {
+            throw VoiceHistoryAttachmentBuilderError.selectedHistoryUnavailable
+        }
+        return try voiceHistoryAttachmentBuilder.build(from: projection)
     }
 
     private func checkedProjection(
@@ -1820,6 +1843,19 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             exportProjection: { [voiceHistoryRepository] sessionIDs in
                 try await voiceHistoryRepository.exportProjection(
                     sessionIDs: sessionIDs
+                )
+            },
+            attachmentProjection: { [voiceHistoryRepository] sessionIDs, maximumBytes in
+                try await voiceHistoryRepository.attachmentProjection(
+                    sessionIDs: sessionIDs,
+                    maximumContentBytes: maximumBytes
+                )
+            },
+            rangeAttachmentProjection: { [voiceHistoryRepository] start, end, maximumBytes in
+                try await voiceHistoryRepository.attachmentProjection(
+                    from: start,
+                    through: end,
+                    maximumContentBytes: maximumBytes
                 )
             },
             deleteSession: { [voiceHistoryRepository] id in

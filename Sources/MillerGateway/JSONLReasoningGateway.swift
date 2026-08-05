@@ -18,24 +18,25 @@ public actor JSONLReasoningGateway: ReasoningGateway {
     ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
         let requestID = UUID().uuidString.lowercased()
         let profile = try await selectedProvider()
+        var fields: [String: JSONValue] = [
+            "conversation_id": .string(request.conversationID.description),
+            "turn_id": .string(request.turnID.description),
+            "generation": .integer(request.generation),
+            "provider_profile": .object(profile.fields),
+            "context": .array(request.context.map {
+                .object(["role": .string($0.role.rawValue), "text": .string($0.text)])
+            }),
+            "user_text": .string(request.userText),
+            "tools": .array([]),
+        ]
+        if let attachment = request.voiceHistoryAttachment {
+            fields["voice_history_attachment"] = .string(attachment.text)
+        }
         let source = try await supervisor.openReasoning(
             requestID: requestID,
             turnID: request.turnID.description,
             generation: request.generation,
-            fields: [
-                "conversation_id": .string(request.conversationID.description),
-                "turn_id": .string(request.turnID.description),
-                "generation": .integer(request.generation),
-                "provider_profile": .object(profile.fields),
-                "context": .array(request.context.map {
-                    .object([
-                        "role": .string($0.role.rawValue),
-                        "text": .string($0.text),
-                    ])
-                }),
-                "user_text": .string(request.userText),
-                "tools": .array([]),
-            ]
+            fields: fields
         )
 
         return AsyncThrowingStream { continuation in

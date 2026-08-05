@@ -66,7 +66,7 @@ function handle(record) {
       "protocol", "version", "type", "session_id", "request_id",
       "conversation_id", "turn_id", "generation", "provider_profile",
       "context", "user_text", "tools",
-    ]);
+    ], ["voice_history_attachment"]);
     if (active) throw new Error("operation_active");
     active = {
       requestId: record.request_id,
@@ -141,7 +141,7 @@ function handle(record) {
       turn_id: record.turn_id,
       generation: record.generation,
       ordinal: 0,
-      text: `fake: ${record.user_text}`,
+      text: `fake: ${record.voice_history_attachment ? `${record.voice_history_attachment}\n\n` : ""}${record.user_text}`,
     });
     if (mode === "qualification" || mode === "cancellation-qualification") {
       const operation = active;

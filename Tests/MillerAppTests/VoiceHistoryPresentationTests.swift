@@ -182,6 +182,91 @@ struct VoiceHistoryPresentationTests {
         #expect(await history.deleteAllCount == 1)
     }
 
+    @Test
+    func cancellationWinsAgainstSuspendedAttachmentProjection() async {
+        let sessionID = UUID()
+        let gate = VoiceHistoryProjectionGate()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: gate.dependencies()
+        )
+        let preparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [sessionID]) }
+        await gate.waitUntilRequested()
+
+        model.cancelVoiceHistoryAttachment()
+        await gate.resume(with: attachmentProjection(id: sessionID, text: "stale"))
+        await preparation.value
+
+        #expect(model.pendingVoiceHistoryAttachment == nil)
+    }
+
+    @Test
+    func newerSelectionWinsAgainstSuspendedOlderProjection() async {
+        let older = UUID()
+        let newer = UUID()
+        let gate = VoiceHistoryProjectionGate()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: gate.dependencies()
+        )
+        let oldPreparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [older]) }
+        await gate.waitUntilRequested()
+        let newPreparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [newer]) }
+        await gate.waitUntilRequestCount(2)
+
+        await gate.resumeNext(with: attachmentProjection(id: older, text: "older"))
+        await gate.resumeNext(with: attachmentProjection(id: newer, text: "newer"))
+        await oldPreparation.value
+        await newPreparation.value
+
+        #expect(model.pendingVoiceHistoryAttachment?.sessionIDs == [newer])
+        #expect(model.pendingVoiceHistoryAttachment?.attachment.text.contains("newer") == true)
+    }
+
+    @Test
+    func cancellationDuringSubmitRevalidationPreventsSubmission() async {
+        let sessionID = UUID()
+        let gate = VoiceHistoryProjectionGate()
+        let submits = VoiceHistorySubmitProbe()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: submits),
+            voiceHistory: gate.dependencies()
+        )
+        let preparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [sessionID]) }
+        await gate.waitUntilRequested()
+        await gate.resumeNext(with: attachmentProjection(id: sessionID, text: "selected"))
+        await preparation.value
+        model.draft = "review"
+        let submission = Task { await model.submit() }
+        await gate.waitUntilRequestCount(2)
+
+        model.cancelVoiceHistoryAttachment()
+        await gate.resumeNext(with: attachmentProjection(id: sessionID, text: "stale"))
+        await submission.value
+
+        #expect(await submits.calls.isEmpty)
+        #expect(model.pendingVoiceHistoryAttachment == nil)
+        #expect(model.draft == "review")
+    }
+
+    @Test
+    func deletionWinsAgainstSuspendedAttachmentProjection() async {
+        let sessionID = UUID()
+        let gate = VoiceHistoryProjectionGate()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: gate.dependencies()
+        )
+        let preparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [sessionID]) }
+        await gate.waitUntilRequested()
+
+        await model.deleteVoiceHistorySession(sessionID)
+        await gate.resumeNext(with: attachmentProjection(id: sessionID, text: "deleted"))
+        await preparation.value
+
+        #expect(model.pendingVoiceHistoryAttachment == nil)
+    }
+
     private func hostDependencies(
         submits: VoiceHistorySubmitProbe
     ) -> HostDependencies {
@@ -240,6 +325,44 @@ struct VoiceHistoryPresentationTests {
             ]
         )
     }
+
+    private func attachmentProjection(id: UUID, text: String) -> VoiceHistoryAttachmentProjection {
+        .init(sessionIDs: [id], entries: historyExport(id: id, text: text).entries, hasMore: false)
+    }
+}
+
+private actor VoiceHistoryProjectionGate {
+    private var continuations: [CheckedContinuation<VoiceHistoryAttachmentProjection, Never>] = []
+    private var requestCount = 0
+
+    nonisolated func dependencies() -> VoiceHistoryDependencies {
+        VoiceHistoryDependencies(
+            sessions: { _, _ in [] },
+            exportProjection: { _ in [] },
+            attachmentProjection: { [self] _, _ in await suspend() },
+            rangeAttachmentProjection: { [self] _, _, _ in await suspend() },
+            deleteSession: { _ in }, deleteRange: { _, _ in }, deleteAll: {}
+        )
+    }
+
+    private func suspend() async -> VoiceHistoryAttachmentProjection {
+        requestCount += 1
+        return await withCheckedContinuation { continuations.append($0) }
+    }
+
+    func waitUntilRequested() async { await waitUntilRequestCount(1) }
+
+    func waitUntilRequestCount(_ target: Int) async {
+        while requestCount < target { await Task.yield() }
+    }
+
+    func resume(with projection: VoiceHistoryAttachmentProjection) {
+        resumeNext(with: projection)
+    }
+
+    func resumeNext(with projection: VoiceHistoryAttachmentProjection) {
+        continuations.removeFirst().resume(returning: projection)
+    }
 }
 
 private actor VoiceHistorySubmitProbe {
@@ -285,6 +408,11 @@ private actor VoiceHistoryProjectionProbe {
                 await selectedSessions(from: start, through: end)
             },
             exportProjection: { [self] ids in await selected(ids: ids) },
+            attachmentProjection: { [self] ids, _ in await attachment(ids: ids) },
+            rangeAttachmentProjection: { [self] start, end, _ in
+                let ids = await selectedSessions(from: start, through: end).map(\.id)
+                return await attachment(ids: ids)
+            },
             deleteSession: { [self] id in await delete(id: id) },
             deleteRange: { [self] start, end in await delete(from: start, through: end) },
             deleteAll: { [self] in await deleteEverything() }
@@ -306,6 +434,15 @@ private actor VoiceHistoryProjectionProbe {
     private func selected(ids: [UUID]) -> [VoiceHistoryExportSession] {
         let requested = Set(ids)
         return projections.filter { requested.contains($0.session.id) }
+    }
+
+    private func attachment(ids: [UUID]) -> VoiceHistoryAttachmentProjection {
+        let selected = selected(ids: ids)
+        return .init(
+            sessionIDs: selected.map(\.session.id),
+            entries: selected.flatMap(\.entries),
+            hasMore: false
+        )
     }
 
     private func delete(id: UUID) {

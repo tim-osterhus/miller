@@ -6,6 +6,39 @@ import Testing
 @Suite
 struct SQLiteVoiceHistoryRepositoryTests {
     @Test
+    func attachmentProjectionIsChronologicalAndStopsAfterOneLookahead() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteVoiceHistoryRepository(path: fixture.path)
+        let first = UUID()
+        let second = UUID()
+        let base = Date(timeIntervalSince1970: 100)
+        for (sessionID, offset) in [(second, 10.0), (first, 0.0)] {
+            try await repository.startSession(
+                id: sessionID, conversationID: nil, activationSource: .manual,
+                saveChoice: .save, startedAt: base.addingTimeInterval(offset)
+            )
+        }
+        for (index, value) in ["aaaaaaaa", "bbbbbbbb", "cccccccc"].enumerated() {
+            let sessionID = index == 1 ? second : first
+            try await repository.appendEntry(
+                id: UUID(), sessionID: sessionID, sequence: index,
+                role: .user, text: value, completionState: .complete,
+                startedAt: base.addingTimeInterval(Double(index)),
+                completedAt: base.addingTimeInterval(Double(index) + 0.5)
+            )
+        }
+
+        let projection = try await repository.attachmentProjection(
+            sessionIDs: [second, first], maximumContentBytes: 10
+        )
+
+        #expect(projection.sessionIDs == [first, second])
+        #expect(projection.entries.map(\.text) == ["aaaaaaaa", "bbbbbbbb"])
+        #expect(projection.entries.reduce(0) { $0 + $1.text.utf8.count } == 16)
+        #expect(projection.hasMore)
+    }
+
+    @Test
     func transcriptPreservesChronologyAdjacentRolesAndIdempotentFinalization() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteVoiceHistoryRepository(path: fixture.path)

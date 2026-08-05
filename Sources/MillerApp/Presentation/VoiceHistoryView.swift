@@ -185,6 +185,9 @@ struct VoiceHistoryView: View {
                 await model.deleteVoiceHistorySession(id)
             case .range:
                 await model.deleteVoiceHistory(from: rangeStart, through: rangeEnd)
+                selectedSessionIDs.formIntersection(
+                    Set(model.voiceHistorySessions.map(\.id))
+                )
             case .all:
                 selectedSessionIDs.removeAll()
                 await model.deleteAllVoiceHistory()

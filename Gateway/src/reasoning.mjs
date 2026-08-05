@@ -35,7 +35,10 @@ export class ReasoningOperation {
         {
           messages: [
             ...this.record.context.map(({ role, text }) => ({ role, content: text })),
-            { role: "user", content: this.record.user_text },
+            { role: "user", content: [
+              this.record.voice_history_attachment,
+              this.record.user_text,
+            ].filter(Boolean).join("\n\n") },
           ],
         },
         { signal: this.controller.signal },

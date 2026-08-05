@@ -150,6 +150,37 @@ struct VoiceHistoryAttachmentBuilderTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["voice-history.json"])
     }
 
+    @Test
+    func failedRenamePreservesDestinationAndCleansTemporaryFile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("voice-history.json", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+        let sentinel = destination.appendingPathComponent("sentinel")
+        try Data("preserve".utf8).write(to: sentinel)
+        let sessionID = UUID()
+        let projection = [exportSession(
+            id: sessionID,
+            startedAt: instant("2026-08-05T12:34:55Z"),
+            entries: [entry(
+                sessionID: sessionID, sequence: 0, role: .user,
+                text: "history", at: instant("2026-08-05T12:34:56Z")
+            )]
+        )]
+
+        #expect(throws: (any Error).self) {
+            try VoiceHistoryExportDocument.write(projection, to: destination)
+        }
+
+        #expect(try String(contentsOf: sentinel, encoding: .utf8) == "preserve")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix(".voice-history.json.") && $0.hasSuffix(".tmp") }
+        #expect(leftovers.isEmpty)
+    }
+
     private func exportSession(
         id: UUID,
         startedAt: Date,

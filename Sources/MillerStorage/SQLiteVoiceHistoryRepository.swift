@@ -97,6 +97,18 @@ public struct VoiceHistoryExportSession: Codable, Equatable, Sendable {
     }
 }
 
+public struct VoiceHistoryAttachmentProjection: Equatable, Sendable {
+    public let sessionIDs: [UUID]
+    public let entries: [VoiceHistoryEntry]
+    public let hasMore: Bool
+
+    public init(sessionIDs: [UUID], entries: [VoiceHistoryEntry], hasMore: Bool) {
+        self.sessionIDs = sessionIDs
+        self.entries = entries
+        self.hasMore = hasMore
+    }
+}
+
 public enum VoiceHistoryRepositoryError: Error, Equatable, Sendable {
     case entryTooLarge
     case invalidEntry
@@ -354,6 +366,46 @@ public actor SQLiteVoiceHistoryRepository {
         }
     }
 
+    public func attachmentProjection(
+        sessionIDs: [UUID],
+        maximumContentBytes: Int
+    ) throws -> VoiceHistoryAttachmentProjection {
+        let unique = Array(Set(sessionIDs))
+        guard !unique.isEmpty else {
+            return .init(sessionIDs: [], entries: [], hasMore: false)
+        }
+        let available = try sessions().filter { Set(unique).contains($0.id) }
+        let orderedIDs = available.map(\.id)
+        guard !orderedIDs.isEmpty else {
+            return .init(sessionIDs: [], entries: [], hasMore: false)
+        }
+        let placeholders = Array(repeating: "?", count: orderedIDs.count).joined(separator: ",")
+        return try boundedAttachmentProjection(
+            sessionIDs: orderedIDs,
+            whereClause: "s.id IN (\(placeholders))",
+            bindings: orderedIDs.map { .text(Self.id($0)) },
+            maximumContentBytes: maximumContentBytes
+        )
+    }
+
+    public func attachmentProjection(
+        from start: Date,
+        through end: Date,
+        maximumContentBytes: Int
+    ) throws -> VoiceHistoryAttachmentProjection {
+        guard start <= end else { throw VoiceHistoryRepositoryError.invalidRange }
+        let selected = try sessions(from: start, through: end)
+        guard !selected.isEmpty else {
+            return .init(sessionIDs: [], entries: [], hasMore: false)
+        }
+        return try boundedAttachmentProjection(
+            sessionIDs: selected.map(\.id),
+            whereClause: "s.started_at >= ? AND s.started_at <= ?",
+            bindings: [.text(Self.timestamp(start)), .text(Self.timestamp(end))],
+            maximumContentBytes: maximumContentBytes
+        )
+    }
+
     public func deleteSession(id: UUID) throws {
         try preflightWrite()
         try database.transaction {
@@ -402,6 +454,38 @@ public actor SQLiteVoiceHistoryRepository {
         if let simulatedWriteFailure {
             throw simulatedWriteFailure
         }
+    }
+
+    private func boundedAttachmentProjection(
+        sessionIDs: [UUID],
+        whereClause: String,
+        bindings: [SQLiteValue],
+        maximumContentBytes: Int
+    ) throws -> VoiceHistoryAttachmentProjection {
+        var entries: [VoiceHistoryEntry] = []
+        var bytes = 0
+        var hasMore = false
+        try database.scan(
+            """
+            SELECT e.id, e.session_id, e.sequence, e.role, e.text,
+                   e.completion_state, e.started_at, e.completed_at
+            FROM voice_entries e
+            JOIN voice_sessions s ON s.id = e.session_id
+            WHERE \(whereClause)
+            ORDER BY e.started_at ASC, s.started_at ASC, e.sequence ASC, e.id ASC
+            """,
+            bindings: bindings
+        ) { row in
+            let entry = try Self.decodeEntry(row)
+            if !entries.isEmpty, bytes >= maximumContentBytes {
+                hasMore = true
+                return false
+            }
+            entries.append(entry)
+            bytes += entry.text.utf8.count
+            return true
+        }
+        return .init(sessionIDs: sessionIDs, entries: entries, hasMore: hasMore)
     }
 
     private static func validateEntry(

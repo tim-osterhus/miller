@@ -154,7 +154,7 @@ const protocolSchemas = {
   "auth.completed": { required: { operation_id: "uuid", generation: "nonnegative", credential_ref: "uuid" } },
   "auth.stopped": { required: { operation_id: "uuid", generation: "nonnegative" } },
   "auth.failed": { required: { operation_id: "uuid", generation: "nonnegative", error_code: "string" } },
-  "reasoning.start": { required: { conversation_id: "uuid", turn_id: "uuid", generation: "nonnegative", provider_profile: "profile", context: "context", user_text: "user-text", tools: "array" } },
+  "reasoning.start": { required: { conversation_id: "uuid", turn_id: "uuid", generation: "nonnegative", provider_profile: "profile", context: "context", user_text: "user-text", tools: "array" }, optional: { voice_history_attachment: "voice-history" } },
   "reasoning.cancel": { required: { turn_id: "uuid", target_generation: "nonnegative" } },
   "reasoning.accepted": { required: { turn_id: "uuid", generation: "nonnegative" } },
   "reasoning.text_delta": { required: { turn_id: "uuid", generation: "nonnegative", ordinal: "nonnegative", text: "text" } },
@@ -282,6 +282,9 @@ function validateField(value, kind) {
       return;
     case "user-text":
       if (typeof value !== "string" || Array.from(value).length > 65_536) throw new Error("invalid_field");
+      return;
+    case "voice-history":
+      if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 32 * 1024) throw new Error("invalid_field");
       return;
     case "text":
       if (typeof value !== "string" || Array.from(value).length > 8_192) throw new Error("invalid_field");

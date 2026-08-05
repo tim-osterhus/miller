@@ -52,6 +52,35 @@ struct VoiceHistoryAttachmentBuilder {
         )
     }
 
+    func build(
+        from projection: VoiceHistoryAttachmentProjection
+    ) throws -> PreparedVoiceHistoryAttachment {
+        guard !projection.sessionIDs.isEmpty else {
+            throw VoiceHistoryAttachmentBuilderError.emptySelection
+        }
+        let orderedEntries = projection.entries.sorted {
+            if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+            if $0.sequence != $1.sequence { return $0.sequence < $1.sequence }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        let complete = Self.envelope(
+            lines: orderedEntries.map(Self.line),
+            truncated: projection.hasMore
+        )
+        if !projection.hasMore, complete.utf8.count <= Self.maximumBytes {
+            return try .init(
+                sessionIDs: projection.sessionIDs,
+                attachment: VoiceHistoryAttachment(text: complete),
+                truncated: false
+            )
+        }
+        return try .init(
+            sessionIDs: projection.sessionIDs,
+            attachment: VoiceHistoryAttachment(text: Self.boundedEnvelope(lines: orderedEntries)),
+            truncated: true
+        )
+    }
+
     private static func sessionOrder(
         _ lhs: VoiceHistoryExportSession,
         _ rhs: VoiceHistoryExportSession

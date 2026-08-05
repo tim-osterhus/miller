@@ -374,6 +374,7 @@
               "items": {"$ref": "#/$defs/context_message"}
             },
             "user_text": {"type": "string", "maxLength": 65536},
+            "voice_history_attachment": {"type": "string", "maxLength": 32768},
             "tools": {"type": "array"}
           }
         }

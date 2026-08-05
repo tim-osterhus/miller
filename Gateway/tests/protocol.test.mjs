@@ -237,6 +237,20 @@ test("closed protocol record rejects a non-string type", async () => {
   assert.throws(() => validateProtocolRecord(record));
 });
 
+test("reasoning voice history is optional, closed, and bounded to 32 KiB", async () => {
+  const source = await readFile(new URL("reasoning-start.jsonl", legalRoot), "utf8");
+  const ordinary = strictParse(source);
+  validateProtocolRecord(ordinary);
+
+  const attached = { ...ordinary, voice_history_attachment: "é".repeat(16_384) };
+  validateProtocolRecord(attached);
+  assert.throws(() => validateProtocolRecord({
+    ...ordinary,
+    voice_history_attachment: "é".repeat(16_385),
+  }));
+  assert.throws(() => validateProtocolRecord({ ...ordinary, voice_history: "unexpected" }));
+});
+
 test("JavaScript consumes every complete legal protocol-v1 fixture", async (context) => {
   const consumedTypes = new Set();
   for (const file of legalFiles) {

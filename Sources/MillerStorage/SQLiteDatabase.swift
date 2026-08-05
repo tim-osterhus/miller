@@ -125,6 +125,27 @@ final class SQLiteDatabase {
         }
     }
 
+    func scan(
+        _ sql: String,
+        bindings: [SQLiteValue] = [],
+        _ consume: ([SQLiteValue]) throws -> Bool
+    ) throws {
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(bindings, to: statement)
+
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                guard try consume(readRow(from: statement)) else { return }
+            case SQLITE_DONE:
+                return
+            case let result:
+                throw mappedError(result)
+            }
+        }
+    }
+
     func scalarInt(
         _ sql: String,
         bindings: [SQLiteValue] = []
