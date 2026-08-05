@@ -300,21 +300,31 @@ actor LiveVoiceTranscriptRecorder {
         let terminalOutcome = active.terminalOutcome ?? outcome
         active.terminalOutcome = terminalOutcome
         activeSession = active
-        if active.saveChoice == .save {
-            for pending in active.pending.values.sorted(by: {
-                $0.sequence < $1.sequence
-            }) where !pending.text.isEmpty {
-                try await persistence.appendEntry(
-                    pending.id,
-                    active.id,
-                    pending.sequence,
-                    Self.storageRole(pending.role),
-                    pending.text,
-                    .incomplete
-                )
+        do {
+            if active.saveChoice == .save {
+                for pending in active.pending.values.sorted(by: {
+                    $0.sequence < $1.sequence
+                }) where !pending.text.isEmpty {
+                    try await persistence.appendEntry(
+                        pending.id,
+                        active.id,
+                        pending.sequence,
+                        Self.storageRole(pending.role),
+                        pending.text,
+                        .incomplete
+                    )
+                }
             }
+            try await persistence.finalizeSession(active.id, terminalOutcome)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if await nextSessionSavingWasDisabled() {
+                activeSession = nil
+                return
+            }
+            throw error
         }
-        try await persistence.finalizeSession(active.id, terminalOutcome)
         activeSession = nil
     }
 
@@ -338,6 +348,14 @@ actor LiveVoiceTranscriptRecorder {
             byteCount += count
         }
         return result
+    }
+
+    private func nextSessionSavingWasDisabled() async -> Bool {
+        do {
+            return try await !persistence.nextSessionSavingEnabled()
+        } catch {
+            return false
+        }
     }
 
     private func acquireOperation() async throws {

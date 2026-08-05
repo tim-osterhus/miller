@@ -484,9 +484,8 @@ struct LiveVoiceTranscriptRecorderTests {
         )
         #expect(model.voiceState == .listening)
         #expect(model.voiceStatusText == "Transcript could not be saved")
-        #expect(model.liveTranscriptTurns.map(\.isComplete) == (
-            stage == .complete ? [false] : []
-        ))
+        #expect(model.liveTranscriptTurns.map(\.text) == ["final response"])
+        #expect(model.liveTranscriptTurns.map(\.isComplete) == [true])
 
         await model.applyLiveEvent(
             .transcriptDone(role: .assistant, text: "final response")
@@ -588,6 +587,33 @@ struct LiveVoiceTranscriptRecorderTests {
         let entries = try await store.repository.entries(sessionID: sessionID)
         #expect(entries.map(\.text) == ["cancelled cleanup partial"])
         #expect(entries.map(\.completionState) == [.incomplete])
+    }
+
+    @Test
+    func nextSessionOptOutCanReleasePersistentlyFailedCleanup() async throws {
+        let probe = CleanupOptOutPersistenceProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        try await recorder.begin(
+            sessionID: UUID(),
+            conversationID: nil,
+            activationSource: .manual
+        )
+
+        await #expect(throws: RetryPersistenceError.injected(.finalize)) {
+            try await recorder.finish(outcome: .stopped)
+        }
+        await probe.disableNextSessionSaving()
+        try await recorder.finish(outcome: .failed)
+        try await recorder.begin(
+            sessionID: UUID(),
+            conversationID: nil,
+            activationSource: .manual
+        )
+
+        #expect(await probe.saveChoices == [.save, .discard])
+        #expect(await probe.restoredDefaults == 1)
     }
 
     @Test @MainActor
@@ -855,6 +881,50 @@ private actor SQLiteCancelledFinalizeProbe {
             try await Task.sleep(for: .seconds(60))
         }
         try await repository.finalizeSession(id: id, outcome: outcome)
+    }
+}
+
+private actor CleanupOptOutPersistenceProbe {
+    private var nextSessionSavingEnabled = true
+    private(set) var saveChoices: [VoiceTranscriptSaveChoice] = []
+    private(set) var restoredDefaults = 0
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: {
+                [self] in await nextSessionSavingIsEnabled()
+            },
+            restoreNextSessionSavingDefault: {
+                [self] in await restoreDefault()
+            },
+            startSession: { [self] _, _, _, choice in
+                await record(choice: choice)
+            },
+            appendEntry: { _, _, _, _, _, _ in },
+            completeEntry: { _, _ in },
+            finalizeSession: { _, _ in
+                throw RetryPersistenceError.injected(.finalize)
+            },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func disableNextSessionSaving() {
+        nextSessionSavingEnabled = false
+    }
+
+    private func nextSessionSavingIsEnabled() -> Bool {
+        nextSessionSavingEnabled
+    }
+
+    private func restoreDefault() {
+        nextSessionSavingEnabled = true
+        restoredDefaults += 1
+    }
+
+    private func record(choice: VoiceTranscriptSaveChoice) {
+        saveChoices.append(choice)
     }
 }
 

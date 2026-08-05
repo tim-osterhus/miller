@@ -236,6 +236,8 @@ final class AppPresentationModel: ObservableObject {
     private var liveVoiceStartPending = false
     private var liveTranscriptProjection = LiveTranscriptProjection()
     private var liveVoiceCleanupPending = false
+    private var liveVoiceCleanupRetryPending = false
+    private var pendingLiveTranscriptCleanup: PendingLiveTranscriptCleanup?
     private var liveVoiceCleanupWaiters: [CheckedContinuation<Void, Never>] = []
     @Published private var typedSubmissionPending = false
     @Published private var providerMutationPending = false
@@ -245,6 +247,11 @@ final class AppPresentationModel: ObservableObject {
     private var providerSnapshotGeneration: UInt64 = 0
     private var conversationProjectionGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
+
+    private struct PendingLiveTranscriptCleanup {
+        let terminalState: LiveVoiceState
+        let outcome: VoiceSessionTerminalOutcome
+    }
 
     init(
         dependencies: HostDependencies,
@@ -826,7 +833,15 @@ final class AppPresentationModel: ObservableObject {
 
     func endLiveVoice() async {
         if liveVoiceCleanupPending {
-            await waitForLiveVoiceCleanup()
+            if liveVoiceCleanupRetryPending,
+               let cleanup = pendingLiveTranscriptCleanup {
+                await finishLiveVoiceCleanup(
+                    terminalState: cleanup.terminalState,
+                    outcome: cleanup.outcome
+                )
+            } else {
+                await waitForLiveVoiceCleanup()
+            }
             return
         }
         guard voiceState.isActive || voiceState == .stopped || liveVoiceStartPending else {
@@ -850,15 +865,35 @@ final class AppPresentationModel: ObservableObject {
         terminalState: LiveVoiceState,
         outcome: VoiceSessionTerminalOutcome
     ) async {
-        do {
-            try await liveTranscriptRecorder.finish(outcome: outcome)
-        } catch {
-            presentTranscriptPersistenceFailure()
+        let cleanup = pendingLiveTranscriptCleanup
+            ?? PendingLiveTranscriptCleanup(
+                terminalState: terminalState,
+                outcome: outcome
+            )
+        pendingLiveTranscriptCleanup = cleanup
+        liveVoiceCleanupPending = true
+        liveVoiceCleanupRetryPending = false
+        var cleanupSucceeded = false
+        for attempt in 0..<2 {
+            do {
+                try await liveTranscriptRecorder.finish(outcome: cleanup.outcome)
+                cleanupSucceeded = true
+                break
+            } catch {
+                guard attempt == 0, !(error is CancellationError) else { break }
+                await Task.yield()
+            }
         }
-        liveVoiceCleanupPending = false
+        if cleanupSucceeded {
+            pendingLiveTranscriptCleanup = nil
+            liveVoiceCleanupPending = false
+        } else {
+            presentTranscriptPersistenceFailure()
+            liveVoiceCleanupRetryPending = true
+        }
         liveVoiceMuted = false
         if voiceState != .failed {
-            voiceState = terminalState
+            voiceState = cleanup.terminalState
         }
         let waiters = liveVoiceCleanupWaiters
         liveVoiceCleanupWaiters.removeAll()
@@ -888,10 +923,10 @@ final class AppPresentationModel: ObservableObject {
         case let .state(state):
             voiceState = state
         case .transcriptDelta, .transcriptDone:
+            liveTranscriptProjection.record(event)
+            liveTranscriptTurns = liveTranscriptProjection.turns
             do {
                 try await liveTranscriptRecorder.record(event)
-                liveTranscriptProjection.record(event)
-                liveTranscriptTurns = liveTranscriptProjection.turns
             } catch {
                 presentTranscriptPersistenceFailure()
             }

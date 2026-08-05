@@ -6,6 +6,7 @@ import MillerCore
 import MillerGateway
 import MillerLive
 import MillerLiveAudio
+import MillerStorage
 import Testing
 @testable import MillerApp
 
@@ -100,6 +101,10 @@ struct GPTLivePresentationTests {
                 .transcriptDone(role: .assistant, text: "auditable response")
             )
             #expect(model.voiceState == .listening)
+            #expect(model.liveTranscriptTurns.map(\.text) == [
+                "auditable response",
+            ])
+            #expect(model.liveTranscriptTurns.map(\.isComplete) == [true])
             await model.abandonLiveVoiceSession()
             #expect(model.voiceState == .closed)
         case .finalize:
@@ -107,6 +112,54 @@ struct GPTLivePresentationTests {
             #expect(model.voiceState == .closed)
         }
         #expect(model.voiceStatusText == "Transcript could not be saved")
+    }
+
+    @Test(arguments: TranscriptCleanupFailureStage.allCases)
+    func failedTranscriptCleanupFencesNewMediaUntilExplicitRetrySucceeds(
+        stage: TranscriptCleanupFailureStage
+    ) async {
+        let persistence = RetriableTranscriptCleanupProbe(failing: stage)
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await persistence.persistence()
+        )
+        let voice = VoiceProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: await voice.dependencies(),
+            liveTranscriptRecorder: recorder
+        )
+        await model.applyLiveEvent(.sessionAdmitted(id: UUID()))
+        await model.applyLiveEvent(.state(.listening))
+        if stage == .append {
+            await model.applyLiveEvent(
+                .transcriptDelta(role: .user, text: "recoverable partial")
+            )
+        }
+
+        await model.endLiveVoice()
+
+        #expect(model.voiceState == .closed)
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        #expect(model.isActiveOperation)
+        #expect(!model.canStartLiveVoice)
+        #expect(await persistence.failedStageAttempts == 2)
+        #expect(await persistence.finalizedOutcomes.isEmpty)
+        #expect(await voice.ends == 1)
+
+        await model.startLiveVoice()
+        #expect(await voice.starts == 0)
+
+        await persistence.allowCleanup()
+        await model.endLiveVoice()
+
+        #expect(!model.isActiveOperation)
+        #expect(model.canStartLiveVoice)
+        #expect(await persistence.finalizedOutcomes == [.completed])
+        #expect(await voice.ends == 1)
+
+        await model.startLiveVoice()
+        #expect(await voice.starts == 1)
+        await model.endLiveVoice()
     }
 
     @Test
@@ -2108,6 +2161,11 @@ enum TranscriptPersistenceFailureStage: CaseIterable, Sendable {
     case finalize
 }
 
+enum TranscriptCleanupFailureStage: CaseIterable, Sendable {
+    case append
+    case finalize
+}
+
 private enum StartupStopAction {
     case interrupt
     case end
@@ -2131,6 +2189,58 @@ private enum StartupSuspension: Sendable {
 
     var expectedCredentialLoadsAfterCleanup: Int {
         expectedCredentialLoadsBeforeCleanup + 1
+    }
+}
+
+private actor RetriableTranscriptCleanupProbe {
+    private let failureStage: TranscriptCleanupFailureStage
+    private var cleanupAllowed = false
+    private var appendAttempts = 0
+    private(set) var finalizeAttempts = 0
+    private(set) var finalizedOutcomes: [VoiceSessionTerminalOutcome] = []
+
+    init(failing failureStage: TranscriptCleanupFailureStage) {
+        self.failureStage = failureStage
+    }
+
+    var failedStageAttempts: Int {
+        failureStage == .append ? appendAttempts : finalizeAttempts
+    }
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { _, _, _, _ in },
+            appendEntry: { [self] _, _, _, _, _, _ in
+                try await append()
+            },
+            completeEntry: { _, _ in },
+            finalizeSession: { [self] _, outcome in
+                try await finalize(outcome: outcome)
+            },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func allowCleanup() {
+        cleanupAllowed = true
+    }
+
+    private func append() throws {
+        appendAttempts += 1
+        guard failureStage != .append || cleanupAllowed else {
+            throw SyntheticTranscriptPersistenceError.failed
+        }
+    }
+
+    private func finalize(outcome: VoiceSessionTerminalOutcome) throws {
+        finalizeAttempts += 1
+        guard failureStage != .finalize || cleanupAllowed else {
+            throw SyntheticTranscriptPersistenceError.failed
+        }
+        finalizedOutcomes.append(outcome)
     }
 }
 
