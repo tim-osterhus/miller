@@ -168,6 +168,7 @@ enum SQLiteMigrations {
                     AND substr(credential_ref, 14, 1) = '-'
                     AND substr(credential_ref, 19, 1) = '-'
                     AND substr(credential_ref, 24, 1) = '-'
+                    AND length(replace(credential_ref, '-', '')) = 32
                     AND credential_ref NOT GLOB '*[^0-9a-f-]*'
                 ),
                 UNIQUE (server_id, binding_kind, binding_name)
@@ -286,25 +287,23 @@ enum SQLiteMigrations {
                 ),
                 CHECK (turn_id IS NULL OR voice_session_id IS NULL),
                 CHECK (terminal_at IS NULL OR terminal_at >= started_at),
-                CHECK (approval_decision IS NULL OR approval_requested = 1),
-                CHECK (terminal_at IS NOT NULL OR approval_decision IS NULL),
                 CHECK (
-                    approval_decision != 'decline'
-                    OR terminal_outcome = 'declined'
-                ),
-                CHECK (
-                    approval_decision != 'allow_once'
-                    OR terminal_outcome != 'declined'
-                ),
-                CHECK (
-                    terminal_outcome NOT IN ('succeeded', 'failed')
-                    OR approval_requested = 0
-                    OR approval_decision = 'allow_once'
-                ),
-                CHECK (
-                    terminal_outcome != 'declined'
-                    OR (approval_requested = 0 AND approval_decision IS NULL)
-                    OR (approval_requested = 1 AND approval_decision = 'decline')
+                    (CASE
+                        WHEN terminal_outcome IS NULL THEN
+                            approval_decision IS NULL
+                        WHEN approval_requested = 0 THEN
+                            approval_decision IS NULL
+                        WHEN terminal_outcome IN ('succeeded', 'failed') THEN
+                            approval_decision IS NOT NULL
+                            AND approval_decision = 'allow_once'
+                        WHEN terminal_outcome = 'declined' THEN
+                            approval_decision IS NOT NULL
+                            AND approval_decision = 'decline'
+                        WHEN terminal_outcome IN ('cancelled', 'timed_out') THEN
+                            approval_decision IS NULL
+                            OR approval_decision = 'allow_once'
+                        ELSE 0
+                    END) IS TRUE
                 )
             );
 

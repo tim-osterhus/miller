@@ -61,18 +61,38 @@ struct SQLiteCapabilityRepositoryTests {
         try await repository.saveServer(makeServer())
         let database = try SQLiteDatabase(path: fixture.path)
 
-        #expect(throws: SQLiteError.constraintFailed) {
-            try database.execute(
-                """
-                INSERT INTO capability_secret_bindings
-                    (id, server_id, binding_kind, binding_name, credential_ref)
-                VALUES (?, 'local-tools', 'header', 'Authorization', ?)
-                """,
-                bindings: [
-                    .text(UUID().uuidString.lowercased()),
-                    .text(String(repeating: "x", count: 36)),
-                ]
-            )
+        let credentialReference = UUID().uuidString.lowercased()
+        try database.execute(
+            """
+            INSERT INTO capability_secret_bindings
+                (id, server_id, binding_kind, binding_name, credential_ref)
+            VALUES (?, 'local-tools', 'header', 'X-Valid', ?)
+            """,
+            bindings: [
+                .text(UUID().uuidString.lowercased()),
+                .text(credentialReference),
+            ]
+        )
+
+        for (index, invalidReference) in [
+            String(repeating: "x", count: 36),
+            String(repeating: "-", count: 36),
+            UUID().uuidString.uppercased(),
+        ].enumerated() {
+            #expect(throws: SQLiteError.constraintFailed) {
+                try database.execute(
+                    """
+                    INSERT INTO capability_secret_bindings
+                        (id, server_id, binding_kind, binding_name, credential_ref)
+                    VALUES (?, 'local-tools', 'header', ?, ?)
+                    """,
+                    bindings: [
+                        .text(UUID().uuidString.lowercased()),
+                        .text("X-Invalid-\(index)"),
+                        .text(invalidReference),
+                    ]
+                )
+            }
         }
         #expect(throws: SQLiteError.constraintFailed) {
             try database.execute(
@@ -529,6 +549,44 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func schemaRequiresDecisionsForRequestedTerminalAuditOutcomes() throws {
+        let fixture = try TestDatabase(named: #function)
+        let database = try SQLiteDatabase(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(conversationID, database: database)
+
+        for outcome in ["succeeded", "declined"] {
+            #expect(throws: SQLiteError.constraintFailed) {
+                try insertRawTerminalAudit(
+                    id: UUID(),
+                    conversationID: conversationID,
+                    approvalRequested: 1,
+                    approvalDecision: nil,
+                    terminalOutcome: outcome,
+                    database: database
+                )
+            }
+        }
+
+        for (requested, decision, outcome) in [
+            (1, "allow_once", "succeeded"),
+            (1, "decline", "declined"),
+            (1, nil, "cancelled"),
+            (0, nil, "succeeded"),
+        ] as [(Int, String?, String)] {
+            try insertRawTerminalAudit(
+                id: UUID(),
+                conversationID: conversationID,
+                approvalRequested: requested,
+                approvalDecision: decision,
+                terminalOutcome: outcome,
+                database: database
+            )
+        }
+        #expect(try database.scalarInt("SELECT COUNT(*) FROM capability_audit") == 4)
+    }
+
+    @Test
     func typedAuditNormalizesParentAndRejectsMismatchWithoutPartialWrite() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)
@@ -883,6 +941,36 @@ private func insertRawAudit(
             } ?? .null,
             .text("2026-08-05T00:00:00.000Z"),
             .text(sanitizedSummary),
+        ]
+    )
+}
+
+private func insertRawTerminalAudit(
+    id: UUID,
+    conversationID: ConversationID,
+    approvalRequested: Int,
+    approvalDecision: String?,
+    terminalOutcome: String,
+    database: SQLiteDatabase
+) throws {
+    try database.execute(
+        """
+        INSERT INTO capability_audit
+            (id, conversation_id, turn_id, voice_session_id, source,
+             source_server_id, tool_name, started_at, terminal_at,
+             effective_policy, approval_requested, approval_decision,
+             terminal_outcome, sanitized_summary, visibility)
+        VALUES (?, ?, NULL, NULL, 'miller_mcp', 'local-tools', 'search',
+                ?, ?, 'ask_before_changes', ?, ?, ?, NULL, 'complete')
+        """,
+        bindings: [
+            .text(id.uuidString.lowercased()),
+            .text(conversationID.description),
+            .text("2026-08-05T00:00:00.000Z"),
+            .text("2026-08-05T00:00:01.000Z"),
+            .integer(Int64(approvalRequested)),
+            approvalDecision.map(SQLiteValue.text) ?? .null,
+            .text(terminalOutcome),
         ]
     )
 }
