@@ -1,4 +1,5 @@
 import SwiftUI
+import MillerCore
 
 struct OverlayView: View {
     @ObservedObject var model: AppPresentationModel
@@ -16,7 +17,14 @@ struct OverlayView: View {
                     .accessibilityLabel(AccessibilityLabel.status)
             }
 
-            ScrollView {
+            FollowTailScrollView(
+                conversationIdentity: model.selectedConversationID,
+                contentChange: OverlayTranscriptContentChange(
+                    typedTurns: model.visibleTurns,
+                    liveTurns: model.liveTranscriptTurns,
+                    voiceStatus: model.voiceStatusText
+                )
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.visibleTurns, id: \.id) { turn in
                         TranscriptTurnView(turn: turn)
@@ -118,6 +126,12 @@ struct OverlayView: View {
             inputFocused = true
         }
     }
+}
+
+private struct OverlayTranscriptContentChange: Equatable {
+    let typedTurns: [Turn]
+    let liveTurns: [LiveTranscriptTurn]
+    let voiceStatus: String
 }
 
 private struct LiveTranscriptTurnView: View {

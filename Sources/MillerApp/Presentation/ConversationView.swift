@@ -177,7 +177,10 @@ struct ConversationView: View {
                     .disabled(!model.menuState.canCreateConversation)
                 }
 
-                ScrollView {
+                FollowTailScrollView(
+                    conversationIdentity: model.selectedConversationID,
+                    contentChange: model.visibleTurns
+                ) {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(model.visibleTurns, id: \.id) { turn in
                             TranscriptTurnView(turn: turn)
