@@ -211,7 +211,7 @@ struct MillerStorageTests {
     func testSchemaAllowsExactlyOneSelectedProviderProfile() throws {
         let fixture = try TestDatabase(named: #function)
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 2)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
@@ -221,6 +221,12 @@ struct MillerStorageTests {
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 2"
+            ),
+            1
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
             ),
             1
         )
@@ -311,8 +317,104 @@ struct MillerStorageTests {
             try database.execute("PRAGMA user_version = 99")
         }
         XCTAssertThrowsError(try SQLiteConversationRepository(path: newer.path)) {
-            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 2))
+            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 3))
         }
+    }
+
+    @Test
+    func testVersionTwoDatabaseMigratesWithoutChangingExistingRows() throws {
+        let fixture = try TestDatabase(named: #function)
+        let conversationID = UUID().uuidString.lowercased()
+        let turnID = UUID().uuidString.lowercased()
+        let profileID = UUID().uuidString.lowercased()
+        let credentialID = UUID().uuidString.lowercased()
+        let versionTwoSQL = SQLiteMigrations.all
+            .filter { $0.version <= 2 }
+            .map(\.sql)
+            .joined(separator: "\n")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            fixture.path,
+            """
+            PRAGMA foreign_keys = ON;
+            BEGIN;
+            \(versionTwoSQL)
+            INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, '\(now)'), (2, '\(now)');
+            INSERT INTO conversations
+                (id, title, state, created_at, updated_at, archived_at)
+                VALUES ('\(conversationID)', 'Existing', 'active', '\(now)', '\(now)', NULL);
+            INSERT INTO turns
+                (id, conversation_id, sequence, input_mode, user_text,
+                 assistant_text, state, generation, error_code, error_message,
+                 started_at, terminal_at)
+                VALUES ('\(turnID)', '\(conversationID)', 1, 'text', 'Question',
+                        'Answer', 'completed', 1, NULL, NULL, '\(now)', '\(now)');
+            INSERT INTO provider_profiles
+                (id, kind, label, base_url, model, credential_ref, is_selected,
+                 created_at, updated_at, credential_status)
+                VALUES ('\(profileID)', 'codex_oauth', 'Existing provider', NULL,
+                        'gpt-5', '\(credentialID)', 1, '\(now)', '\(now)', 'valid');
+            PRAGMA user_version = 2;
+            COMMIT;
+            """,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let database = try SQLiteDatabase(path: fixture.path)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
+        XCTAssertEqual(
+            try database.scalarInt("SELECT MAX(version) FROM schema_migrations"),
+            3
+        )
+        XCTAssertEqual(try database.scalarInt("PRAGMA foreign_keys"), 1)
+        XCTAssertEqual(try database.scalarText("PRAGMA quick_check"), "ok")
+        XCTAssertEqual(
+            try database.query(
+                """
+                SELECT id, title, state, created_at, updated_at, archived_at
+                FROM conversations
+                """
+            ),
+            [[
+                .text(conversationID), .text("Existing"), .text("active"),
+                .text(now), .text(now), .null,
+            ]]
+        )
+        XCTAssertEqual(
+            try database.query(
+                """
+                SELECT id, conversation_id, sequence, input_mode, user_text,
+                       assistant_text, state, generation, error_code,
+                       error_message, started_at, terminal_at
+                FROM turns
+                """
+            ),
+            [[
+                .text(turnID), .text(conversationID), .integer(1), .text("text"),
+                .text("Question"), .text("Answer"), .text("completed"),
+                .integer(1), .null, .null, .text(now), .text(now),
+            ]]
+        )
+        XCTAssertEqual(
+            try database.query(
+                """
+                SELECT id, kind, label, base_url, model, credential_ref,
+                       is_selected, created_at, updated_at, credential_status
+                FROM provider_profiles
+                """
+            ),
+            [[
+                .text(profileID), .text("codex_oauth"),
+                .text("Existing provider"), .null, .text("gpt-5"),
+                .text(credentialID), .integer(1), .text(now), .text(now),
+                .text("valid"),
+            ]]
+        )
     }
 
     @Test
