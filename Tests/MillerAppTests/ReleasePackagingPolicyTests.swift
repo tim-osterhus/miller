@@ -12,8 +12,7 @@ struct ReleasePackagingPolicyTests {
             encoding: .utf8
         )
 
-        #expect(manifest.contains("url: \"\(officialSDKURL)\""))
-        #expect(manifest.contains("exact: \"0.12.1\""))
+        #expect(ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: manifest))
     }
 
     @Test
@@ -21,81 +20,147 @@ struct ReleasePackagingPolicyTests {
         let lockURL = repositoryRoot.appendingPathComponent("Package.resolved")
         let lockData = try Data(contentsOf: lockURL)
         let lock = try JSONDecoder().decode(PackageLock.self, from: lockData)
-        let sdkPins = lock.pins.filter { $0.identity == "swift-sdk" }
 
-        #expect(sdkPins.count == 1)
-        let sdk = try #require(sdkPins.first)
-        #expect(sdk.location == officialSDKURL)
-        #expect(sdk.state.version == "0.12.1")
-        #expect(sdk.state.revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil)
+        #expect(ReleasePackagingPolicy.hasApprovedSDKLock(lock))
+    }
+
+    @Test
+    func manifestMatcherRejectsUnboundURLAndVersionDecoys() {
+        let approved = """
+            dependencies: [
+                .package(
+                    url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+                    exact: "0.12.1"
+                ),
+            ]
+            """
+        let unboundDecoy = """
+            // https://github.com/modelcontextprotocol/swift-sdk.git
+            .package(url: "https://example.invalid/not-mcp.git", exact: "0.12.1")
+            """
+        let wrongRequirement = """
+            .package(
+                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+                from: "0.12.1"
+            )
+            """
+
+        #expect(ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: approved))
+        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: unboundDecoy))
+        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: wrongRequirement))
+    }
+
+    @Test
+    func lockMatcherRejectsAnUnapprovedRevision() {
+        let approved = PackageLock(pins: [
+            PackagePin(
+                identity: "swift-sdk",
+                location: officialSDKURL,
+                state: PackagePinState(
+                    revision: "a0ae212ebf6eab5f754c3129608bc5557637e605",
+                    version: "0.12.1"
+                )
+            ),
+        ])
+        let unexpectedRevision = PackageLock(pins: [
+            PackagePin(
+                identity: "swift-sdk",
+                location: officialSDKURL,
+                state: PackagePinState(
+                    revision: "0000000000000000000000000000000000000000",
+                    version: "0.12.1"
+                )
+            ),
+        ])
+
+        #expect(ReleasePackagingPolicy.hasApprovedSDKLock(approved))
+        #expect(!ReleasePackagingPolicy.hasApprovedSDKLock(unexpectedRevision))
+    }
+
+    @Test
+    func productionInventoryRequiresEveryExpectedRootAndInventory() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try FileManager.default.removeItem(
+            at: fixture.appendingPathComponent("Package.resolved")
+        )
+        try FileManager.default.removeItem(
+            at: fixture.appendingPathComponent("Gateway/src")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains("Missing production root: Gateway/src"))
+        #expect(violations.contains("Missing package inventory: Package.resolved"))
+    }
+
+    @Test
+    func productionInventoryRejectsRootHiddenAndScriptedRustInputs() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write("", to: fixture.appendingPathComponent("Cargo.toml"))
+        try write(
+            "// hidden Rust source",
+            to: fixture.appendingPathComponent("Sources/.generated/bridge.rs")
+        )
+        try write(
+            "#!/bin/sh\ncargo build\n/usr/bin/rustc main.rs\n",
+            to: fixture.appendingPathComponent("scripts/build.sh")
+        )
+        try write(
+            "let unsupportedMethod = \"dynamicTools\"; execute(unsupportedMethod)\n"
+                + "let endpoint = \"item/tool/call\"\n",
+            to: fixture.appendingPathComponent("Gateway/src/app-server.swift")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("Cargo.toml") })
+        #expect(violations.contains { $0.contains("Sources/.generated/bridge.rs") })
+        #expect(
+            violations.contains { $0.contains("scripts/build.sh") && $0.contains("cargo") },
+            "\(violations)"
+        )
+        #expect(
+            violations.contains { $0.contains("scripts/build.sh") && $0.contains("rustc") },
+            "\(violations)"
+        )
+        #expect(violations.contains { $0.contains("dynamicTools") })
+        #expect(violations.contains { $0.contains("item/tool/call") })
+    }
+
+    @Test
+    func productionInventoryAllowsNarrowVerificationAssertions() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            """
+            #!/bin/sh
+            forbidden_api="dynamicTools" # reject experimental API
+            refused_endpoint="item/tool/call"
+            find Sources -type f \\( -name cargo -o -name rustc -o -iname '*codex-rs*' \\)
+            """,
+            to: fixture.appendingPathComponent("scripts/verify.sh")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.isEmpty)
     }
 
     @Test
     func productionInventoryExcludesForbiddenInputsAndExperimentalAPIs() throws {
-        let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
-        let forbiddenPathFragments = ["voiceink", "codex-rs", "rust-toolchain"]
-        let forbiddenFileNames = ["cargo", "cargo.toml", "cargo.lock", "rustc"]
-        let forbiddenSourceExtensions = ["rs"]
-        let forbiddenPackagePatterns = [
-            "voiceink",
-            "codex-rs",
-            "(^|[^a-z0-9])cargo([^a-z0-9]|$)",
-            "(^|[^a-z0-9])rust([^a-z0-9]|$)",
-        ]
-        let experimentalAPITerms = ["dynamicTools", "item/tool/call"]
-        let packageInventories = [
-            "Package.swift",
-            "Package.resolved",
-            "Gateway/package.json",
-            "Gateway/package-lock.json",
-            "Packaging/Miller.spdx.json",
-        ]
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: repositoryRoot
+        )
 
-        for relativeRoot in productionRoots {
-            let root = repositoryRoot.appendingPathComponent(relativeRoot)
-            for file in try regularFiles(beneath: root) {
-                let relativePath = file.path.replacingOccurrences(
-                    of: repositoryRoot.path + "/",
-                    with: ""
-                )
-                let components = relativePath.lowercased().split(separator: "/").map(String.init)
-                let fileName = try #require(components.last)
-                #expect(
-                    components.allSatisfy { component in
-                        forbiddenPathFragments.allSatisfy { !component.contains($0) }
-                    } && !forbiddenFileNames.contains(fileName),
-                    "Forbidden production path: \(relativePath)"
-                )
-                #expect(
-                    !forbiddenSourceExtensions.contains(file.pathExtension.lowercased()),
-                    "Forbidden production source: \(relativePath)"
-                )
-
-                guard let contents = try? String(contentsOf: file, encoding: .utf8) else {
-                    continue
-                }
-                for term in experimentalAPITerms {
-                    #expect(
-                        !contents.contains(term),
-                        "Experimental App Server API in production file: \(relativePath)"
-                    )
-                }
-            }
-        }
-
-        for relativePath in packageInventories {
-            let inventoryURL = repositoryRoot.appendingPathComponent(relativePath)
-            guard FileManager.default.fileExists(atPath: inventoryURL.path) else {
-                continue
-            }
-            let contents = try String(contentsOf: inventoryURL, encoding: .utf8).lowercased()
-            for pattern in forbiddenPackagePatterns {
-                #expect(
-                    contents.range(of: pattern, options: .regularExpression) == nil,
-                    "Forbidden package entry in \(relativePath): \(pattern)"
-                )
-            }
-        }
+        #expect(violations.isEmpty, "\(violations.joined(separator: "\n"))")
     }
 
     private var repositoryRoot: URL {
@@ -105,22 +170,274 @@ struct ReleasePackagingPolicyTests {
             .deletingLastPathComponent()
     }
 
-    private func regularFiles(beneath root: URL) throws -> [URL] {
-        guard FileManager.default.fileExists(atPath: root.path) else {
-            return []
+    private func makePolicyFixture() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-release-policy-\(UUID().uuidString)")
+        for relativePath in ["Sources", "Gateway/src", "Packaging", "scripts"] {
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(relativePath),
+                withIntermediateDirectories: true
+            )
         }
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+        for relativePath in [
+            "Package.swift",
+            "Package.resolved",
+            "Gateway/package.json",
+            "Gateway/package-lock.json",
+            "Packaging/Miller.spdx.json",
+        ] {
+            try write("{}", to: root.appendingPathComponent(relativePath))
+        }
+        return root
+    }
+
+    private func write(_ contents: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(contents.utf8).write(to: url)
+    }
+}
+
+private enum ReleasePackagingPolicy {
+    static let officialSDKURL = "https://github.com/modelcontextprotocol/swift-sdk.git"
+    static let approvedSDKVersion = "0.12.1"
+    static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
+
+    private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
+    private static let packageInventories = [
+        "Package.swift",
+        "Package.resolved",
+        "Gateway/package.json",
+        "Gateway/package-lock.json",
+        "Packaging/Miller.spdx.json",
+    ]
+    private static let forbiddenRootEntries = [
+        ".cargo",
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+    ]
+    private static let forbiddenPathFragments = ["voiceink", "codex-rs", "rust-toolchain"]
+    private static let forbiddenFileNames = [".cargo", "cargo", "cargo.lock", "cargo.toml", "rustc"]
+    private static let forbiddenPackagePatterns = [
+        "voiceink",
+        "codex-rs",
+        "(^|[^a-z0-9])cargo([^a-z0-9]|$)",
+        "(^|[^a-z0-9])rust([^a-z0-9]|$)",
+    ]
+    private static let experimentalAPITerms = ["dynamicTools", "item/tool/call"]
+    private static let explicitAssertionMarkers = [
+        "#expect(",
+        "assert(",
+        "denied_",
+        "exit 1",
+        "forbidden_",
+        "! grep ",
+        "! rg ",
+        "if grep ",
+        "if rg ",
+        "precondition(",
+        "refused_",
+        "rejected_",
+        "return false",
+        "test !",
+        "throw ",
+    ]
+    private static let rustCommands = ["cargo", "rustc"]
+
+    static func hasApprovedSDKDeclaration(in manifest: String) -> Bool {
+        let escapedURL = NSRegularExpression.escapedPattern(for: officialSDKURL)
+        let escapedVersion = NSRegularExpression.escapedPattern(for: approvedSDKVersion)
+        let pattern = #"\.package\s*\(\s*url\s*:\s*""#
+            + escapedURL
+            + #""\s*,\s*exact\s*:\s*""#
+            + escapedVersion
+            + #""\s*,?\s*\)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return false
+        }
+        return expression.numberOfMatches(
+            in: manifest,
+            range: NSRange(manifest.startIndex..., in: manifest)
+        ) == 1
+    }
+
+    static func hasApprovedSDKLock(_ lock: PackageLock) -> Bool {
+        let pins = lock.pins.filter { $0.identity == "swift-sdk" }
+        return pins.count == 1
+            && pins[0].location == officialSDKURL
+            && pins[0].state.version == approvedSDKVersion
+            && pins[0].state.revision == approvedSDKRevision
+    }
+
+    static func inventoryViolations(repositoryRoot: URL) throws -> [String] {
+        var violations: [String] = []
+        let fileManager = FileManager.default
+        let root = repositoryRoot.resolvingSymlinksInPath().standardizedFileURL
+
+        for relativePath in productionRoots {
+            let url = root.appendingPathComponent(relativePath)
+            if !isDirectory(url) {
+                violations.append("Missing production root: \(relativePath)")
+            }
+        }
+        for relativePath in packageInventories {
+            let url = root.appendingPathComponent(relativePath)
+            if !isRegularFile(url) {
+                violations.append("Missing package inventory: \(relativePath)")
+            }
+        }
+        for relativePath in forbiddenRootEntries {
+            if fileManager.fileExists(
+                atPath: root.appendingPathComponent(relativePath).path
+            ) {
+                violations.append("Forbidden root build input: \(relativePath)")
+            }
+        }
+
+        let rootEntries = try fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        for url in rootEntries where url.pathExtension.lowercased() == "rs" {
+            violations.append("Forbidden Rust source: \(url.lastPathComponent)")
+        }
+
+        for relativeRoot in productionRoots {
+            let productionRoot = root.appendingPathComponent(relativeRoot)
+            guard isDirectory(productionRoot) else { continue }
+            for entry in try entries(beneath: productionRoot) {
+                let relativePath = relativePath(for: entry, repositoryRoot: root)
+                let values = try entry.resourceValues(
+                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+                )
+                if values.isSymbolicLink == true {
+                    violations.append("Symlinked production entry: \(relativePath)")
+                    continue
+                }
+                guard values.isRegularFile == true else { continue }
+
+                violations.append(contentsOf: pathViolations(
+                    for: entry,
+                    relativePath: relativePath
+                ))
+                guard let contents = try? String(contentsOf: entry, encoding: .utf8) else {
+                    continue
+                }
+                violations.append(contentsOf: contentViolations(
+                    in: contents,
+                    relativePath: relativePath
+                ))
+            }
+        }
+
+        for relativePath in packageInventories {
+            let url = root.appendingPathComponent(relativePath)
+            guard isRegularFile(url) else { continue }
+            let contents = try String(contentsOf: url, encoding: .utf8).lowercased()
+            for pattern in forbiddenPackagePatterns
+            where contents.range(of: pattern, options: .regularExpression) != nil {
+                violations.append("Forbidden package entry in \(relativePath): \(pattern)")
+            }
+        }
+
+        return violations.sorted()
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ) else {
+            return false
+        }
+        return values.isDirectory == true && values.isSymbolicLink != true
+    }
+
+    private static func isRegularFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ) else {
+            return false
+        }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
+    private static func entries(beneath root: URL) throws -> [URL] {
         let enumerator = try #require(
             FileManager.default.enumerator(
                 at: root,
-                includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles]
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+                options: []
             )
         )
-        return try enumerator.compactMap { element in
-            let url = try #require(element as? URL)
-            let values = try url.resourceValues(forKeys: Set(keys))
-            return values.isRegularFile == true && values.isSymbolicLink != true ? url : nil
+        return enumerator.compactMap { $0 as? URL }.sorted { $0.path < $1.path }
+    }
+
+    private static func relativePath(for url: URL, repositoryRoot: URL) -> String {
+        let rootPath = repositoryRoot.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let entryPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+        guard entryPath.hasPrefix(rootPath) else { return entryPath }
+        return String(entryPath.dropFirst(rootPath.count))
+    }
+
+    private static func pathViolations(for url: URL, relativePath: String) -> [String] {
+        let components = relativePath.lowercased().split(separator: "/").map(String.init)
+        let fileName = components.last ?? ""
+        var violations: [String] = []
+        if components.contains(where: { component in
+            forbiddenPathFragments.contains { component.contains($0) }
+        }) || forbiddenFileNames.contains(fileName) {
+            violations.append("Forbidden production path: \(relativePath)")
+        }
+        if url.pathExtension.lowercased() == "rs" {
+            violations.append("Forbidden Rust source: \(relativePath)")
+        }
+        return violations
+    }
+
+    private static func contentViolations(
+        in contents: String,
+        relativePath: String
+    ) -> [String] {
+        var violations: [String] = []
+        for (offset, line) in contents.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: { $0.isNewline }
+        ).enumerated() {
+            let text = String(line)
+            let lowercased = text.lowercased()
+            let isAssertion = explicitAssertionMarkers.contains {
+                lowercased.contains($0)
+            }
+            for term in experimentalAPITerms where text.contains(term) && !isAssertion {
+                violations.append(
+                    "Experimental API \(term) in \(relativePath):\(offset + 1)"
+                )
+            }
+            guard relativePath.hasPrefix("scripts/"), !isAssertion else { continue }
+            for command in rustCommands where invokes(command, in: lowercased) {
+                violations.append(
+                    "Forbidden \(command) invocation in \(relativePath):\(offset + 1)"
+                )
+            }
+        }
+        return violations
+    }
+
+    private static func invokes(_ command: String, in line: String) -> Bool {
+        let wrappers = #"(?:(?:env|sudo|xcrun|command)\s+)*"#
+        let executable = #"(?:\S*/)?"# + command + #"(?:\s|$)"#
+        let patterns = [
+            #"^\s*(?:(?:if|while|until)\s+|!\s+)?"# + wrappers + executable,
+            #"(?:&&|\|\||;|\|)\s*"# + wrappers + executable,
+            #"\$\(\s*"# + wrappers + executable,
+            #"`\s*"# + wrappers + executable,
+        ]
+        return patterns.contains {
+            line.range(of: $0, options: .regularExpression) != nil
         }
     }
 }
