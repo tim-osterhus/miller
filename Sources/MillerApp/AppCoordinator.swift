@@ -874,8 +874,6 @@ final class AppPresentationModel: ObservableObject {
         generation: UInt64
     ) async {
         guard generation == liveVoiceEventGeneration else { return }
-        liveTranscriptProjection.record(event)
-        liveTranscriptTurns = liveTranscriptProjection.turns
         switch event {
         case let .sessionAdmitted(id):
             do {
@@ -892,6 +890,8 @@ final class AppPresentationModel: ObservableObject {
         case .transcriptDelta, .transcriptDone:
             do {
                 try await liveTranscriptRecorder.record(event)
+                liveTranscriptProjection.record(event)
+                liveTranscriptTurns = liveTranscriptProjection.turns
             } catch {
                 presentTranscriptPersistenceFailure()
             }

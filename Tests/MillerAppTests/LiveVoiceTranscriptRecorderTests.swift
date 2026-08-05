@@ -79,6 +79,32 @@ struct LiveVoiceTranscriptRecorderTests {
     }
 
     @Test
+    func terminalOnlyTurnsUseUniqueSQLiteSequences() async throws {
+        let store = try TemporaryVoiceHistoryStore()
+        defer { store.removeFiles() }
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: sqlitePersistence(store.repository)
+        )
+        let sessionID = UUID()
+        try await recorder.begin(
+            sessionID: sessionID,
+            conversationID: nil,
+            activationSource: .manual
+        )
+
+        try await recorder.record(.transcriptDone(role: .user, text: "first"))
+        try await recorder.record(.transcriptDone(role: .user, text: "second"))
+        try await recorder.record(.transcriptDone(role: .assistant, text: "third"))
+        try await recorder.record(.transcriptDone(role: .user, text: "fourth"))
+        try await recorder.finish(outcome: .completed)
+
+        let entries = try await store.repository.entries(sessionID: sessionID)
+        #expect(entries.map(\.sequence) == [0, 1, 2, 3])
+        #expect(entries.map(\.role) == [.user, .user, .assistant, .user])
+        #expect(entries.map(\.text) == ["first", "second", "third", "fourth"])
+    }
+
+    @Test
     func deltasAccumulateAndTerminalTextReplacesThePartial() async throws {
         let probe = RecorderPersistenceProbe()
         let recorder = LiveVoiceTranscriptRecorder(
@@ -425,6 +451,145 @@ struct LiveVoiceTranscriptRecorderTests {
         #expect(await probe.finalizedOutcomes == [.completed])
     }
 
+    @Test(arguments: RetryFailureStage.completionStages)
+    @MainActor
+    func failedCompletionReplaysOneStableSQLiteEntry(
+        stage: RetryFailureStage
+    ) async throws {
+        let store = try TemporaryVoiceHistoryStore()
+        defer { store.removeFiles() }
+        let probe = SQLiteRetryPersistenceProbe(
+            repository: store.repository,
+            failOnce: stage
+        )
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let model = AppPresentationModel(
+            dependencies: inertHostDependencies(),
+            liveVoice: .unavailable,
+            liveTranscriptRecorder: recorder
+        )
+        let sessionID = UUID()
+        await model.applyLiveEvent(.sessionAdmitted(id: sessionID))
+        await model.applyLiveEvent(.state(.listening))
+        if stage == .complete {
+            await model.applyLiveEvent(
+                .transcriptDelta(role: .assistant, text: "partial")
+            )
+        }
+
+        await model.applyLiveEvent(
+            .transcriptDone(role: .assistant, text: "final response")
+        )
+        #expect(model.voiceState == .listening)
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        #expect(model.liveTranscriptTurns.map(\.isComplete) == (
+            stage == .complete ? [false] : []
+        ))
+
+        await model.applyLiveEvent(
+            .transcriptDone(role: .assistant, text: "final response")
+        )
+        let entries = try await store.repository.entries(sessionID: sessionID)
+        #expect(entries.count == 1)
+        #expect(entries.map(\.sequence) == [0])
+        #expect(entries.map(\.text) == ["final response"])
+        #expect(entries.map(\.completionState) == [.complete])
+        #expect(model.liveTranscriptTurns.map(\.text) == ["final response"])
+        #expect(model.liveTranscriptTurns.map(\.isComplete) == [true])
+        await model.abandonLiveVoiceSession()
+    }
+
+    @Test(arguments: RetryFailureStage.cleanupStages)
+    func failedCleanupRetainsSessionAndFirstOutcomeForRetry(
+        stage: RetryFailureStage
+    ) async throws {
+        let store = try TemporaryVoiceHistoryStore()
+        defer { store.removeFiles() }
+        let probe = SQLiteRetryPersistenceProbe(
+            repository: store.repository,
+            failOnce: stage
+        )
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let sessionID = UUID()
+        try await recorder.begin(
+            sessionID: sessionID,
+            conversationID: nil,
+            activationSource: .manual
+        )
+        if stage == .append {
+            try await recorder.record(
+                .transcriptDelta(role: .user, text: "recoverable partial")
+            )
+        }
+
+        await #expect(throws: RetryPersistenceError.injected(stage)) {
+            try await recorder.finish(outcome: .stopped)
+        }
+        await #expect(throws: LiveVoiceTranscriptRecorderError.sessionAlreadyActive) {
+            try await recorder.begin(
+                sessionID: UUID(),
+                conversationID: nil,
+                activationSource: .manual
+            )
+        }
+        try await recorder.finish(outcome: .failed)
+
+        let session = try #require(
+            try await store.repository.session(id: sessionID)
+        )
+        #expect(session.terminalOutcome == .stopped)
+        if stage == .append {
+            let entries = try await store.repository.entries(sessionID: sessionID)
+            #expect(entries.map(\.text) == ["recoverable partial"])
+            #expect(entries.map(\.completionState) == [.incomplete])
+        }
+        try await recorder.begin(
+            sessionID: UUID(), conversationID: nil, activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+    }
+
+    @Test
+    func cancelledCleanupRetainsSessionAndOutcomeForRetry() async throws {
+        let store = try TemporaryVoiceHistoryStore()
+        defer { store.removeFiles() }
+        let probe = SQLiteCancelledFinalizeProbe(repository: store.repository)
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let sessionID = UUID()
+        try await recorder.begin(
+            sessionID: sessionID,
+            conversationID: nil,
+            activationSource: .manual
+        )
+        try await recorder.record(
+            .transcriptDelta(role: .user, text: "cancelled cleanup partial")
+        )
+        let first = Task {
+            try await recorder.finish(outcome: .stopped)
+        }
+        await probe.waitUntilFinalizeIsSuspended()
+
+        first.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await first.value
+        }
+        try await recorder.finish(outcome: .failed)
+
+        let session = try #require(
+            try await store.repository.session(id: sessionID)
+        )
+        #expect(session.terminalOutcome == .stopped)
+        let entries = try await store.repository.entries(sessionID: sessionID)
+        #expect(entries.map(\.text) == ["cancelled cleanup partial"])
+        #expect(entries.map(\.completionState) == [.incomplete])
+    }
+
     @Test @MainActor
     func presentationStartsPersistenceOnlyAfterSessionAdmission() async throws {
         let probe = RecorderPersistenceProbe()
@@ -487,6 +652,210 @@ private func inertHostDependencies() -> HostDependencies {
         unarchive: { _ in },
         delete: { _ in }
     )
+}
+
+private struct TemporaryVoiceHistoryStore {
+    let path: String
+    let repository: SQLiteVoiceHistoryRepository
+
+    init() throws {
+        path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-voice-\(UUID().uuidString).sqlite3")
+            .path
+        repository = try SQLiteVoiceHistoryRepository(path: path)
+    }
+
+    func removeFiles() {
+        for suffix in ["", "-shm", "-wal"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+    }
+}
+
+private func sqlitePersistence(
+    _ repository: SQLiteVoiceHistoryRepository
+) -> LiveVoiceTranscriptRecorder.Persistence {
+    .init(
+        savingEnabled: { true },
+        nextSessionSavingEnabled: { true },
+        restoreNextSessionSavingDefault: {},
+        startSession: { id, conversationID, activationSource, saveChoice in
+            try await repository.startSession(
+                id: id,
+                conversationID: conversationID,
+                activationSource: activationSource,
+                saveChoice: saveChoice
+            )
+        },
+        appendEntry: {
+            id, sessionID, sequence, role, text, completionState in
+            try await repository.appendEntry(
+                id: id,
+                sessionID: sessionID,
+                sequence: sequence,
+                role: role,
+                text: text,
+                completionState: completionState
+            )
+        },
+        completeEntry: { id, text in
+            try await repository.completeEntry(id: id, text: text)
+        },
+        finalizeSession: { id, outcome in
+            try await repository.finalizeSession(id: id, outcome: outcome)
+        },
+        recoverInterruptedSessions: {
+            try await repository.recoverInterruptedSessions()
+        }
+    )
+}
+
+enum RetryFailureStage: Hashable, Sendable {
+    case append
+    case complete
+    case finalize
+
+    static let completionStages: [Self] = [.append, .complete]
+    static let cleanupStages: [Self] = [.append, .finalize]
+}
+
+private enum RetryPersistenceError: Error, Equatable {
+    case injected(RetryFailureStage)
+}
+
+private actor SQLiteRetryPersistenceProbe {
+    private let repository: SQLiteVoiceHistoryRepository
+    private let failureStage: RetryFailureStage
+    private var shouldFail = true
+
+    init(
+        repository: SQLiteVoiceHistoryRepository,
+        failOnce failureStage: RetryFailureStage
+    ) {
+        self.repository = repository
+        self.failureStage = failureStage
+    }
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: {
+                [self] id, conversationID, activationSource, saveChoice in
+                try await repository.startSession(
+                    id: id,
+                    conversationID: conversationID,
+                    activationSource: activationSource,
+                    saveChoice: saveChoice
+                )
+            },
+            appendEntry: {
+                [self] id, sessionID, sequence, role, text, completionState in
+                try await appendEntry(
+                    id: id,
+                    sessionID: sessionID,
+                    sequence: sequence,
+                    role: role,
+                    text: text,
+                    completionState: completionState
+                )
+            },
+            completeEntry: { [self] id, text in
+                try await completeEntry(id: id, text: text)
+            },
+            finalizeSession: { [self] id, outcome in
+                try await finalizeSession(id: id, outcome: outcome)
+            },
+            recoverInterruptedSessions: {
+                [self] in try await repository.recoverInterruptedSessions()
+            }
+        )
+    }
+
+    private func appendEntry(
+        id: UUID,
+        sessionID: UUID,
+        sequence: Int,
+        role: VoiceTranscriptRole,
+        text: String,
+        completionState: VoiceEntryCompletionState
+    ) async throws {
+        try failIfNeeded(.append)
+        try await repository.appendEntry(
+            id: id,
+            sessionID: sessionID,
+            sequence: sequence,
+            role: role,
+            text: text,
+            completionState: completionState
+        )
+    }
+
+    private func completeEntry(id: UUID, text: String) async throws {
+        try failIfNeeded(.complete)
+        try await repository.completeEntry(id: id, text: text)
+    }
+
+    private func finalizeSession(
+        id: UUID,
+        outcome: VoiceSessionTerminalOutcome
+    ) async throws {
+        try failIfNeeded(.finalize)
+        try await repository.finalizeSession(id: id, outcome: outcome)
+    }
+
+    private func failIfNeeded(_ stage: RetryFailureStage) throws {
+        guard shouldFail, failureStage == stage else { return }
+        shouldFail = false
+        throw RetryPersistenceError.injected(stage)
+    }
+}
+
+private actor SQLiteCancelledFinalizeProbe {
+    private let repository: SQLiteVoiceHistoryRepository
+    private var shouldSuspend = true
+    private var finalizeIsSuspended = false
+
+    init(repository: SQLiteVoiceHistoryRepository) {
+        self.repository = repository
+    }
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        var persistence = sqlitePersistence(repository)
+        persistence = .init(
+            savingEnabled: persistence.savingEnabled,
+            nextSessionSavingEnabled: persistence.nextSessionSavingEnabled,
+            restoreNextSessionSavingDefault:
+                persistence.restoreNextSessionSavingDefault,
+            startSession: persistence.startSession,
+            appendEntry: persistence.appendEntry,
+            completeEntry: persistence.completeEntry,
+            finalizeSession: { [self] id, outcome in
+                try await finalizeSession(id: id, outcome: outcome)
+            },
+            recoverInterruptedSessions: persistence.recoverInterruptedSessions
+        )
+        return persistence
+    }
+
+    func waitUntilFinalizeIsSuspended() async {
+        while !finalizeIsSuspended {
+            await Task.yield()
+        }
+    }
+
+    private func finalizeSession(
+        id: UUID,
+        outcome: VoiceSessionTerminalOutcome
+    ) async throws {
+        if shouldSuspend {
+            shouldSuspend = false
+            finalizeIsSuspended = true
+            try await Task.sleep(for: .seconds(60))
+        }
+        try await repository.finalizeSession(id: id, outcome: outcome)
+    }
 }
 
 private actor RecorderPersistenceProbe {

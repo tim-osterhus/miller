@@ -166,6 +166,7 @@ actor LiveVoiceTranscriptRecorder {
         var pending: [LiveTranscriptRole: PendingEntry] = [:]
         var lastCompletedRole: LiveTranscriptRole?
         var lastCompletedText: String?
+        var terminalOutcome: VoiceSessionTerminalOutcome?
     }
 
     private struct OperationWaiter {
@@ -222,6 +223,7 @@ actor LiveVoiceTranscriptRecorder {
         defer { releaseOperation() }
         try Task.checkCancellation()
         guard var active = activeSession else { return }
+        guard active.terminalOutcome == nil else { return }
         switch event {
         case let .transcriptDelta(role, text):
             guard active.saveChoice == .save, !text.isEmpty else { return }
@@ -247,27 +249,44 @@ actor LiveVoiceTranscriptRecorder {
                active.lastCompletedText == text {
                 return
             }
-            let pending = active.pending.removeValue(forKey: role)
+            var pending = active.pending[role]
             let finalText = Self.bounded(
                 text.isEmpty ? pending?.text ?? "" : text
             )
-            active.lastCompletedRole = role
-            active.lastCompletedText = text
-            activeSession = active
-            if !finalText.isEmpty {
-                let id = pending?.id ?? UUID()
-                let sequence = pending?.sequence ?? active.nextSequence
-                if pending == nil { active.nextSequence += 1 }
-                try await persistence.appendEntry(
-                    id,
-                    active.id,
-                    sequence,
-                    Self.storageRole(role),
-                    pending?.text ?? finalText,
-                    .incomplete
+            if pending == nil, !finalText.isEmpty {
+                pending = PendingEntry(
+                    id: UUID(),
+                    sequence: active.nextSequence,
+                    role: role,
+                    text: finalText
                 )
-                try await persistence.completeEntry(id, finalText)
+                active.pending[role] = pending
+                active.nextSequence += 1
             }
+            activeSession = active
+            guard let pending, !finalText.isEmpty else {
+                active.lastCompletedRole = role
+                active.lastCompletedText = text
+                activeSession = active
+                return
+            }
+            try await persistence.appendEntry(
+                pending.id,
+                active.id,
+                pending.sequence,
+                Self.storageRole(role),
+                pending.text,
+                .incomplete
+            )
+            try await persistence.completeEntry(pending.id, finalText)
+            guard var committed = activeSession,
+                  committed.id == active.id,
+                  committed.pending[role]?.id == pending.id
+            else { return }
+            committed.pending[role] = nil
+            committed.lastCompletedRole = role
+            committed.lastCompletedText = text
+            activeSession = committed
         case .sessionAdmitted, .state, .failed:
             break
         }
@@ -277,8 +296,10 @@ actor LiveVoiceTranscriptRecorder {
         try await acquireOperation()
         defer { releaseOperation() }
         try Task.checkCancellation()
-        guard let active = activeSession else { return }
-        defer { activeSession = nil }
+        guard var active = activeSession else { return }
+        let terminalOutcome = active.terminalOutcome ?? outcome
+        active.terminalOutcome = terminalOutcome
+        activeSession = active
         if active.saveChoice == .save {
             for pending in active.pending.values.sorted(by: {
                 $0.sequence < $1.sequence
@@ -293,7 +314,8 @@ actor LiveVoiceTranscriptRecorder {
                 )
             }
         }
-        try await persistence.finalizeSession(active.id, outcome)
+        try await persistence.finalizeSession(active.id, terminalOutcome)
+        activeSession = nil
     }
 
     func recoverInterruptedSessions() async throws {

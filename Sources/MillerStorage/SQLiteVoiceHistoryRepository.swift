@@ -506,10 +506,15 @@ public actor SQLiteVoiceHistoryRepository {
     }
 
     private static func timestamp(_ date: Date = Date()) -> String {
+        // ISO8601DateFormatter emits millisecond precision and may round up.
+        // Truncate first so a value read back from SQLite can never appear
+        // later than an immediately following completion/finalization time.
+        let milliseconds = floor(date.timeIntervalSince1970 * 1_000)
+        let persistedDate = Date(timeIntervalSince1970: milliseconds / 1_000)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter.string(from: date)
+        return formatter.string(from: persistedDate)
     }
 
     private static func date(_ value: String) -> Date? {

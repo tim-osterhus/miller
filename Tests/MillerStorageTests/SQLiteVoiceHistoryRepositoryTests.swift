@@ -239,4 +239,50 @@ struct SQLiteVoiceHistoryRepositoryTests {
             )
         }
     }
+
+    @Test
+    func submillisecondStartDoesNotRoundPastImmediateCompletion() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteVoiceHistoryRepository(path: fixture.path)
+        let sessionID = UUID()
+        let entryID = UUID()
+        let started = Date(timeIntervalSince1970: 100.0009)
+        let completed = Date(timeIntervalSince1970: 100.00091)
+
+        try await repository.startSession(
+            id: sessionID,
+            conversationID: nil,
+            activationSource: .manual,
+            saveChoice: .save,
+            startedAt: started
+        )
+        try await repository.appendEntry(
+            id: entryID,
+            sessionID: sessionID,
+            sequence: 0,
+            role: .user,
+            text: "immediate",
+            completionState: .incomplete,
+            startedAt: started
+        )
+        try await repository.completeEntry(
+            id: entryID,
+            text: "immediate",
+            completedAt: completed
+        )
+        try await repository.finalizeSession(
+            id: sessionID,
+            outcome: .completed,
+            endedAt: completed
+        )
+
+        #expect(
+            try await repository.entries(sessionID: sessionID)
+                .map(\.completionState) == [.complete]
+        )
+        #expect(
+            try await repository.session(id: sessionID)?.terminalOutcome
+                == .completed
+        )
+    }
 }
