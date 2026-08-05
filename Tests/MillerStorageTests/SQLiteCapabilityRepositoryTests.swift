@@ -199,24 +199,87 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
-    func auditUsesClosedSummaryCodesAndTerminalizesIdempotently() async throws {
+    func sanitizedAuditSummaryRendersOnlyTrustedBoundedProjections() throws {
+        let safe = SanitizedCapabilitySummary(.listCalendarEvents)
+        #expect(safe.text == "List calendar events.")
+        #expect(safe.text.utf8.count <= 1_024)
+        #expect(
+            try JSONDecoder().decode(
+                SanitizedCapabilitySummary.self,
+                from: JSONEncoder().encode(safe)
+            ) == safe
+        )
+
+        let refusal = SanitizedCapabilitySummary(.approvalDeclined)
+        #expect(refusal.text == "Capability request declined by the user.")
+        #expect(
+            try JSONDecoder().decode(
+                SanitizedCapabilitySummary.self,
+                from: JSONEncoder().encode(refusal)
+            ) == refusal
+        )
+
+        for adversary in [
+            "password=hunter2", "access_token=secret", "Cookie: session=x",
+            "{\"result\":\"raw\"}", "private email body",
+            String(repeating: "x", count: 1_025),
+        ] {
+            #expect(throws: (any Error).self) {
+                _ = try JSONDecoder().decode(
+                    SanitizedCapabilitySummary.self,
+                    from: JSONEncoder().encode(adversary)
+                )
+            }
+        }
+    }
+
+    @Test
+    func schemaAcceptsOnlyTrustedBoundedAuditSummaryRenderings() throws {
+        let fixture = try TestDatabase(named: #function)
+        let database = try SQLiteDatabase(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(conversationID, database: database)
+        let projections = SanitizedCapabilitySummary.Projection.allCases
+        let auditIDs = projections.map { _ in UUID() }
+        for (id, projection) in zip(auditIDs, projections) {
+            try insertRawAudit(
+                id: id,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil,
+                sanitizedSummary: SanitizedCapabilitySummary(projection).text,
+                database: database
+            )
+        }
+        #expect(
+            try database.scalarInt("SELECT COUNT(*) FROM capability_audit")
+                == projections.count
+        )
+
+        for adversary in [
+            "password=hunter2", "access_token=secret", "Cookie: session=x",
+            "{\"result\":\"raw\"}", "private email body",
+            String(repeating: "x", count: 1_025),
+        ] {
+            #expect(throws: SQLiteError.constraintFailed) {
+                try database.execute(
+                    "UPDATE capability_audit SET sanitized_summary = ? WHERE id = ?",
+                    bindings: [
+                        .text(adversary),
+                        .text(auditIDs[0].uuidString.lowercased()),
+                    ]
+                )
+            }
+        }
+    }
+
+    @Test
+    func auditPersistsTrustedSummaryAndTerminalizesIdempotently() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)
         let conversationID = ConversationID()
         let database = try SQLiteDatabase(path: fixture.path)
         try insertConversation(conversationID, database: database)
-        for adversary in [
-            "password=hunter2", "access_token=secret", "Cookie: session=x",
-            "{\"result\":\"raw\"}", "private email body",
-        ] {
-            let data = Data("\"\(adversary)\"".utf8)
-            #expect(throws: (any Error).self) {
-                _ = try JSONDecoder().decode(
-                    CapabilityAuditSummaryCode.self,
-                    from: data
-                )
-            }
-        }
         let callID = CapabilityCallID()
         let started = Date(timeIntervalSince1970: 100)
         let audit = CapabilityAuditRecord(
@@ -233,7 +296,7 @@ struct SQLiteCapabilityRepositoryTests {
             approvalRequested: true,
             approvalDecision: nil,
             terminalOutcome: nil,
-            summaryCode: .capabilityOperation,
+            summary: SanitizedCapabilitySummary(.readLocalFiles),
             visibility: .complete
         )
         try await repository.beginAudit(audit)
@@ -248,7 +311,7 @@ struct SQLiteCapabilityRepositoryTests {
                     effectivePolicy: .askBeforeChanges,
                     approvalRequested: true, approvalDecision: nil,
                     terminalOutcome: nil,
-                    summaryCode: .capabilityOperation,
+                    summary: SanitizedCapabilitySummary(.readLocalFiles),
                     visibility: .complete
                 )
             )
@@ -276,6 +339,10 @@ struct SQLiteCapabilityRepositoryTests {
         #expect(stored.terminalOutcome == .succeeded)
         #expect(stored.approvalDecision == .allowOnce)
         #expect(stored.terminalAt == started.addingTimeInterval(2))
+        #expect(
+            stored.summary
+                == SanitizedCapabilitySummary(.readLocalFiles)
+        )
 
         let invalidTerminalID = CapabilityCallID()
         try await repository.beginAudit(
@@ -287,7 +354,7 @@ struct SQLiteCapabilityRepositoryTests {
                 effectivePolicy: .askBeforeChanges,
                 approvalRequested: true, approvalDecision: nil,
                 terminalOutcome: nil,
-                summaryCode: .capabilityOperation,
+                summary: SanitizedCapabilitySummary(.readLocalFiles),
                 visibility: .complete
             )
         )
@@ -299,6 +366,74 @@ struct SQLiteCapabilityRepositoryTests {
             )
         }
         #expect(try await repository.audit(id: invalidTerminalID)?.terminalAt == nil)
+    }
+
+    @Test
+    func terminalAuditReplayWithoutTimestampDoesNotAssertANewClockValue() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(
+            conversationID,
+            database: SQLiteDatabase(path: fixture.path)
+        )
+        let callID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: callID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil
+            )
+        )
+
+        try await repository.terminalizeAudit(
+            id: callID, outcome: .succeeded, approvalDecision: nil
+        )
+        let firstTerminalAt = try #require(
+            try await repository.audit(id: callID)?.terminalAt
+        )
+        try await repository.terminalizeAudit(
+            id: callID, outcome: .succeeded, approvalDecision: nil
+        )
+
+        #expect(try await repository.audit(id: callID)?.terminalAt == firstTerminalAt)
+    }
+
+    @Test
+    func terminalAuditReplayCanonicalizesExplicitSubmillisecondTimestamp() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(
+            conversationID,
+            database: SQLiteDatabase(path: fixture.path)
+        )
+        let callID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: callID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil
+            )
+        )
+        let terminalAt = Date(timeIntervalSince1970: 100.123_456)
+
+        try await repository.terminalizeAudit(
+            id: callID,
+            outcome: .succeeded,
+            approvalDecision: nil,
+            terminalAt: terminalAt
+        )
+        try await repository.terminalizeAudit(
+            id: callID,
+            outcome: .succeeded,
+            approvalDecision: nil,
+            terminalAt: terminalAt
+        )
+
+        #expect(try await repository.audit(id: callID)?.terminalAt != nil)
     }
 
     @Test
@@ -322,7 +457,7 @@ struct SQLiteCapabilityRepositoryTests {
                 effectivePolicy: .fullyTrusted,
                 approvalRequested: false, approvalDecision: nil,
                 terminalOutcome: nil,
-                summaryCode: .capabilityOperation,
+                summary: SanitizedCapabilitySummary(.providerDetailsUnavailable),
                 visibility: .opaqueProviderActivity
             )
         )
@@ -673,7 +808,7 @@ private func makeAudit(
         approvalRequested: false,
         approvalDecision: nil,
         terminalOutcome: nil,
-        summaryCode: .capabilityOperation,
+        summary: SanitizedCapabilitySummary(.readLocalFiles),
         visibility: .complete
     )
 }
@@ -723,6 +858,9 @@ private func insertRawAudit(
     conversationID: ConversationID?,
     turnID: TurnID?,
     voiceSessionID: UUID?,
+    sanitizedSummary: String = SanitizedCapabilitySummary(
+        .readLocalFiles
+    ).text,
     database: SQLiteDatabase
 ) throws {
     try database.execute(
@@ -734,7 +872,7 @@ private func insertRawAudit(
              terminal_outcome, sanitized_summary, visibility)
         VALUES (?, ?, ?, ?, 'miller_mcp', 'local-tools', 'search', ?,
                 NULL, 'ask_before_changes', 0, NULL, NULL,
-                'capability_operation', 'complete')
+                ?, 'complete')
         """,
         bindings: [
             .text(id.uuidString.lowercased()),
@@ -744,6 +882,7 @@ private func insertRawAudit(
                 .text($0.uuidString.lowercased())
             } ?? .null,
             .text("2026-08-05T00:00:00.000Z"),
+            .text(sanitizedSummary),
         ]
     )
 }

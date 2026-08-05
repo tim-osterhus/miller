@@ -257,9 +257,19 @@ enum SQLiteMigrations {
                     )
                 ),
                 sanitized_summary TEXT CHECK (
-                    sanitized_summary IS NULL OR sanitized_summary IN (
-                        'capability_operation', 'read_only_operation',
-                        'state_changing_operation', 'opaque_provider_activity'
+                    sanitized_summary IS NULL OR (
+                        length(CAST(sanitized_summary AS BLOB)) <= 1024
+                        AND sanitized_summary IN (
+                            'List calendar events.',
+                            'Create a calendar event.',
+                            'Search email metadata.',
+                            'Read local files.',
+                            'Change local files.',
+                            'Run a local command.',
+                            'Capability request declined by the user.',
+                            'Capability request refused by policy.',
+                            'Provider activity recorded without result details.'
+                        )
                     )
                 ),
                 visibility TEXT NOT NULL CHECK (

@@ -142,7 +142,7 @@ struct SQLiteVoiceHistoryRepositoryTests {
                      terminal_outcome, sanitized_summary, visibility)
                 VALUES (?, NULL, NULL, ?, 'miller_mcp', 'server', 'tool', ?,
                         NULL, 'ask_before_changes', 0, NULL, NULL,
-                        'capability_operation', 'complete')
+                        'Read local files.', 'complete')
                 """,
                 bindings: [
                     .text(auditID.uuidString.lowercased()),

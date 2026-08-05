@@ -102,11 +102,74 @@ public struct CapabilityToolRecord: Equatable, Sendable {
     }
 }
 
-public enum CapabilityAuditSummaryCode: String, Codable, Sendable {
-    case capabilityOperation = "capability_operation"
-    case readOnlyOperation = "read_only_operation"
-    case stateChangingOperation = "state_changing_operation"
-    case opaqueProviderActivity = "opaque_provider_activity"
+public struct SanitizedCapabilitySummary: Codable, Equatable, Sendable {
+    public enum Projection: CaseIterable, Sendable {
+        case listCalendarEvents
+        case createCalendarEvent
+        case searchEmailMetadata
+        case readLocalFiles
+        case changeLocalFiles
+        case runLocalCommand
+        case approvalDeclined
+        case policyRefused
+        case providerDetailsUnavailable
+    }
+
+    public let projection: Projection
+
+    public var text: String {
+        switch projection {
+        case .listCalendarEvents:
+            "List calendar events."
+        case .createCalendarEvent:
+            "Create a calendar event."
+        case .searchEmailMetadata:
+            "Search email metadata."
+        case .readLocalFiles:
+            "Read local files."
+        case .changeLocalFiles:
+            "Change local files."
+        case .runLocalCommand:
+            "Run a local command."
+        case .approvalDeclined:
+            "Capability request declined by the user."
+        case .policyRefused:
+            "Capability request refused by policy."
+        case .providerDetailsUnavailable:
+            "Provider activity recorded without result details."
+        }
+    }
+
+    public init(_ projection: Projection) {
+        self.projection = projection
+    }
+
+    init?(persistedText text: String) {
+        guard text.utf8.count <= 1_024,
+              let projection = Projection.allCases.first(where: {
+                  SanitizedCapabilitySummary($0).text == text
+              })
+        else { return nil }
+        self.projection = projection
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let text = try container.decode(String.self)
+        guard let summary = SanitizedCapabilitySummary(persistedText: text)
+        else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Untrusted capability audit summary"
+            )
+        }
+        self = summary
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(text)
+    }
 }
 
 public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
@@ -123,7 +186,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
     public let approvalRequested: Bool
     public let approvalDecision: CapabilityApprovalDecision?
     public let terminalOutcome: CapabilityTerminalOutcome?
-    public let summaryCode: CapabilityAuditSummaryCode?
+    public let summary: SanitizedCapabilitySummary?
     public let visibility: CapabilityAuditVisibility
 
     public init(
@@ -140,7 +203,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
         approvalRequested: Bool,
         approvalDecision: CapabilityApprovalDecision?,
         terminalOutcome: CapabilityTerminalOutcome?,
-        summaryCode: CapabilityAuditSummaryCode?,
+        summary: SanitizedCapabilitySummary?,
         visibility: CapabilityAuditVisibility
     ) {
         self.id = id
@@ -156,7 +219,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
         self.approvalRequested = approvalRequested
         self.approvalDecision = approvalDecision
         self.terminalOutcome = terminalOutcome
-        self.summaryCode = summaryCode
+        self.summary = summary
         self.visibility = visibility
     }
 }
@@ -584,7 +647,7 @@ public actor SQLiteCapabilityRepository {
                 approvalRequested: audit.approvalRequested,
                 approvalDecision: nil,
                 terminalOutcome: nil,
-                summaryCode: audit.summaryCode,
+                summary: audit.summary,
                 visibility: audit.visibility
             )
             if let existing = try self.audit(id: audit.id) {
@@ -615,7 +678,7 @@ public actor SQLiteCapabilityRepository {
         id: CapabilityCallID,
         outcome: CapabilityTerminalOutcome,
         approvalDecision: CapabilityApprovalDecision?,
-        terminalAt: Date = Date()
+        terminalAt: Date? = nil
     ) throws {
         try preflightWrite()
         try database.transaction {
@@ -638,18 +701,22 @@ public actor SQLiteCapabilityRepository {
                let existingOutcome = CapabilityTerminalOutcome(
                    rawValue: existingOutcomeValue
                ),
-               let existingTerminalValue = Self.string(row[1]),
-               let existingTerminal = Self.date(existingTerminalValue) {
+               let existingTerminalValue = Self.string(row[1]) {
                 let existingDecision = Self.string(row[4]).flatMap(
                     CapabilityApprovalDecision.init(rawValue:)
                 )
                 guard existingOutcome == outcome,
-                      existingDecision == approvalDecision,
-                      existingTerminal == terminalAt
+                      existingDecision == approvalDecision
                 else { throw CapabilityStorageError.invalidAudit }
+                if let terminalAt {
+                    guard existingTerminalValue == Self.timestamp(terminalAt)
+                    else { throw CapabilityStorageError.invalidAudit }
+                }
                 return
             }
-            guard terminalAt >= startedAt,
+            let terminalValue = Self.timestamp(terminalAt ?? Date())
+            guard let canonicalTerminalAt = Self.date(terminalValue),
+                  canonicalTerminalAt >= startedAt,
                   Self.validTerminal(
                       outcome: outcome,
                       approvalRequested: approvalRequested,
@@ -663,7 +730,7 @@ public actor SQLiteCapabilityRepository {
                 WHERE id = ? AND terminal_outcome IS NULL
                 """,
                 bindings: [
-                    .text(Self.timestamp(terminalAt)), .text(outcome.rawValue),
+                    .text(terminalValue), .text(outcome.rawValue),
                     approvalDecision.map { .text($0.rawValue) } ?? .null,
                     .text(Self.id(id.rawValue)),
                 ]
@@ -1042,7 +1109,7 @@ public actor SQLiteCapabilityRepository {
             .integer(audit.approvalRequested ? 1 : 0),
             audit.approvalDecision.map { .text($0.rawValue) } ?? .null,
             audit.terminalOutcome.map { .text($0.rawValue) } ?? .null,
-            audit.summaryCode.map { .text($0.rawValue) } ?? .null,
+            audit.summary.map { .text($0.text) } ?? .null,
             .text(audit.visibility.rawValue),
         ]
     }
@@ -1072,8 +1139,8 @@ public actor SQLiteCapabilityRepository {
             terminalAt: string(row[8]).flatMap(date),
             effectivePolicy: policy, approvalRequested: approvalRequested,
             approvalDecision: decision, terminalOutcome: outcome,
-            summaryCode: string(row[13]).flatMap(
-                CapabilityAuditSummaryCode.init(rawValue:)
+            summary: string(row[13]).flatMap(
+                SanitizedCapabilitySummary.init(persistedText:)
             ),
             visibility: visibility
         )
