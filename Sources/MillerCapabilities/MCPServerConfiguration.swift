@@ -42,7 +42,8 @@ public struct MCPBounds: Hashable, Sendable {
     }
 
     func validate() throws {
-        guard startupTimeout > .zero, callTimeout > .zero,
+        guard startupTimeout > .zero, startupTimeout <= .seconds(10),
+              callTimeout > .zero, callTimeout <= .seconds(60),
               maximumTools > 0, maximumTools <= 2_048,
               maximumSchemaBytes > 0, maximumSchemaBytes <= 64 * 1_024,
               maximumArgumentBytes > 0, maximumArgumentBytes <= 64 * 1_024,

@@ -106,6 +106,7 @@ public actor CapabilityBroker {
                     throw MCPClientSessionError.tooManyTools
                 }
                 var serverDescriptors: [CapabilityDescriptor] = []
+                var capabilityIDs = Set<CapabilityID>()
                 serverDescriptors.reserveCapacity(tools.count)
                 for tool in tools {
                     guard tool.inputSchemaJSON.count <= configuration.bounds.maximumSchemaBytes,
@@ -116,6 +117,9 @@ public actor CapabilityBroker {
                         serverID: configuration.id,
                         toolName: tool.name
                     )
+                    guard capabilityIDs.insert(id).inserted else {
+                        throw MCPClientSessionError.invalidTool
+                    }
                     serverDescriptors.append(try CapabilityDescriptor(
                         id: id,
                         source: .millerMCP,

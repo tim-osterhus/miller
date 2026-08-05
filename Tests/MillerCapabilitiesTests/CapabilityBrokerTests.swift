@@ -112,6 +112,69 @@ struct CapabilityBrokerTests {
     }
 
     @Test
+    func duplicateNormalizedToolIDsFailOnlyTheirServerAndRetainLastCatalog() async throws {
+        let providerID = UUID()
+        let healthySession = FakeSession(
+            serverID: "healthy",
+            tools: [
+                .init(
+                    name: "lookup", displayName: "Lookup", summary: "Lookup",
+                    inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+                    readOnlyHint: true
+                ),
+            ]
+        )
+        let collisionSession = FakeSession(
+            serverID: "collision",
+            tools: Self.collidingTools
+        )
+        let sessions = [
+            "healthy": healthySession,
+            "collision": collisionSession,
+        ]
+        let configurations = try ["healthy", "collision"].map { id in
+            try MCPServerConfiguration(
+                id: id, displayName: id,
+                transport: .stdio(
+                    executable: "/usr/bin/env", arguments: []
+                ),
+                enabled: true, defaultPolicy: .fullyTrusted,
+                providerProfileIDs: [providerID]
+            )
+        }
+        let broker = try CapabilityBroker(
+            configurations: configurations,
+            sessionFactory: { configuration in sessions[configuration.id]! },
+            approval: { _ in .allowOnce }, audit: { _ in }
+        )
+
+        let initial = await broker.refresh()
+        #expect(initial.descriptors.map(\.id.rawValue) == ["miller_mcp/healthy/lookup"])
+        #expect(initial.staleServerIDs == ["collision"])
+
+        await collisionSession.setTools([
+            .init(
+                name: "legacy", displayName: "Legacy", summary: "Legacy",
+                inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+                readOnlyHint: true
+            ),
+        ])
+        let admitted = await broker.refresh()
+        #expect(admitted.staleServerIDs.isEmpty)
+        #expect(admitted.descriptors.count == 2)
+
+        await collisionSession.setTools(Self.collidingTools)
+        let stale = await broker.refresh()
+        #expect(stale.staleServerIDs == ["collision"])
+        #expect(stale.descriptors.first(where: {
+            $0.id.rawValue == "miller_mcp/healthy/lookup"
+        })?.isAvailable == true)
+        #expect(stale.descriptors.first(where: {
+            $0.id.rawValue == "miller_mcp/collision/legacy"
+        })?.isAvailable == false)
+    }
+
+    @Test
     func disabledServerIsNotListedOrExecutedForProvider() async throws {
         let fixture = BrokerFixture(providerEnabled: false)
         let broker = try await fixture.makeBroker()
@@ -264,6 +327,16 @@ struct CapabilityBrokerTests {
         #expect(await probe.maximumByServer.values.allSatisfy { $0 <= 1 })
         #expect(await probe.maximumGlobal == 4)
     }
+
+    private static var collidingTools: [MCPDiscoveredTool] {
+        ["Foo", "foo"].map { name in
+            MCPDiscoveredTool(
+                name: name, displayName: name, summary: name,
+                inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+                readOnlyHint: true
+            )
+        }
+    }
 }
 
 private struct BrokerFixture {
@@ -311,7 +384,7 @@ private struct BrokerFixture {
 
 private actor FakeSession: MCPClientSessionProtocol {
     let serverID: String
-    private let tools: [MCPDiscoveredTool]
+    private var tools: [MCPDiscoveredTool]
     private let probe: ConcurrencyProbe?
     private var delay: Duration
     private var listFailure = false
@@ -326,6 +399,7 @@ private actor FakeSession: MCPClientSessionProtocol {
         self.delay = delay
     }
     func setListFailure(_ value: Bool) { listFailure = value }
+    func setTools(_ value: [MCPDiscoveredTool]) { tools = value }
     func setCallFailure(_ value: Bool) { callFailure = value }
     func setDelay(_ value: Duration) { delay = value }
     func setIgnoreCancellation(_ value: Bool) { ignoreCancellation = value }

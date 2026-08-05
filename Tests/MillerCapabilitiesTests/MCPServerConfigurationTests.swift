@@ -76,6 +76,41 @@ struct MCPServerConfigurationTests {
     }
 
     @Test
+    func timeoutBoundsAcceptCeilingsAndRejectAnythingAboveThem() throws {
+        _ = try MCPServerConfiguration(
+            id: "boundary", displayName: "Boundary",
+            transport: .stdio(executable: "/usr/bin/env", arguments: []),
+            bounds: MCPBounds(
+                startupTimeout: .seconds(10),
+                callTimeout: .seconds(60)
+            )
+        )
+
+        for bounds in [
+            MCPBounds(
+                startupTimeout: .seconds(10) + .nanoseconds(1),
+                callTimeout: .seconds(60)
+            ),
+            MCPBounds(
+                startupTimeout: .seconds(10),
+                callTimeout: .seconds(60) + .nanoseconds(1)
+            ),
+            MCPBounds(startupTimeout: .zero),
+            MCPBounds(callTimeout: .zero),
+        ] {
+            #expect(throws: MCPConfigurationError.invalidBounds) {
+                try MCPServerConfiguration(
+                    id: "invalid", displayName: "Invalid",
+                    transport: .stdio(
+                        executable: "/usr/bin/env", arguments: []
+                    ),
+                    bounds: bounds
+                )
+            }
+        }
+    }
+
+    @Test
     func stdioEnvironmentDoesNotInheritUnboundCredentials() {
         let environment = MCPClientSession.safeBaseEnvironment(from: [
             "PATH": "/usr/bin",
