@@ -30,6 +30,35 @@ private final class SpawnedProcessVerifierProbe: @unchecked Sendable {
 @MainActor
 struct GPTLivePresentationTests {
     @Test
+    func transcriptPersistenceFailureIsPresentedWithoutEndingLiveMedia() async {
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: { true },
+                nextSessionSavingEnabled: { true },
+                restoreNextSessionSavingDefault: {},
+                startSession: { _, _, _, _ in
+                    throw SyntheticTranscriptPersistenceError.failed
+                },
+                appendEntry: { _, _, _, _, _, _ in },
+                completeEntry: { _, _ in },
+                finalizeSession: { _, _ in },
+                recoverInterruptedSessions: {}
+            )
+        )
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: .unavailable,
+            liveTranscriptRecorder: recorder
+        )
+
+        await model.applyLiveEvent(.sessionAdmitted(id: UUID()))
+        await model.applyLiveEvent(.state(.listening))
+
+        #expect(model.voiceState == .listening)
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+    }
+
+    @Test
     func ordinaryModeRemainsTextOnlyAndVoiceUnavailable() {
         let model = AppPresentationModel(
             dependencies: dependencies(),
@@ -299,9 +328,9 @@ struct GPTLivePresentationTests {
 
         switch transition {
         case .activeRefusal:
-            model.applyLiveEvent(.state(.listening))
+            await model.applyLiveEvent(.state(.listening))
             await model.selectProvider(UUID())
-            model.applyLiveEvent(.state(.closed))
+            await model.applyLiveEvent(.state(.closed))
         case .endpointValidation:
             await model.saveOpenAICompatibleProfile(
                 label: "Rejected",
@@ -388,11 +417,11 @@ struct GPTLivePresentationTests {
         model.draft = "cause typed failure"
         await model.submit()
         model.draft = "stale draft"
-        model.applyLiveEvent(.state(.listening))
-        model.applyLiveEvent(.transcriptDone(role: .user, text: "stale user"))
-        model.applyLiveEvent(.transcriptDone(role: .assistant, text: "stale assistant"))
+        await model.applyLiveEvent(.state(.listening))
+        await model.applyLiveEvent(.transcriptDone(role: .user, text: "stale user"))
+        await model.applyLiveEvent(.transcriptDone(role: .assistant, text: "stale assistant"))
         await model.toggleLiveMute()
-        model.applyLiveEvent(.failed(code: "stale_live_failure"))
+        await model.applyLiveEvent(.failed(code: "stale_live_failure"))
 
         await model.resetMiller()
 
@@ -670,7 +699,7 @@ struct GPTLivePresentationTests {
             dependencies: dependencies(),
             liveVoice: await probe.dependencies()
         )
-        model.applyLiveEvent(.failed(code: "voice_failed"))
+        await model.applyLiveEvent(.failed(code: "voice_failed"))
         await probe.setAvailability(.unavailable)
         let notifications = ChangeCounter()
         let observation = model.objectWillChange.sink { notifications.record() }
@@ -1578,8 +1607,8 @@ struct GPTLivePresentationTests {
             liveVoice: await probe.dependencies()
         )
         await model.startLiveVoice()
-        model.applyLiveEvent(.transcriptDelta(role: .user, text: "partial"))
-        model.applyLiveEvent(.transcriptDone(role: .assistant, text: "reply"))
+        await model.applyLiveEvent(.transcriptDelta(role: .user, text: "partial"))
+        await model.applyLiveEvent(.transcriptDone(role: .assistant, text: "reply"))
         await model.toggleLiveMute()
         await model.interruptLiveVoice()
 
@@ -1597,20 +1626,20 @@ struct GPTLivePresentationTests {
             liveVoice: .unavailable
         )
 
-        model.applyLiveEvent(.transcriptDelta(role: .user, text: "Hello Miller"))
-        model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "Hel"))
-        model.applyLiveEvent(.transcriptDone(role: .user, text: "Hello Miller"))
-        model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "lo!"))
-        model.applyLiveEvent(.transcriptDone(role: .assistant, text: "Hello!"))
-        model.applyLiveEvent(.transcriptDelta(role: .user, text: "Where did that "))
-        model.applyLiveEvent(.transcriptDelta(role: .user, text: "answer come from?"))
-        model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "From the "))
-        model.applyLiveEvent(.transcriptDone(
+        await model.applyLiveEvent(.transcriptDelta(role: .user, text: "Hello Miller"))
+        await model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "Hel"))
+        await model.applyLiveEvent(.transcriptDone(role: .user, text: "Hello Miller"))
+        await model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "lo!"))
+        await model.applyLiveEvent(.transcriptDone(role: .assistant, text: "Hello!"))
+        await model.applyLiveEvent(.transcriptDelta(role: .user, text: "Where did that "))
+        await model.applyLiveEvent(.transcriptDelta(role: .user, text: "answer come from?"))
+        await model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "From the "))
+        await model.applyLiveEvent(.transcriptDone(
             role: .user,
             text: "Where did that answer come from?"
         ))
-        model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "session context."))
-        model.applyLiveEvent(.transcriptDone(
+        await model.applyLiveEvent(.transcriptDelta(role: .assistant, text: "session context."))
+        await model.applyLiveEvent(.transcriptDone(
             role: .assistant,
             text: "From the session context."
         ))
@@ -2018,6 +2047,10 @@ struct GPTLivePresentationTests {
 
 }
 
+private enum SyntheticTranscriptPersistenceError: Error {
+    case failed
+}
+
 private enum StartupStopAction {
     case interrupt
     case end
@@ -2071,7 +2104,7 @@ private actor VoiceProbe {
 }
 
 private actor StaleLiveSessionEventProbe {
-    private var emitters: [@MainActor @Sendable (LiveVoiceEvent) -> Void] = []
+    private var emitters: [@MainActor @Sendable (LiveVoiceEvent) async -> Void] = []
     private var completionWaiters: [CheckedContinuation<Void, Never>?] = []
 
     var sessionCount: Int { emitters.count }
@@ -2099,7 +2132,7 @@ private actor StaleLiveSessionEventProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async {
         emitters.append(emit)
         await withCheckedContinuation { continuation in
@@ -2414,7 +2447,7 @@ private actor OrderedReadinessProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async throws {
         switch scenario {
         case .providerMutation:
@@ -3139,7 +3172,7 @@ private actor StartAdmissionProbe {
 
 private actor TerminalReadinessProbe {
     private var availability: LiveVoiceState = .available
-    private var emit: (@MainActor @Sendable (LiveVoiceEvent) -> Void)?
+    private var emit: (@MainActor @Sendable (LiveVoiceEvent) async -> Void)?
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var readyForFinish = false
 
@@ -3177,7 +3210,7 @@ private actor TerminalReadinessProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async {
         self.emit = emit
         await emit(.state(.listening))
@@ -3734,7 +3767,7 @@ private actor StartupStopProgress {
 }
 
 private actor FailureDuringCleanupProbe {
-    private var emit: (@MainActor @Sendable (LiveVoiceEvent) -> Void)?
+    private var emit: (@MainActor @Sendable (LiveVoiceEvent) async -> Void)?
     private var cleanupContinuation: CheckedContinuation<Void, Never>?
     private(set) var failureWasPresented = false
 
@@ -3755,7 +3788,7 @@ private actor FailureDuringCleanupProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async {
         self.emit = emit
         await emit(.state(.listening))
@@ -3805,7 +3838,7 @@ private actor SpontaneousTerminalProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async {
         await emit(.state(.listening))
         switch terminal {
@@ -3867,7 +3900,7 @@ private actor FakeHelperVoiceProbe {
     }
 
     private func start(
-        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async throws {
         startAttempts += 1
         guard session == nil else {

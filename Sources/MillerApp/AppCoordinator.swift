@@ -61,83 +61,6 @@ struct MenuState: Equatable {
     }
 }
 
-struct LiveTranscriptTurn: Identifiable, Equatable {
-    let id: Int
-    let role: LiveTranscriptRole
-    fileprivate(set) var text: String
-    fileprivate(set) var isComplete: Bool
-}
-
-private struct LiveTranscriptBuffer {
-    private static let maximumBytes = 65_536
-    private(set) var turns: [LiveTranscriptTurn] = []
-    private var nextID = 0
-
-    mutating func reset() {
-        turns = []
-        nextID = 0
-    }
-
-    mutating func appendDelta(role: LiveTranscriptRole, text: String) {
-        if let index = activeTurnIndex(for: role) {
-            turns[index].text = Self.bounded(
-                turns[index].text + text,
-                maximumBytes: availableBytes(excluding: index)
-            )
-            return
-        }
-        appendTurn(role: role, text: text, isComplete: false)
-    }
-
-    mutating func finishTurn(role: LiveTranscriptRole, text: String) {
-        if let index = activeTurnIndex(for: role) {
-            turns[index].text = Self.bounded(
-                text,
-                maximumBytes: availableBytes(excluding: index)
-            )
-            turns[index].isComplete = true
-            return
-        }
-        appendTurn(role: role, text: text, isComplete: true)
-    }
-
-    private func activeTurnIndex(for role: LiveTranscriptRole) -> Int? {
-        turns.indices.reversed().first {
-            turns[$0].role == role && !turns[$0].isComplete
-        }
-    }
-
-    private mutating func appendTurn(
-        role: LiveTranscriptRole,
-        text: String,
-        isComplete: Bool
-    ) {
-        let bounded = Self.bounded(text, maximumBytes: availableBytes(excluding: nil))
-        guard !bounded.isEmpty else { return }
-        turns.append(.init(
-            id: nextID,
-            role: role,
-            text: bounded,
-            isComplete: isComplete
-        ))
-        nextID += 1
-    }
-
-    private func availableBytes(excluding excludedIndex: Int?) -> Int {
-        let retainedBytes = turns.indices.reduce(into: 0) { total, index in
-            guard index != excludedIndex else { return }
-            total += turns[index].text.utf8.count
-        }
-        return max(0, Self.maximumBytes - retainedBytes)
-    }
-
-    private static func bounded(_ text: String, maximumBytes: Int) -> String {
-        var value = text
-        while value.utf8.count > maximumBytes { value.removeLast() }
-        return value
-    }
-}
-
 enum PresentationDerivation {
     static func state(for turn: Turn) -> PresentationState {
         switch turn.state {
@@ -302,14 +225,16 @@ final class AppPresentationModel: ObservableObject {
     @Published private(set) var liveTranscriptTurns: [LiveTranscriptTurn] = []
     @Published private(set) var liveVoiceMuted = false
     @Published private(set) var liveVoiceFailureCode: String?
+    @Published private(set) var liveTranscriptPersistenceMessage: String?
 
     private let dependencies: HostDependencies
     private let providerSettings: ProviderSettingsDependencies
     private let liveVoice: LiveVoiceDependencies
+    private let liveTranscriptRecorder: LiveVoiceTranscriptRecorder
     private var turnObservation: Task<Void, Never>?
     private var shortcutRegistration: ((GlobalShortcut) -> Bool)?
     private var liveVoiceStartPending = false
-    private var liveTranscriptBuffer = LiveTranscriptBuffer()
+    private var liveTranscriptProjection = LiveTranscriptProjection()
     private var liveVoiceCleanupPending = false
     private var liveVoiceCleanupWaiters: [CheckedContinuation<Void, Never>] = []
     @Published private var typedSubmissionPending = false
@@ -319,15 +244,18 @@ final class AppPresentationModel: ObservableObject {
     private var liveVoiceEventGeneration: UInt64 = 0
     private var providerSnapshotGeneration: UInt64 = 0
     private var conversationProjectionGeneration: UInt64 = 0
+    private var pendingVoiceActivationSource: VoiceActivationSource = .manual
 
     init(
         dependencies: HostDependencies,
         providerSettings: ProviderSettingsDependencies = .unavailable,
-        liveVoice: LiveVoiceDependencies = .unavailable
+        liveVoice: LiveVoiceDependencies = .unavailable,
+        liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init()
     ) {
         self.dependencies = dependencies
         self.providerSettings = providerSettings
         self.liveVoice = liveVoice
+        self.liveTranscriptRecorder = liveTranscriptRecorder
         voiceState = liveVoice.initialAvailability
         liveVoiceAvailability = liveVoice.initialAvailability
     }
@@ -369,7 +297,10 @@ final class AppPresentationModel: ObservableObject {
     }
 
     var voiceStatusText: String {
-        switch voiceState {
+        if let liveTranscriptPersistenceMessage {
+            return liveTranscriptPersistenceMessage
+        }
+        return switch voiceState {
         case .available: "Available"
         case .connecting: "Connecting"
         case .listening: "Listening"
@@ -835,18 +766,22 @@ final class AppPresentationModel: ObservableObject {
         }
     }
 
-    func startLiveVoice() async {
+    func startLiveVoice(
+        activationSource: VoiceActivationSource = .manual
+    ) async {
         guard canStartLiveVoice else { return }
         nextLiveVoiceAvailabilityGeneration()
         let eventGeneration = nextLiveVoiceEventGeneration()
         liveVoiceStartPending = true
         voiceState = .connecting
         liveVoiceFailureCode = nil
+        liveTranscriptPersistenceMessage = nil
         resetLiveTranscripts()
         liveVoiceMuted = false
+        pendingVoiceActivationSource = activationSource
         do {
             try await liveVoice.start { [weak self] event in
-                self?.applyLiveEvent(event, generation: eventGeneration)
+                await self?.applyLiveEvent(event, generation: eventGeneration)
             }
         } catch {
             voiceState = .failed
@@ -857,6 +792,15 @@ final class AppPresentationModel: ObservableObject {
             }
         }
         liveVoiceStartPending = false
+        if !liveVoiceCleanupPending, !voiceState.isActive {
+            let outcome: VoiceSessionTerminalOutcome =
+                voiceState == .failed ? .failed
+                : voiceState == .closed ? .completed : .abandoned
+            await finishLiveVoiceCleanup(
+                terminalState: voiceState,
+                outcome: outcome
+            )
+        }
         if !voiceState.isActive, liveVoiceAvailability == .available {
             await refreshLiveVoiceAvailability()
         }
@@ -873,7 +817,10 @@ final class AppPresentationModel: ObservableObject {
         nextLiveVoiceAvailabilityGeneration()
         liveVoiceCleanupPending = true
         await liveVoice.interrupt()
-        finishLiveVoiceCleanup(terminalState: .stopped)
+        await finishLiveVoiceCleanup(
+            terminalState: .stopped,
+            outcome: voiceState == .failed ? .failed : .stopped
+        )
         await refreshLiveVoiceAvailability(allowStartPending: true)
     }
 
@@ -888,7 +835,10 @@ final class AppPresentationModel: ObservableObject {
         nextLiveVoiceAvailabilityGeneration()
         liveVoiceCleanupPending = true
         await liveVoice.end()
-        finishLiveVoiceCleanup(terminalState: .closed)
+        await finishLiveVoiceCleanup(
+            terminalState: .closed,
+            outcome: voiceState == .failed ? .failed : .completed
+        )
         await refreshLiveVoiceAvailability(allowStartPending: true)
     }
 
@@ -896,7 +846,15 @@ final class AppPresentationModel: ObservableObject {
         await withCheckedContinuation { liveVoiceCleanupWaiters.append($0) }
     }
 
-    private func finishLiveVoiceCleanup(terminalState: LiveVoiceState) {
+    private func finishLiveVoiceCleanup(
+        terminalState: LiveVoiceState,
+        outcome: VoiceSessionTerminalOutcome
+    ) async {
+        do {
+            try await liveTranscriptRecorder.finish(outcome: outcome)
+        } catch {
+            presentTranscriptPersistenceFailure()
+        }
         liveVoiceCleanupPending = false
         liveVoiceMuted = false
         if voiceState != .failed {
@@ -907,25 +865,63 @@ final class AppPresentationModel: ObservableObject {
         for waiter in waiters { waiter.resume() }
     }
 
-    func applyLiveEvent(_ event: LiveVoiceEvent) {
-        applyLiveEvent(event, generation: liveVoiceEventGeneration)
+    func applyLiveEvent(_ event: LiveVoiceEvent) async {
+        await applyLiveEvent(event, generation: liveVoiceEventGeneration)
     }
 
-    private func applyLiveEvent(_ event: LiveVoiceEvent, generation: UInt64) {
+    private func applyLiveEvent(
+        _ event: LiveVoiceEvent,
+        generation: UInt64
+    ) async {
         guard generation == liveVoiceEventGeneration else { return }
+        liveTranscriptProjection.record(event)
+        liveTranscriptTurns = liveTranscriptProjection.turns
         switch event {
+        case let .sessionAdmitted(id):
+            do {
+                try await liveTranscriptRecorder.begin(
+                    sessionID: id,
+                    conversationID: nil,
+                    activationSource: pendingVoiceActivationSource
+                )
+            } catch {
+                presentTranscriptPersistenceFailure()
+            }
         case let .state(state):
             voiceState = state
-        case let .transcriptDelta(role, text):
-            liveTranscriptBuffer.appendDelta(role: role, text: text)
-            liveTranscriptTurns = liveTranscriptBuffer.turns
-        case let .transcriptDone(role, text):
-            liveTranscriptBuffer.finishTurn(role: role, text: text)
-            liveTranscriptTurns = liveTranscriptBuffer.turns
+        case .transcriptDelta, .transcriptDone:
+            do {
+                try await liveTranscriptRecorder.record(event)
+            } catch {
+                presentTranscriptPersistenceFailure()
+            }
         case let .failed(code):
             liveVoiceFailureCode = Self.sanitizedLiveCode(code)
             voiceState = .failed
         }
+    }
+
+    func recoverInterruptedVoiceSessions() async {
+        do {
+            try await liveTranscriptRecorder.recoverInterruptedSessions()
+        } catch {
+            presentTranscriptPersistenceFailure()
+        }
+    }
+
+    func abandonLiveVoiceSession() async {
+        await finishLiveVoiceCleanup(
+            terminalState: .closed,
+            outcome: .abandoned
+        )
+    }
+
+    func prepareToAbandonLiveVoiceSession() {
+        liveVoiceCleanupPending = true
+    }
+
+    private func presentTranscriptPersistenceFailure() {
+        liveTranscriptPersistenceMessage = "Transcript could not be saved"
     }
 
     func stop() async {
@@ -1088,6 +1084,7 @@ final class AppPresentationModel: ObservableObject {
         errorCode = nil
         resetLiveTranscripts()
         liveVoiceFailureCode = nil
+        liveTranscriptPersistenceMessage = nil
         liveVoiceMuted = false
         voiceState = liveVoiceAvailability
         do {
@@ -1162,8 +1159,8 @@ final class AppPresentationModel: ObservableObject {
     }
 
     private func resetLiveTranscripts() {
-        liveTranscriptBuffer.reset()
-        liveTranscriptTurns = []
+        liveTranscriptProjection.reset()
+        liveTranscriptTurns = liveTranscriptProjection.turns
     }
 
     private static func liveFailureCode(_ error: Error) -> String {
@@ -1472,10 +1469,73 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             liveController = nil
             liveVoice = .unavailable
         }
+        let voiceHistoryRepository = try SQLiteVoiceHistoryRepository(
+            path: databasePath
+        )
+        let preferenceRepository = try SQLitePreferenceRepository(
+            path: databasePath
+        )
+        let liveTranscriptRecorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: {
+                    try await preferenceRepository.value(
+                        for: .voiceTranscriptSavingEnabled
+                    )
+                },
+                nextSessionSavingEnabled: {
+                    try await preferenceRepository.value(
+                        for: .nextVoiceSessionSavingEnabled
+                    )
+                },
+                restoreNextSessionSavingDefault: {
+                    try await preferenceRepository.set(
+                        true,
+                        for: .nextVoiceSessionSavingEnabled
+                    )
+                },
+                startSession: {
+                    id, conversationID, activationSource, saveChoice in
+                    try await voiceHistoryRepository.startSession(
+                        id: id,
+                        conversationID: conversationID,
+                        activationSource: activationSource,
+                        saveChoice: saveChoice
+                    )
+                },
+                appendEntry: {
+                    id, sessionID, sequence, role, text, completionState in
+                    try await voiceHistoryRepository.appendEntry(
+                        id: id,
+                        sessionID: sessionID,
+                        sequence: sequence,
+                        role: role,
+                        text: text,
+                        completionState: completionState,
+                        startedAt: Date()
+                    )
+                },
+                completeEntry: { id, text in
+                    try await voiceHistoryRepository.completeEntry(
+                        id: id,
+                        text: text
+                    )
+                },
+                finalizeSession: { id, outcome in
+                    try await voiceHistoryRepository.finalizeSession(
+                        id: id,
+                        outcome: outcome
+                    )
+                },
+                recoverInterruptedSessions: {
+                    try await voiceHistoryRepository.recoverInterruptedSessions()
+                }
+            )
+        )
         model = AppPresentationModel(
             dependencies: dependencies,
             providerSettings: providerSettings,
-            liveVoice: liveVoice
+            liveVoice: liveVoice,
+            liveTranscriptRecorder: liveTranscriptRecorder
         )
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         overlayController = OverlayPanelController(
@@ -1517,6 +1577,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         model.selectShortcut(model.selectedShortcut)
         Task {
             try? await repository.recoverInterruptedTurns()
+            await model.recoverInterruptedVoiceSessions()
             try? await providerController.restoreSelectedProfile()
             await model.refresh()
             await model.refreshProviderSettings()
@@ -1530,7 +1591,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             NotificationCenter.default.removeObserver(settingsObserver)
             self.settingsObserver = nil
         }
+        model.prepareToAbandonLiveVoiceSession()
         await liveController?.shutdown()
+        await model.abandonLiveVoiceSession()
         await supervisor.shutdown()
     }
 

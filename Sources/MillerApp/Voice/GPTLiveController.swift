@@ -28,6 +28,7 @@ enum LiveTranscriptRole: Equatable, Sendable {
 }
 
 enum LiveVoiceEvent: Equatable, Sendable {
+    case sessionAdmitted(id: UUID)
     case state(LiveVoiceState)
     case transcriptDelta(role: LiveTranscriptRole, text: String)
     case transcriptDone(role: LiveTranscriptRole, text: String)
@@ -38,7 +39,7 @@ struct LiveVoiceDependencies: Sendable {
     let initialAvailability: LiveVoiceState
     let availability: @Sendable () async -> LiveVoiceState
     let start: @Sendable (
-        @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async throws -> Void
     let mute: @Sendable (Bool) async -> Void
     let interrupt: @Sendable () async -> Void
@@ -207,7 +208,7 @@ actor GPTLiveController {
     }
 
     func start(
-        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async throws {
         guard session == nil, !startInProgress else {
             throw GPTLiveCredentialError.unavailable
@@ -312,8 +313,9 @@ actor GPTLiveController {
             }
             return
         }
+        let sessionID = UUID()
         let identity = LiveSessionIdentity(
-            requestID: UUID().uuidString.lowercased(),
+            requestID: sessionID.uuidString.lowercased(),
             threadID: UUID().uuidString.lowercased(),
             generation: 1
         )
@@ -331,7 +333,10 @@ actor GPTLiveController {
                     identity: identity,
                     credential: credential,
                     permission: permission,
-                    onActive: { await self.markClientSessionActive() },
+                    onActive: {
+                        await self.markClientSessionActive()
+                        await receive(.sessionAdmitted(id: sessionID))
+                    },
                     onCleanupPending: {
                         await self.markTerminalFailurePresented()
                         await receive(.failed(code: "cleanup_pending"))
@@ -348,7 +353,10 @@ actor GPTLiveController {
                     identity: identity,
                     credential: credential,
                     permission: permission,
-                    onActive: { await self.markClientSessionActive() },
+                    onActive: {
+                        await self.markClientSessionActive()
+                        await receive(.sessionAdmitted(id: sessionID))
+                    },
                     onCleanupPending: {
                         await self.markTerminalFailurePresented()
                         await receive(.failed(code: "cleanup_pending"))
@@ -443,7 +451,7 @@ actor GPTLiveController {
 
     private static func present(
         _ event: LiveSessionEvent,
-        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) -> Void
+        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async {
         switch event {
         case .started:
