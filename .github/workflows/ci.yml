@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify toolchain
+        run: test "$(/opt/homebrew/opt/node@22/bin/node --version)" = "v22.22.0"
+      - name: Install pinned Gateway dependencies
+        working-directory: Gateway
+        run: /opt/homebrew/opt/node@22/bin/npm ci --ignore-scripts
+      - name: Run Swift and protocol tests
+        run: ./scripts/test.sh
+      - name: Run complete Gateway tests
+        working-directory: Gateway
+        run: /opt/homebrew/opt/node@22/bin/npm test
+      - name: Build
+        run: ./scripts/build.sh
+      - name: Package development app
+        run: ./scripts/package-dev-app.sh
+      - name: Package source-release app
+        run: ./scripts/package-release-app.sh
+      - name: Verify source-release app
+        run: ./scripts/verify-release-package.sh
+      - name: Verify provenance
+        run: ./scripts/verify-provenance.sh
+      - name: Clean generated roots
+        run: |
+          ./scripts/clean.sh
+          ./scripts/clean.sh --dependencies
+      - name: Verify clean source tree
+        run: |
+          test ! -e Gateway/node_modules
+          test ! -e .build
+          test ! -e .artifacts
+          test ! -e .cache
+          test -z "$(git status --short --untracked-files=all)"

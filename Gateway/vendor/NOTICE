@@ -1,0 +1,7 @@
+Miller Pi A2 overlay distribution NOTICE
+
+Miller-authored packaging and the bounded A2 transformation are Apache-2.0.
+Retained Pi AI 0.82.0 source is MIT-licensed and derives from commit 083e61621276bff9f6faefab87ce07fcd98734e2.
+OpenAI 6.26.0 is Apache-2.0.
+partial-json 0.1.7 is MIT.
+The exact license texts and hashes are retained with this distribution.

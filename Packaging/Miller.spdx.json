@@ -1,0 +1,96 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "Miller-0.1.0-source-release",
+  "documentNamespace": "https://miller.local/spdx/miller/0.1.0/source-release",
+  "creationInfo": {
+    "created": "2026-08-05T00:00:00Z",
+    "creators": ["Tool: Miller source-release closure"]
+  },
+  "packages": [
+    {
+      "name": "Miller",
+      "SPDXID": "SPDXRef-Package-Miller",
+      "versionInfo": "0.1.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "@miller/pi-mvp-overlay",
+      "SPDXID": "SPDXRef-Package-PiOverlay",
+      "versionInfo": "0.82.0-a2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0 AND MIT",
+      "licenseDeclared": "Apache-2.0 AND MIT",
+      "copyrightText": "Copyright (c) 2025 Mario Zechner"
+    },
+    {
+      "name": "openai",
+      "SPDXID": "SPDXRef-Package-OpenAI",
+      "versionInfo": "6.26.0",
+      "downloadLocation": "https://registry.npmjs.org/openai/-/openai-6.26.0.tgz",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "partial-json",
+      "SPDXID": "SPDXRef-Package-PartialJSON",
+      "versionInfo": "0.1.7",
+      "downloadLocation": "https://registry.npmjs.org/partial-json/-/partial-json-0.1.7.tgz",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2023 Promplate Dev Team"
+    },
+    {
+      "name": "Node.js",
+      "SPDXID": "SPDXRef-Package-Node",
+      "versionInfo": "22.22.0",
+      "downloadLocation": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright Node.js contributors",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-Miller"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-PiOverlay"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Node"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-PiOverlay",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-OpenAI"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-PiOverlay",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-PartialJSON"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "invalid": [
+    {"id":"bare-carriage-return","kind":"file","file":"bare-cr.jsonl","phase":"consume","js":"strict"},
+    {"id":"duplicate-key","kind":"file","file":"duplicate-key.jsonl","phase":"consume","js":"strict"},
+    {"id":"nested-duplicate-key","kind":"file","file":"nested-duplicate-key.jsonl","phase":"consume","js":"strict"},
+    {"id":"decoded-nul","kind":"file","file":"nul.jsonl","phase":"consume","js":"strict"},
+    {"id":"unknown-field","kind":"file","file":"unknown-field.jsonl","phase":"consume","js":"closed-ready"},
+    {"id":"missing-field","kind":"file","file":"missing-field.jsonl","phase":"consume","js":"closed-ready"},
+    {"id":"incomplete-eof","kind":"bytes","hex":"7b2270726f746f636f6c223a226d696c6c65722e67617465776179222c2276657273696f6e223a312c2274797065223a22676174657761792e726561647922","phase":"finish","js":"strict"},
+    {"id":"invalid-utf8","kind":"bytes","hex":"7bff7d0a","js":"invalid-utf8"},
+    {"id":"oversized-unterminated","kind":"repeat","byte":97,"count":1048577,"js":"helper-repeat"},
+    {"id":"escaped-nul-user-text","kind":"template","file":"escaped-nul-user-text.template.jsonl","phase":"consume","js":"helper-template"},
+    {"id":"escaped-nul-nested-key","kind":"template","file":"escaped-nul-nested-key.template.jsonl","phase":"consume","js":"helper-template"},
+    {"id":"wrong-session","kind":"sequence","file":"wrong-session.jsonl","js":"sequence"},
+    {"id":"wrong-request","kind":"sequence","file":"wrong-request.jsonl","js":"sequence"},
+    {"id":"wrong-turn","kind":"sequence","file":"wrong-turn.jsonl","js":"sequence"},
+    {"id":"wrong-generation","kind":"sequence","file":"wrong-generation.jsonl","js":"sequence"},
+    {"id":"wrong-ordinal","kind":"sequence","file":"wrong-ordinal.jsonl","js":"sequence"},
+    {"id":"duplicate-ordinal","kind":"sequence","file":"duplicate-ordinal.jsonl","js":"sequence"},
+    {"id":"duplicate-terminal","kind":"sequence","file":"duplicate-terminal.jsonl","js":"sequence"},
+    {"id":"delta-before-accepted","kind":"sequence","file":"delta-before-accepted.jsonl","js":"sequence"},
+    {"id":"usage-before-accepted","kind":"sequence","file":"usage-before-accepted.jsonl","js":"sequence"},
+    {"id":"terminal-before-accepted","kind":"sequence","file":"terminal-before-accepted.jsonl","js":"sequence"},
+    {"id":"duplicate-accepted","kind":"sequence","file":"duplicate-accepted.jsonl","js":"sequence"},
+    {"id":"late-delta","kind":"sequence","file":"late-delta.jsonl","js":"sequence"}
+  ]
+}

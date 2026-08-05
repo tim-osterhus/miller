@@ -19,6 +19,24 @@ Before third-party source or assets enter Miller, record:
 Preserve all notices required by the upstream license in
 `THIRD_PARTY_NOTICES.md` or the applicable distributed artifact.
 
+## GitHub Actions workflow dependency
+
+The CI workflow uses one workflow-only dependency:
+
+- Action: `actions/checkout`
+- Release: `v4.2.2`
+- Reviewed commit:
+  `11bd71901bbe5b1630ceea73d27597364c9af683`
+- Source:
+  `https://github.com/actions/checkout/commit/11bd71901bbe5b1630ceea73d27597364c9af683`
+- License: MIT
+- Scope: `.github/workflows/ci.yml` only. Miller does not bundle or use the
+  action at application runtime.
+
+The workflow references the full commit SHA rather than a mutable tag.
+`scripts/verify-provenance.sh` enforces the exact reference and rejects any
+non-SHA `uses:` entry.
+
 ## Dependency and asset review
 
 Review source code, transitive packages, downloaded or bundled binaries, model
@@ -37,3 +55,208 @@ Cortana Assistant and VoiceInk may inform public behavioral requirements, but
 their implementation must not be copied into Miller. Any independently
 authored Cortana material proposed for reuse requires a file-level authorship
 and provenance review before incorporation.
+
+## Codex App Server protocol reference
+
+The `MillerLive` spike was independently authored from public Apache-2.0
+OpenAI Codex protocol source at tag `rust-v0.145.0`, commit
+`25af12f7e61572b0bc18ddb1008be543b91519b0`. Reviewed upstream evidence
+includes the experimental `thread/realtime/*` declarations, the required
+`experimentalApi` capability, the unstable in-memory `chatgptAuthTokens`
+login, and the host token-refresh request.
+
+No OpenAI Codex executable or source file is copied into Miller. GPT-Live uses
+an owner-installed official Codex CLI as an external prerequisite. Miller
+validates the executable's OpenAI Developer ID identity and architecture, but
+does not download, bundle, update, remove, or redistribute it. Earlier Cortana
+helper evidence is superseded and is not a production dependency. Miller does
+not copy Cortana or VoiceInk code.
+
+`MillerLiveAudio` and `WebKitLivePeer` are independently authored Miller code.
+The concrete peer uses macOS system WebKit for the experimental WebRTC media
+plane; it adds no downloaded, bundled, or third-party WebRTC implementation.
+App Server notifications remain a separate control and transcript sideband.
+The earlier Foundation/AVFoundation PCM types are retained only as isolated,
+non-default groundwork and are not qualified for this route. The development
+app does not bundle a Codex or Cortana helper, test audio, or a third-party
+audio library.
+
+## OpenClaw GPT-Live wire reference
+
+Miller directly adapts the bounded GPT-Live behavior described by OpenClaw PR
+[#115226](https://github.com/openclaw/openclaw/pull/115226), using the exact
+permissive donor revision `f78ba091207b33c3bb79f1bd9879d0e56be91a16` from
+OpenClaw. The donor license is MIT and the donor copyright is OpenClaw
+Foundation, 2026.
+
+The reviewed donor files are:
+
+- `extensions/openai/realtime-quicksilver-wire.ts`
+- `extensions/openai/realtime-quicksilver-wire.test.ts`
+- `extensions/openai/realtime-quicksilver-sideband.ts`
+- `extensions/openai/realtime-quicksilver-session.ts` (broker/lifecycle portions)
+- `extensions/openai/realtime-quicksilver-session.test.ts`
+- `extensions/openai/realtime-quicksilver-delegation.test.ts`
+
+Miller did not copy the OpenClaw Gateway, Talk catalog, provider registry,
+camera, CORS route, browser reservation store, or transcript database. The
+modified donor-derived Miller files are clearly marked in
+`Sources/MillerLive/GPTLiveWire.swift`,
+`Sources/MillerLive/GPTLiveSideband.swift`, and
+`Sources/MillerLiveAudio/DirectGPTLiveSession.swift`. The adaptation keeps
+only the direct `/v1/live` multipart SDP exchange, OAuth/account headers,
+bounded response and event parsing, sideband startup retry and early-frame
+buffering, session lifecycle, and injectable client-delegation seam. It uses
+Foundation `URLSession` and `URLSessionWebSocketTask`, Miller's existing
+`WebKitLivePeer`, Miller identity/generation fencing, and no transcript
+database or second conversation owner.
+
+The full required donor MIT notice is:
+
+```text
+MIT License
+
+Copyright (c) 2026 OpenClaw Foundation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-party notices for incorporated or adapted code are recorded in
+THIRD_PARTY_NOTICES.md.
+```
+
+## Millrace menu-bar mark
+
+`Branding/MillraceMarkSource.png` is an internal, Millrace ecosystem-owned
+source asset, not third-party material. It originates from the workspace's
+historical branding asset and has SHA-256
+`d75978e42d26bd6c1ed96f4831c73c73f2bc54fb04e7c39992cbdc85af77b241`.
+
+`scripts/generate-menu-bar-icon.swift` deterministically produces the 72-by-72
+black template resource from a 64-pixel optical box. The generator preserves
+the scaled source alpha values and applies no optical dilation. Its output,
+`Sources/MillerApp/Resources/MillerStatusIcon.png`, has SHA-256
+`34be9cf271b2d7a5bfb1f11c459902c0167add683baa006cabbafe4fa4f6c6db`.
+
+## Pi-derived A2 gateway overlay
+
+Miller retains one reviewed Pi-derived distribution:
+`@miller/pi-mvp-overlay@0.82.0-a2`.
+
+### Upstream and A1 baseline
+
+- Upstream: `https://github.com/earendil-works/pi.git`
+- Upstream package: `packages/ai`, published as
+  `@earendil-works/pi-ai@0.82.0`
+- Upstream revision: `083e61621276bff9f6faefab87ce07fcd98734e2`
+- Upstream package integrity:
+  `sha512-8MvW9+zno13sXDuT2kFMnWeTNUufUhPeZDRVO+igGoBRCDWgn7Xh2FkRQI1mRuet6QhF4ENQuLYdIAOyG6BhNw==`
+- Reviewed baseline: `@miller/pi-a1-overlay@0.82.0-a1`
+- A1 manifest SHA-256:
+  `902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b`
+
+The A1 manifest binds each retained module to the exact npm tarball and pinned
+Git source-map content. The A2 generator refuses any A1 manifest or retained
+file whose hash, byte count, or mode differs.
+
+### A2 transformation
+
+`Gateway/scripts/build-overlay.mjs` has SHA-256
+`4d9feb112a65f606fbd5fd199af64da5bc69637ccff42228ddd0b6f0d64f9388`.
+It changes exactly two overlay files:
+
+- `dist/auth/oauth/openai-codex.js`: admits only GET requests to
+  `/auth/callback`, requires matching state, rejects a second callback, sends
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, binds the
+  listener to `127.0.0.1`, settles cancellation and a five-minute callback
+  deadline before awaited listener close, removes `PI_OAUTH_CALLBACK_HOST`,
+  and removes manual authorization-code input.
+- `package.json`: changes only the derived package name and version to
+  `@miller/pi-mvp-overlay@0.82.0-a2`.
+
+All other retained files are byte-identical to the reviewed A1 distribution.
+The exact 53-file archive inventory is
+`Gateway/vendor/overlay-files.json`; the per-file A1-to-A2 provenance record is
+`Gateway/vendor/source-map.json`. These generated documents are authoritative
+for every retained file rather than a summarized path list in this prose.
+
+### Distribution and dependency closure
+
+The exact generated vendor artifacts are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `Gateway/vendor/manifest.json` | `4e69f5ba887667f56279fab20c19d6eb22276991227d01dae76af6ea8228a6af` |
+| `Gateway/vendor/pi-mvp-overlay-0.82.0-a2.tgz` | `2d38923e44eeec3dba38076b0d35caff6883c533aec07d0522cedb3cb7dab4e4` |
+| `Gateway/vendor/development-bundle-inventory.json` | `bde46208688d27709bb6d67dd8e8ff19b31959dd60e558cdb0905827ea2fd5ae` |
+| `Gateway/vendor/overlay-files.json` | `11523a303ef9d0f4efc6ba14dfec848413179906a9bd12e720db077a791cd93c` |
+| `Gateway/vendor/source-map.json` | `17f0cbc679348237d39937251b81e10b9359d7c8986363b0e8fbfbf1a9a83df2` |
+| `Gateway/vendor/sbom.spdx.json` | `851dbca0451beff2175980ffeda2439b6f539737e0b18c941df4e12996192157` |
+
+The runtime dependency closure contains only:
+
+- `openai@6.26.0`, Apache-2.0,
+  `sha512-zd23dbWTjiJ6sSAX6s0HrCZi41JwTA1bQVs0wLQPZ2/5o2gxOJA5wh7yOAUgwYybfhDXyhwlpeQf7Mlgx8EOCA==`;
+- `partial-json@0.1.7`, MIT,
+  `sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA==`.
+
+The exact package lock SHA-256 is
+`a98b4b2654c79b76bf4de2c2e6424178a6e31e57b53cba1aa52ce1b57c086a9e`.
+The overlay contains no Pi coding-agent package, unrelated provider package,
+callable shell or filesystem dependency, AWS SDK, Google SDK, Bedrock SDK,
+native add-on, or install script.
+
+`Gateway/vendor/development-bundle-inventory.json` is the reviewed commitment
+to the complete bundled gateway dependency closure: the three admitted
+roots, all 2,109 relative file paths, each file's SHA-256 and byte count, are
+canonically represented by its inventory SHA-256. The package script rebuilds
+the scripts-disabled lockfile closure offline, validates that commitment before
+copying, and validates the assembled bundle's dependency tree again. The
+verifier rejects changed or unlisted bytes, symlinks, and unexpected assembled
+dependency roots.
+
+`scripts/verify-provenance.sh` recalculates every retained vendor hash, rejects
+missing and unlisted files, validates the exact package graph and integrities,
+checks complete SPDX 2.3 metadata and hexadecimal SHA-512 checksums, and checks
+the required license bytes without making a network request.
+
+## Node.js 22.22.0 bundled runtime
+
+The development and source-release bundles contain only the official Apple Silicon Node
+executable required to run Miller's reviewed helper and the consolidated Node
+license/third-party notice file:
+
+- Release: Node.js `v22.22.0`
+- Official artifact:
+  `https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz`
+- Artifact SHA-256:
+  `5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640`
+- Bundled `bin/node` SHA-256:
+  `913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4`
+- Bundled `LICENSE.node-22.22.0` SHA-256:
+  `e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49`
+- Architecture: Mach-O arm64
+- Runtime linkage: macOS system CoreFoundation and Security frameworks,
+  `libc++.1.dylib`, and `libSystem.B.dylib` only
+
+`scripts/package-dev-app.sh` and its release wrapper download this exact archive into a bounded
+repository artifact staging root, verifies the archive before extraction,
+extracts only `bin/node` and `LICENSE`, verifies their final bytes, copies them
+to `Miller.app/Contents/Resources/Gateway/runtime/`, and removes the archive
+and extraction root on every exit. npm, Corepack, headers, manuals, and other
+archive files are not copied.

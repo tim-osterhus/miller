@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://miller.invalid/gateway/protocol/v1/records.schema.json",
+  "title": "Miller gateway protocol v1",
+  "oneOf": [
+    {"$ref": "#/$defs/gateway.ready"},
+    {"$ref": "#/$defs/provider.readiness"},
+    {"$ref": "#/$defs/provider.readiness_result"},
+    {"$ref": "#/$defs/provider.models"},
+    {"$ref": "#/$defs/provider.models_result"},
+    {"$ref": "#/$defs/auth.begin"},
+    {"$ref": "#/$defs/auth.refresh"},
+    {"$ref": "#/$defs/auth.open_url"},
+    {"$ref": "#/$defs/auth.credential_candidate"},
+    {"$ref": "#/$defs/auth.persisted"},
+    {"$ref": "#/$defs/auth.persist_failed"},
+    {"$ref": "#/$defs/auth.restore"},
+    {"$ref": "#/$defs/auth.cancel"},
+    {"$ref": "#/$defs/auth.clear"},
+    {"$ref": "#/$defs/auth.completed"},
+    {"$ref": "#/$defs/auth.stopped"},
+    {"$ref": "#/$defs/auth.failed"},
+    {"$ref": "#/$defs/reasoning.start"},
+    {"$ref": "#/$defs/reasoning.cancel"},
+    {"$ref": "#/$defs/reasoning.accepted"},
+    {"$ref": "#/$defs/reasoning.text_delta"},
+    {"$ref": "#/$defs/reasoning.usage"},
+    {"$ref": "#/$defs/reasoning.completed"},
+    {"$ref": "#/$defs/reasoning.stopped"},
+    {"$ref": "#/$defs/reasoning.failed"}
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "generation": {"type": "integer", "minimum": 0},
+    "base": {
+      "type": "object",
+      "required": ["protocol", "version", "type", "session_id"],
+      "properties": {
+        "protocol": {"const": "miller.gateway"},
+        "version": {"const": 1},
+        "type": {"type": "string"},
+        "session_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["request_id"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "provider_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "model", "credential_ref"],
+      "properties": {
+        "kind": {"enum": ["codex_oauth", "openai_compatible", "fake"]},
+        "base_url": {"type": ["string", "null"]},
+        "model": {"type": "string"},
+        "credential_ref": {"$ref": "#/$defs/uuid"}
+      }
+    },
+    "context_message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "text"],
+      "properties": {
+        "role": {"enum": ["user", "assistant"]},
+        "text": {"type": "string"}
+      }
+    },
+    "gateway.ready": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "required": ["helper_version", "supported_protocols"],
+          "properties": {
+            "type": {"const": "gateway.ready"},
+            "helper_version": {"type": "string"},
+            "supported_protocols": {
+              "type": "array",
+              "contains": {"const": 1},
+              "items": {"type": "integer"}
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "provider.readiness": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["provider_profile", "credential_ref"],
+          "properties": {
+            "type": {"const": "provider.readiness"},
+            "provider_profile": {"$ref": "#/$defs/provider_profile"},
+            "credential_ref": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "provider.readiness_result": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "type": {"const": "provider.readiness_result"},
+            "status": {
+              "enum": [
+                "ready",
+                "refresh_required",
+                "authentication_required",
+                "configuration_invalid",
+                "network_unavailable",
+                "provider_unavailable",
+                "unsupported_model",
+                "failed"
+              ]
+            },
+            "error_code": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "provider.models": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["provider_kind"],
+          "properties": {
+            "type": {"const": "provider.models"},
+            "provider_kind": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "provider.models_result": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["provider_kind", "default_model", "models"],
+          "properties": {
+            "type": {"const": "provider.models_result"},
+            "provider_kind": {"type": "string"},
+            "default_model": {"type": "string"},
+            "models": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/model_choice"}
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "model_choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"}
+      }
+    },
+    "auth.begin": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "generation", "credential_ref", "provider_kind"],
+          "properties": {
+            "type": {"const": "auth.begin"},
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"},
+            "credential_ref": {"$ref": "#/$defs/uuid"},
+            "provider_kind": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.refresh": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "generation", "credential_ref"],
+          "properties": {
+            "type": {"const": "auth.refresh"},
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"},
+            "credential_ref": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.open_url": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "generation", "url"],
+          "properties": {
+            "type": {"const": "auth.open_url"},
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"},
+            "url": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.credential_candidate": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "generation", "credential_ref", "credential"],
+          "properties": {
+            "type": {"const": "auth.credential_candidate"},
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"},
+            "credential_ref": {"$ref": "#/$defs/uuid"},
+            "credential": {"type": "object"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.persisted": {
+      "$ref": "#/$defs/auth_with_credential_ref",
+      "type": "object",
+      "properties": {"type": {"const": "auth.persisted"}},
+      "unevaluatedProperties": false
+    },
+    "auth.persist_failed": {
+      "$ref": "#/$defs/auth_with_credential_ref",
+      "type": "object",
+      "properties": {"type": {"const": "auth.persist_failed"}},
+      "unevaluatedProperties": false
+    },
+    "auth.restore": {
+      "allOf": [
+        {"$ref": "#/$defs/auth_with_credential_ref"},
+        {
+          "type": "object",
+          "required": ["credential"],
+          "properties": {
+            "type": {"const": "auth.restore"},
+            "credential": {"type": "object"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.cancel": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "target_generation"],
+          "properties": {
+            "type": {"const": "auth.cancel"},
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "target_generation": {"$ref": "#/$defs/generation"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth.clear": {
+      "$ref": "#/$defs/auth_with_credential_ref",
+      "type": "object",
+      "properties": {"type": {"const": "auth.clear"}},
+      "unevaluatedProperties": false
+    },
+    "auth.completed": {
+      "$ref": "#/$defs/auth_with_credential_ref",
+      "type": "object",
+      "properties": {"type": {"const": "auth.completed"}},
+      "unevaluatedProperties": false
+    },
+    "auth.stopped": {
+      "$ref": "#/$defs/auth_operation_generation",
+      "type": "object",
+      "properties": {"type": {"const": "auth.stopped"}},
+      "unevaluatedProperties": false
+    },
+    "auth.failed": {
+      "allOf": [
+        {"$ref": "#/$defs/auth_operation_generation"},
+        {
+          "type": "object",
+          "required": ["error_code"],
+          "properties": {
+            "type": {"const": "auth.failed"},
+            "error_code": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "auth_operation_generation": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["operation_id", "generation"],
+          "properties": {
+            "operation_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"}
+          }
+        }
+      ]
+    },
+    "auth_with_credential_ref": {
+      "allOf": [
+        {"$ref": "#/$defs/auth_operation_generation"},
+        {
+          "type": "object",
+          "required": ["credential_ref"],
+          "properties": {
+            "credential_ref": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      ]
+    },
+    "reasoning.start": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": [
+            "conversation_id",
+            "turn_id",
+            "generation",
+            "provider_profile",
+            "context",
+            "user_text",
+            "tools"
+          ],
+          "properties": {
+            "type": {"const": "reasoning.start"},
+            "conversation_id": {"$ref": "#/$defs/uuid"},
+            "turn_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"},
+            "provider_profile": {"$ref": "#/$defs/provider_profile"},
+            "context": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/context_message"}
+            },
+            "user_text": {"type": "string", "maxLength": 65536},
+            "tools": {"type": "array"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.cancel": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["turn_id", "target_generation"],
+          "properties": {
+            "type": {"const": "reasoning.cancel"},
+            "turn_id": {"$ref": "#/$defs/uuid"},
+            "target_generation": {"$ref": "#/$defs/generation"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.accepted": {
+      "$ref": "#/$defs/reasoning_event",
+      "type": "object",
+      "properties": {"type": {"const": "reasoning.accepted"}},
+      "unevaluatedProperties": false
+    },
+    "reasoning.text_delta": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["ordinal", "text"],
+          "properties": {
+            "type": {"const": "reasoning.text_delta"},
+            "ordinal": {"type": "integer", "minimum": 0},
+            "text": {"type": "string", "maxLength": 8192}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.usage": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "properties": {
+            "type": {"const": "reasoning.usage"},
+            "input_tokens": {"type": ["integer", "null"], "minimum": 0},
+            "output_tokens": {"type": ["integer", "null"], "minimum": 0}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.completed": {
+      "$ref": "#/$defs/reasoning_event",
+      "type": "object",
+      "properties": {"type": {"const": "reasoning.completed"}},
+      "unevaluatedProperties": false
+    },
+    "reasoning.stopped": {
+      "$ref": "#/$defs/reasoning_event",
+      "type": "object",
+      "properties": {"type": {"const": "reasoning.stopped"}},
+      "unevaluatedProperties": false
+    },
+    "reasoning.failed": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["error_code"],
+          "properties": {
+            "type": {"const": "reasoning.failed"},
+            "error_code": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning_event": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {"$ref": "#/$defs/operation"},
+        {
+          "type": "object",
+          "required": ["turn_id", "generation"],
+          "properties": {
+            "turn_id": {"$ref": "#/$defs/uuid"},
+            "generation": {"$ref": "#/$defs/generation"}
+          }
+        }
+      ]
+    }
+  }
+}

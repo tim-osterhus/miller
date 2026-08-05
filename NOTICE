@@ -5,3 +5,61 @@ This product is licensed under the Apache License, Version 2.0.
 
 Third-party attribution notices, when applicable, are recorded in
 THIRD_PARTY_NOTICES.md.
+
+This distribution includes Node.js 22.22.0, a reviewed derivative of Pi AI
+0.82.0 (Copyright (c) 2025 Mario Zechner), openai 6.26.0, and partial-json
+0.1.7 (Copyright (c) 2023 Promplate Dev Team). Their attribution, provenance,
+and license texts are retained in THIRD_PARTY_NOTICES.md, Gateway/vendor/, and
+the bundled Gateway runtime directory.
+
+OpenClaw GPT-Live wire adaptation
+---------------------------------
+Miller contains a modified adaptation of bounded GPT-Live behavior from
+OpenClaw PR #115226:
+https://github.com/openclaw/openclaw/pull/115226
+
+Exact donor commit:
+f78ba091207b33c3bb79f1bd9879d0e56be91a16
+
+Reviewed donor files:
+- extensions/openai/realtime-quicksilver-wire.ts
+- extensions/openai/realtime-quicksilver-wire.test.ts
+- extensions/openai/realtime-quicksilver-sideband.ts
+- extensions/openai/realtime-quicksilver-session.ts (broker/lifecycle portions)
+- extensions/openai/realtime-quicksilver-session.test.ts
+- extensions/openai/realtime-quicksilver-delegation.test.ts
+
+Copyright (c) 2026 OpenClaw Foundation
+
+Miller's modified donor-derived files are marked in
+Sources/MillerLive/GPTLiveWire.swift,
+Sources/MillerLive/GPTLiveSideband.swift, and
+Sources/MillerLiveAudio/DirectGPTLiveSession.swift. Miller adapted the direct
+GPT-Live wire, sideband, lifecycle, and delegation seam only; it did not copy
+the OpenClaw Gateway, Talk catalog, provider registry, camera, CORS route,
+browser reservation store, or transcript database.
+
+MIT License
+
+Copyright (c) 2026 OpenClaw Foundation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-party notices for incorporated or adapted code are recorded in
+THIRD_PARTY_NOTICES.md.

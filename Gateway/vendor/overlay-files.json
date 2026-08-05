@@ -1,0 +1,332 @@
+{
+  "schema": "miller-pi-a2-overlay-file-inventory",
+  "version": 1,
+  "package": {
+    "name": "@miller/pi-mvp-overlay",
+    "version": "0.82.0-a2"
+  },
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "bytes": 11357,
+      "mode": 384
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "f18900a44191edec178dcc4611369bf50359c8618ed9529b4b144257f5acb79a",
+      "bytes": 862,
+      "mode": 384
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES/openai-6.26.0-Apache-2.0.txt",
+      "sha256": "636eb7d79da9bb6d515a4b3fd417aa26679eb3cf16396ddab4bc55fa74e616e4",
+      "bytes": 11336,
+      "mode": 384
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES/partial-json-0.1.7-MIT.txt",
+      "sha256": "cd519ad3d7e012427f978dfb2e3b92ee403d189d7b859ba6bf68fd7e12ca456f",
+      "bytes": 1075,
+      "mode": 384
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES/pi-ai-0.82.0-MIT.txt",
+      "sha256": "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
+      "bytes": 1069,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/constrained-sampling.js",
+      "sha256": "e169359bf728f767158f226aac74bfc39bd6112c26a8fcb30f586b3247bc6be6",
+      "bytes": 4183,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/lazy.js",
+      "sha256": "92ccc54b76c0a333f44706bb7496b800501f010ec0a7f904455f090d76c33bc1",
+      "bytes": 2071,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-codex-responses.js",
+      "sha256": "dbab40fa4e5062578d36c91382142e14987b40b660758f45b8eeb13ecd0974a6",
+      "bytes": 52088,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-codex-responses.lazy.js",
+      "sha256": "cc69ef7cb93175b8ae30e9b6f749cc5c978cd0c168d0bf379ed48a3d7e9c120a",
+      "bytes": 191,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-completions.js",
+      "sha256": "aabaf8ccc270b59b98cde3adcab02ff5577bc3d8b55501d7689b48bf7b6cd2d9",
+      "bytes": 6014,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-completions.lazy.js",
+      "sha256": "a3d37d272ed600ddae2a9b05884e1c11c65487c1d8aa30d0b19ba571ffc7ea76",
+      "bytes": 180,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-prompt-cache.js",
+      "sha256": "cdb4c30de4e8918994e18556529077ee5d952db0d6960bb299a76f6d8d139d2a",
+      "bytes": 392,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/openai-responses-shared.js",
+      "sha256": "abbf1cd2fdefdd5b821bfa0e64ed74165c92ba5067d15bae2814db7a3f79f81e",
+      "bytes": 27449,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/simple-options.js",
+      "sha256": "74dfde37adbd00a6af1fd707c1c5c876577793b078da9fbbd6d40bb75bfb4749",
+      "bytes": 2214,
+      "mode": 384
+    },
+    {
+      "path": "dist/api/transform-messages.js",
+      "sha256": "4233a93ff3b40a2979f5bb0369a7d829904d9fad66d84c8698aff34c2439355e",
+      "bytes": 6901,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/context.js",
+      "sha256": "5d0ea91a2fd2acf84e3b9717ce59e75006933c68d8efa91873894a9d963d41a0",
+      "bytes": 1666,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/credential-store.js",
+      "sha256": "cd206384bd1bb49ba3a95068e0563154890b6462ccf4d6398607ad549154d57d",
+      "bytes": 1421,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/helpers.js",
+      "sha256": "3b894e48ede03352797511930cc71465e9454f7f1eaf64a2520186f177c76857",
+      "bytes": 1846,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/oauth/device-code.js",
+      "sha256": "e3c554d2a1c06b7f83257dd1666810f26cf41b7707a03a4599bbced1b8babe82",
+      "bytes": 3266,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/oauth/load.js",
+      "sha256": "bc0140f3b907ffe21ff2e2a437b7b0fcb6f8c88213f0b909876de52079a1fb19",
+      "bytes": 102,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/oauth/oauth-page.js",
+      "sha256": "42a64830cc90e228550cab0e765ea5e86653956912bc9197ce655c0685cf0b0c",
+      "bytes": 3114,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/oauth/openai-codex.js",
+      "sha256": "0a8a104cf2922aa726db299f92b5f9e4e2b08f0d699f9cb9de64a832e40d0837",
+      "bytes": 16451,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/oauth/pkce.js",
+      "sha256": "d54668654e89d6fe6994a09a7f9399e732a411fcb31c99eb8b5e60349763708c",
+      "bytes": 1003,
+      "mode": 384
+    },
+    {
+      "path": "dist/auth/resolve.js",
+      "sha256": "e6b14555702abcee65afaa902e21ab38d27d3ad248ec2024c9794bda9f61b433",
+      "bytes": 4192,
+      "mode": 384
+    },
+    {
+      "path": "dist/index.js",
+      "sha256": "40b532cb1c6276e05cd6f20f5a7b22fb401b75e4ec51ae24651a1e135b28cf98",
+      "bytes": 238,
+      "mode": 384
+    },
+    {
+      "path": "dist/model-catalog.js",
+      "sha256": "be8c8db997b1c49478ea13ae98f369074727d52826f091cd590c70dde90d765a",
+      "bytes": 156,
+      "mode": 384
+    },
+    {
+      "path": "dist/models-store.js",
+      "sha256": "88774cd9522cdf1f07f3a3eee0bfa08858fa904136b1c0ad1a3028d61063aff8",
+      "bytes": 431,
+      "mode": 384
+    },
+    {
+      "path": "dist/models.js",
+      "sha256": "3a774b4bc45f0557437f8e250f05209cfe56fd197ebe7bfa213b358769a01ac3",
+      "bytes": 17208,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/data/deepseek.json",
+      "sha256": "b8b5625c810ceb124c736e2abdb85ac2483ff934c2b47f3216edf380ea5f3f7b",
+      "bytes": 843,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/data/openai-codex.json",
+      "sha256": "cfeae6ceef212884222557adb3a00ad1ecfadf1efd185646d182c85b53871bab",
+      "bytes": 875,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/data/openai.json",
+      "sha256": "1c851fb9cab25570987782660801e8eed1dde91547a89f84c445ae73c5339005",
+      "bytes": 1008,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/deepseek.js",
+      "sha256": "d0a155e9c724a36c60ebabd71c47e2f7e26799e1b8b7079a835e9ccec33378f0",
+      "bytes": 603,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/deepseek.models.js",
+      "sha256": "e4f6fcf16453062a9a7d79034ae08c52f74341b833ad355c8c755339d00d9f7d",
+      "bytes": 366,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/openai-codex.js",
+      "sha256": "b458cc964763a2665222f88030aad10c1687905e306cfae957e9771994e24aca",
+      "bytes": 746,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/openai-codex.models.js",
+      "sha256": "2957c06d0abb6dccbfbd154ff1adabbbba14242001a2ff9d56ce78c3fb4d146e",
+      "bytes": 382,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/openai.js",
+      "sha256": "084bed775351ddce268d0c3f2b21bea7e72579bb0701397b82e59294b5f181bc",
+      "bytes": 552,
+      "mode": 384
+    },
+    {
+      "path": "dist/providers/openai.models.js",
+      "sha256": "e145e1a744107013e2906f164a1b1bed6742e9bc5f69fb268a5fcc2a6295eb3c",
+      "bytes": 358,
+      "mode": 384
+    },
+    {
+      "path": "dist/session-resources.js",
+      "sha256": "9228618eeaebc6b5a1746d28d1859b1e23f0f65e978dc9f6e20eb29d65b17e2a",
+      "bytes": 640,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/abort-signals.js",
+      "sha256": "9f68d51e0862b3deafc21bc0349d652410a8b283688af72c937272cb7b87cdc5",
+      "bytes": 1088,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/deferred-tools.js",
+      "sha256": "e70bb8e1255a6b169b242a71ef703143634295caabf4d1fc7924b14b91beb11f",
+      "bytes": 1402,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/diagnostics.js",
+      "sha256": "698070e564b12f303927b0c28845a0ec51f2f3dd29434724dcdffddd31b0b469",
+      "bytes": 964,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/error-body.js",
+      "sha256": "d8ce929dd468b7d00ce40efda1a4bd6b023ae4e83a376d48f64de36ebe9cf5ad",
+      "bytes": 1494,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/estimate.js",
+      "sha256": "6549a8f7ef7fea60c1abde7fe73eee62065b19903057d90c16fad145617adb63",
+      "bytes": 4115,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/event-stream.js",
+      "sha256": "44a2498660ca61efa952ad6a3f10cc0491883411bd2b4572c9a392ec4e9553ec",
+      "bytes": 2469,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/hash.js",
+      "sha256": "7dd6b602e479f30b32d1babeacb1fcb96bd234b13355991caa169013f7885d57",
+      "bytes": 595,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/headers.js",
+      "sha256": "da224200395b7e178b24a7e07c591f4fa635e4a06eb8694b78afeb742589670f",
+      "bytes": 518,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/json-parse.js",
+      "sha256": "824fa2bf05b37d65b105ac8c07172d19f22f56a4ac66fbffba943933e4fb6d62",
+      "bytes": 3312,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/node-http-proxy.js",
+      "sha256": "e28709f8d9ac0e32fb5ea3a4101f5bbe3b4ce77664864c98fd27300a40b3705e",
+      "bytes": 2996,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/provider-env.js",
+      "sha256": "e1f64c60f0fde39a3a649e541d8248a85fdeefe414ff8b4dddf5f1be962d47e6",
+      "bytes": 1696,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/provider-retry.js",
+      "sha256": "f14a8cfb9a99901a7cde6d588fad11aa8030e409d760d76050e580b6dba5c3f5",
+      "bytes": 3963,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/sanitize-unicode.js",
+      "sha256": "77cb844b43f502cc24b25ef284ec5a6f6ac375ac994bcf688275848e1475bc80",
+      "bytes": 1204,
+      "mode": 384
+    },
+    {
+      "path": "dist/utils/uuid.js",
+      "sha256": "adf6e03eaddb8da54421fbe23e98b75d4c58581695f57d99b04c290c43dbd770",
+      "bytes": 1750,
+      "mode": 384
+    },
+    {
+      "path": "package.json",
+      "sha256": "afc648bafcacc8930bf8150c7284cd8c3f7b4be758042363b9bb2f8c095785b2",
+      "bytes": 507,
+      "mode": 384
+    }
+  ],
+  "package_manifest": {
+    "path": "manifest.json",
+    "sha256": "a28a51f77e004f2e27aed217ccb243a895eb32a30942aa7350e0fb81e26170d9"
+  }
+}

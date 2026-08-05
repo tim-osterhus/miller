@@ -1,0 +1,14 @@
+{
+  "name": "miller-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:overlay": "/opt/homebrew/opt/node@22/bin/node scripts/build-overlay.mjs",
+    "test": "/opt/homebrew/opt/node@22/bin/node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a2.tgz",
+    "openai": "6.26.0",
+    "partial-json": "0.1.7"
+  }
+}

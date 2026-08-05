@@ -1,1 +1,6 @@
 .DS_Store
+.artifacts/
+.build/
+.cache/
+Gateway/node_modules/
+Gateway/dist/

@@ -1,0 +1,74 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "@miller/pi-mvp-overlay@0.82.0-a2",
+  "documentNamespace": "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a2",
+  "creationInfo": {
+    "created": "2026-07-29T00:00:00Z",
+    "creators": [
+      "Tool: miller-a2-overlay-builder-1.0"
+    ]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-Overlay",
+      "name": "@miller/pi-mvp-overlay",
+      "versionInfo": "0.82.0-a2",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0 AND MIT",
+      "licenseDeclared": "Apache-2.0 AND MIT",
+      "downloadLocation": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-OpenAI",
+      "name": "openai",
+      "versionInfo": "6.26.0",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "downloadLocation": "https://registry.npmjs.org/openai/-/openai-6.26.0.tgz",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "cdddb775b5938e227ab12017eacd07ac2662e352704c0d5b415b34c0b40f676ff9a36831389039c21ef2380520c18c9b7e10d7ca1c25a5e41fecc960c7c10e08"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-PartialJSON",
+      "name": "partial-json",
+      "versionInfo": "0.1.7",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "downloadLocation": "https://registry.npmjs.org/partial-json/-/partial-json-0.1.7.tgz",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "363bffe7d8476a891bfe14548dc7b71ddbf5db077ad0cb4cf59e4e9669fe9de85ed100c0b11b516c93ef27467dd53bac1744ae65122f9ccf92e25e8420ff2578"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-Overlay"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Overlay",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-OpenAI"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Overlay",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-PartialJSON"
+    }
+  ]
+}

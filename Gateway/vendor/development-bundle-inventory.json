@@ -1,0 +1,12 @@
+{
+  "schema": "miller-development-bundle-inventory",
+  "version": 1,
+  "roots": [
+    "@miller/pi-mvp-overlay",
+    "openai",
+    "partial-json"
+  ],
+  "file_count": 2109,
+  "total_bytes": 7802537,
+  "inventory_sha256": "97a89772018d3438028ab2e3bfa9e552d357075561f24e49b9cc5337488acb83"
+}

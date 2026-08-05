@@ -1,0 +1,111 @@
+# Miller development and qualification
+
+## Toolchain
+
+Miller targets Apple Silicon macOS 15 with Swift 6.1 and exact Node
+`v22.22.0` at `/opt/homebrew/opt/node@22/bin/`. The Swift package has no
+third-party Swift dependency. Gateway dependencies are lockfile-pinned and
+installed with scripts disabled:
+
+```bash
+cd Gateway
+/opt/homebrew/opt/node@22/bin/npm ci --ignore-scripts
+cd ..
+```
+
+Gateway dependencies must already be available locally. Development packaging
+runs `npm ci --ignore-scripts --offline` with the fixed local Node installation,
+then obtains and hash-verifies the reviewed pinned Node runtime for the
+self-contained development app. The tests use local fixtures and loopback
+servers. They do not call a live provider.
+
+## Commands
+
+Run the complete headless suite from the repository root:
+
+```bash
+./scripts/test.sh
+/opt/homebrew/opt/node@22/bin/npm --prefix Gateway test
+./scripts/build.sh
+./scripts/package-dev-app.sh
+./scripts/package-release-app.sh
+./scripts/verify-release-package.sh
+./scripts/verify-provenance.sh
+./scripts/clean.sh
+./scripts/clean.sh --dependencies
+./scripts/clean.sh --preserve-release
+```
+
+`test.sh` runs the Swift suite and the protocol-fixture Node suite. The separate
+Gateway command runs all Node tests. `package-dev-app.sh` creates an ad-hoc
+signed development bundle under `.artifacts/`. It is not a release package.
+`package-release-app.sh` compiles with release settings, removes the
+noninteractive harness behavior, omits fake-helper payloads and harness
+metadata, assembles the production gateway closure, ad-hoc signs it only for
+structural verification, and writes a sanitized inventory under
+`.artifacts/release/`. It remains unsigned by a Developer ID and unnotarized.
+
+The default cleanup removes `.build/`, `.artifacts/`, and `.cache/`.
+`--dependencies` removes `Gateway/node_modules/` and the bounded dependency
+staging/cache roots. Run both after a full qualification pass.
+`--preserve-release` removes build caches, installed Gateway dependencies, the
+development app, and known qualification roots while retaining only
+`.artifacts/release/` for source-release inspection.
+
+## CI boundary
+
+CI runs on `macos-15`. Every action is pinned to a reviewed full commit SHA.
+The job runs deterministic Swift, Node, packaging, provenance, and cleanup
+checks. It never runs a browser, live provider, real credential, interactive
+Keychain, microphone, audio, signing-identity, notarization, or visual test.
+The package command performs only ad-hoc development signing.
+
+Human checks remain in `docs/qualification/text-alpha-host-check.md` and
+`docs/qualification/provider-check.md`. Do not infer those results from CI.
+
+## GPT-Live deterministic check
+
+Run the `MillerLiveTests` filter before the complete suite. The fake direct
+wire/sideband and retained App Server tests exercise initialization, in-memory
+credential admission, realtime lifecycle, failure fencing, process-group
+termination, and cleanup without contacting a provider or touching Keychain,
+browser, microphone, or audio devices.
+
+```bash
+./scripts/test.sh --filter MillerLiveTests
+./scripts/test.sh --filter MillerLiveAudioTests
+./scripts/test.sh --filter MillerAppTests
+./scripts/run-gpt-live-app-server-check.sh --help
+./scripts/package-dev-app.sh
+./scripts/run-gpt-live-app-server-check.sh --harness-smoke \
+  --harness "$PWD/.artifacts/Miller.app/Contents/MacOS/Miller"
+./scripts/run-gpt-live-app-server-check.sh --synthetic-webrtc
+./scripts/run-gpt-live-app-server-check.sh --dry-run \
+  --helper "$HOME/.npm-global/bin/codex" \
+  --harness "$PWD/.artifacts/Miller.app/Contents/MacOS/Miller"
+```
+
+Dry-run resolves the supplied launcher to its native executable, verifies the
+arm64 architecture and OpenAI Developer ID identity, checks the recognized
+development harness and free-space prerequisite, and runs only the local
+`codex --version` command. It makes no model request and reads no credential.
+A compatible harness must advertise the exact
+`MillerGPTLiveHarnessCapability` value `miller-gpt-live-webrtc-harness-v1` in its
+Info.plist. `package-dev-app.sh` injects this marker only into its ad-hoc signed
+development app. The source plist remains an ordinary text-only app plist.
+
+`run-gpt-live-app-server-check.sh` prepares an owner-installed official Codex
+App Server WebRTC v3 route for qualification. Miller does not install, update,
+or remove that external runtime. The direct comparator is exercised by the
+deterministic `MillerLiveTests`, `MillerLiveAudioTests`, and `MillerAppTests`
+fakes; no non-live script mode contacts the provider or runs the human gate.
+
+`--harness-smoke` launches the packaged app without a helper path. The app exits
+before credential, helper, microphone, or audio initialization. `--test-cleanup`
+exercises the same early-exit cleanup boundary. `--synthetic-webrtc` runs the
+deterministic live-audio and app tests with fakes only; it does not create a
+WebKit view, use a network, request a permission, or touch media hardware.
+The external-runtime dry run reports
+`EXTERNAL_CODEX_RUNTIME_READY_LIVE_NOT_RUN`; the other successful non-live
+modes report `WEBRTC_HARNESS_READY_LIVE_NOT_RUN`.
+Delegated checks must not run `--live`.
