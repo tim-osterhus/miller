@@ -83,6 +83,112 @@ struct CapabilityBrokerLifecycleTests {
     }
 
     @Test
+    func ordinaryListErrorRetainsSessionAndLaterRefreshReusesIt() async throws {
+        let providerID = UUID()
+        let session = ControlledSession(tools: [Self.lookupTool])
+        let connections = ConnectionCountProbe()
+        let broker = try CapabilityBroker(
+            configurations: [try Self.configuration(providerID: providerID)],
+            sessionFactory: { _ in
+                await connections.record()
+                return session
+            },
+            approval: { _ in .allowOnce }, audit: { _ in }
+        )
+
+        #expect(await broker.refresh().staleServerIDs.isEmpty)
+        await session.setListFailure(true)
+        let stale = await broker.refresh()
+        #expect(stale.staleServerIDs == ["notes"])
+        #expect(stale.descriptors.allSatisfy { !$0.isAvailable })
+        #expect(await session.disconnectCount == 0)
+
+        await session.setListFailure(false)
+        #expect(await broker.refresh().staleServerIDs.isEmpty)
+        #expect(await connections.count == 1)
+        #expect(await session.disconnectCount == 0)
+    }
+
+    @Test
+    func stdioEOFDuringListDiscardsOnlyDeadLeaseAndNextRefreshReconnects() async throws {
+        let fixtureURL = try #require(Bundle.module.url(
+            forResource: "eof-during-list-mcp-server", withExtension: "mjs",
+            subdirectory: "Fixtures"
+        ))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-mcp-list-eof-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sentinel = root.appendingPathComponent("sentinel")
+        let pidLog = root.appendingPathComponent("pids")
+        let sentinelReference = UUID()
+        let pidReference = UUID()
+        let providerID = UUID()
+        let configuration = try MCPServerConfiguration(
+            id: "notes", displayName: "Notes",
+            transport: .stdio(
+                executable: "/opt/homebrew/opt/node@22/bin/node",
+                arguments: [fixtureURL.path]
+            ),
+            secrets: [
+                try MCPSecretBinding(
+                    destination: .environment, name: "MILLER_MCP_EOF_SENTINEL",
+                    credentialReference: sentinelReference
+                ),
+                try MCPSecretBinding(
+                    destination: .environment, name: "MILLER_MCP_PID_LOG",
+                    credentialReference: pidReference
+                ),
+            ],
+            enabled: true, defaultPolicy: .fullyTrusted,
+            providerProfileIDs: [providerID],
+            bounds: MCPBounds(startupTimeout: .seconds(2))
+        )
+        let connections = ConnectionCountProbe()
+        let broker = try CapabilityBroker(
+            configurations: [configuration],
+            sessionFactory: { configuration in
+                await connections.record()
+                return try await MCPClientSession.connect(
+                    configuration: configuration,
+                    credentialResolver: { reference in
+                        if reference == sentinelReference { return sentinel.path }
+                        if reference == pidReference { return pidLog.path }
+                        throw LifecycleTestFailure()
+                    }
+                )
+            },
+            approval: { _ in .allowOnce }, audit: { _ in }
+        )
+
+        let initial = await broker.refresh()
+        #expect(initial.descriptors.map(\.toolName) == ["lookup"])
+        #expect(initial.staleServerIDs.isEmpty)
+        let firstPID = try #require(Self.recordedPIDs(at: pidLog).first)
+
+        let started = ContinuousClock.now
+        let stale = await broker.refresh()
+        #expect(started.duration(to: .now) < .seconds(1))
+        #expect(stale.staleServerIDs == ["notes"])
+        #expect(stale.descriptors.map(\.toolName) == ["lookup"])
+        #expect(stale.descriptors.allSatisfy { !$0.isAvailable })
+        try await eventually { !Self.processExists(firstPID) }
+
+        let recovered = await broker.refresh()
+        #expect(recovered.staleServerIDs.isEmpty)
+        #expect(recovered.descriptors.map(\.toolName) == ["lookup"])
+        #expect(recovered.descriptors.allSatisfy { $0.isAvailable })
+        #expect(await connections.count == 2)
+
+        await broker.disconnectAll()
+        for pid in Self.recordedPIDs(at: pidLog) {
+            try await eventually { !Self.processExists(pid) }
+        }
+    }
+
+    @Test
     func disconnectDuringPendingConnectPreventsLateInstall() async throws {
         let providerID = UUID()
         let factory = SuspendedSessionFactory()

@@ -118,8 +118,10 @@ public actor CapabilityBroker {
             guard configuration.enabled,
                   !configuration.providerProfileIDs.isEmpty
             else { continue }
+            var attemptedLease: SessionLease?
             do {
                 let lease = try await session(for: configuration)
+                attemptedLease = lease
                 let tools = try await boundedAsync(
                     timeout: configuration.bounds.startupTimeout,
                     timeoutError: MCPClientSessionError.startupTimedOut
@@ -161,6 +163,11 @@ public actor CapabilityBroker {
                 stagedCatalogs[configuration.id] = serverDescriptors
                 descriptors.append(contentsOf: serverDescriptors)
             } catch {
+                if let attemptedLease,
+                   Self.isTerminalTransportFailure(error)
+                {
+                    await discardSession(attemptedLease)
+                }
                 staleServerIDs.insert(configuration.id)
                 if let last = baselineCatalogs[configuration.id] {
                     descriptors.append(contentsOf: last.compactMap(Self.unavailable))
@@ -513,6 +520,16 @@ public actor CapabilityBroker {
             providerProfileIDs: descriptor.providerProfileIDs,
             isAvailable: false
         )
+    }
+
+    private static func isTerminalTransportFailure(_ error: any Error) -> Bool {
+        guard let error = error as? MCPClientSessionError else { return false }
+        switch error {
+        case .connectionClosed, .notConnected:
+            return true
+        default:
+            return false
+        }
     }
 }
 
