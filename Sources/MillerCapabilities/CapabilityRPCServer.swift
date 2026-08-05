@@ -18,21 +18,34 @@ public struct CapabilityRPCEndpoint: Sendable {
 }
 
 public enum CapabilityRPCRuntime {
-    public static var defaultManagedRoot: URL {
+    public static let managedChildName = "capability-bridge"
+
+    public static var defaultTrustedParent: URL {
         URL(
-            filePath: "/private/tmp/ai.millrace.miller-\(getuid())-capability-rpc",
+            filePath: "/private/tmp/ai.millrace.miller-\(getuid())",
             directoryHint: .isDirectory
         )
     }
 
-    public static func prepareManagedRoot(_ root: URL) throws {
-        let parent = root.deletingLastPathComponent()
-        try validateDirectChild(root, of: parent)
+    public static var defaultManagedRoot: URL {
+        managedRoot(in: defaultTrustedParent)
+    }
+
+    public static func managedRoot(in trustedParent: URL) -> URL {
+        trustedParent.appending(
+            path: managedChildName,
+            directoryHint: .isDirectory
+        )
+    }
+
+    public static func prepareManagedRoot(
+        _ root: URL,
+        trustedParent: URL
+    ) throws {
+        try validateAuthority(root: root, trustedParent: trustedParent)
         var value = stat()
         if lstat(root.path, &value) == 0 {
-            guard (value.st_mode & S_IFMT) == S_IFDIR else {
-                throw CapabilityRPCError.unsafeRuntimeRoot
-            }
+            try validateOwnedPrivateDirectory(value)
         } else {
             guard errno == ENOENT else { throw CapabilityRPCError.socketFailure }
             do {
@@ -44,31 +57,29 @@ public enum CapabilityRPCRuntime {
             } catch {
                 throw CapabilityRPCError.socketFailure
             }
-        }
-        guard chmod(root.path, 0o700) == 0 else {
-            throw CapabilityRPCError.socketFailure
+            guard lstat(root.path, &value) == 0 else {
+                throw CapabilityRPCError.socketFailure
+            }
+            try validateOwnedPrivateDirectory(value)
         }
     }
 
     public static func removeManagedRoot(
         _ root: URL,
-        allowedParent: URL
+        trustedParent: URL
     ) throws {
-        try validateDirectChild(root, of: allowedParent)
+        try validateAuthority(root: root, trustedParent: trustedParent)
         var value = stat()
         guard lstat(root.path, &value) == 0 else {
             if errno == ENOENT { return }
             throw CapabilityRPCError.socketFailure
         }
-        guard (value.st_mode & S_IFMT) == S_IFDIR else {
-            throw CapabilityRPCError.unsafeRuntimeRoot
-        }
+        try validateOwnedPrivateDirectory(value)
         let children: [URL]
         do {
             children = try FileManager.default.contentsOfDirectory(
                 at: root,
-                includingPropertiesForKeys: [.isSymbolicLinkKey],
-                options: [.skipsHiddenFiles]
+                includingPropertiesForKeys: [.isSymbolicLinkKey]
             )
         } catch {
             throw CapabilityRPCError.unsafeRuntimeRoot
@@ -81,26 +92,49 @@ public enum CapabilityRPCRuntime {
         }
     }
 
-    private static func validateDirectChild(_ root: URL, of parent: URL) throws {
-        let standardizedRoot = root.standardizedFileURL
-        let rootParent = standardizedRoot.deletingLastPathComponent()
-            .resolvingSymlinksInPath()
-        let standardizedParent = parent.standardizedFileURL
-            .resolvingSymlinksInPath()
-        guard rootParent == standardizedParent,
-              !standardizedRoot.lastPathComponent.isEmpty,
-              standardizedRoot.lastPathComponent != ".",
-              standardizedRoot.lastPathComponent != ".."
+    private static func validateAuthority(
+        root: URL,
+        trustedParent: URL
+    ) throws {
+        guard root.isFileURL,
+              trustedParent.isFileURL,
+              root.path.hasPrefix("/"),
+              trustedParent.path.hasPrefix("/"),
+              root.path == managedRoot(in: trustedParent).path
         else { throw CapabilityRPCError.unsafeRuntimeRoot }
 
+        try validateNoSymlinkComponents(trustedParent)
         var parentValue = stat()
-        guard stat(standardizedParent.path, &parentValue) == 0,
-              (parentValue.st_mode & S_IFMT) == S_IFDIR
+        guard lstat(trustedParent.path, &parentValue) == 0 else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        try validateOwnedPrivateDirectory(parentValue)
+    }
+
+    private static func validateNoSymlinkComponents(_ url: URL) throws {
+        guard url.path.hasPrefix("/") else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        var current = URL(filePath: "/", directoryHint: .isDirectory)
+        for component in url.pathComponents.dropFirst() {
+            current.append(path: component, directoryHint: .isDirectory)
+            var value = stat()
+            guard lstat(current.path, &value) == 0,
+                  (value.st_mode & S_IFMT) != S_IFLNK
+            else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        }
+    }
+
+    private static func validateOwnedPrivateDirectory(_ value: stat) throws {
+        guard (value.st_mode & S_IFMT) == S_IFDIR,
+              value.st_uid == geteuid(),
+              (value.st_mode & 0o777) == 0o700
         else { throw CapabilityRPCError.unsafeRuntimeRoot }
     }
 }
 
 public actor CapabilityRPCServer {
+    private let trustedParent: URL
     private let runtimeRoot: URL
     private let handler: CapabilityRPCHandler
     private var listener: Int32 = -1
@@ -111,10 +145,11 @@ public actor CapabilityRPCServer {
     private var sessionToken: CapabilityRPCSessionToken?
 
     public init(
-        runtimeRoot: URL,
+        trustedParent: URL,
         handler: @escaping CapabilityRPCHandler
     ) {
-        self.runtimeRoot = runtimeRoot
+        self.trustedParent = trustedParent
+        self.runtimeRoot = CapabilityRPCRuntime.managedRoot(in: trustedParent)
         self.handler = handler
     }
 
@@ -124,7 +159,10 @@ public actor CapabilityRPCServer {
 
     public func start() throws -> CapabilityRPCEndpoint {
         guard listener < 0 else { throw CapabilityRPCError.socketFailure }
-        try CapabilityRPCRuntime.prepareManagedRoot(runtimeRoot)
+        try CapabilityRPCRuntime.prepareManagedRoot(
+            runtimeRoot,
+            trustedParent: trustedParent
+        )
         let socketURL = runtimeRoot.appending(path: "capability.sock")
         guard !FileManager.default.fileExists(atPath: socketURL.path) else {
             throw CapabilityRPCError.unsafeRuntimeRoot
@@ -141,7 +179,7 @@ public actor CapabilityRPCServer {
             unlink(socketURL.path)
             try? CapabilityRPCRuntime.removeManagedRoot(
                 runtimeRoot,
-                allowedParent: runtimeRoot.deletingLastPathComponent()
+                trustedParent: trustedParent
             )
             throw error
         }
@@ -196,7 +234,7 @@ public actor CapabilityRPCServer {
         sessionToken = nil
         try? CapabilityRPCRuntime.removeManagedRoot(
             runtimeRoot,
-            allowedParent: runtimeRoot.deletingLastPathComponent()
+            trustedParent: trustedParent
         )
     }
 
@@ -231,14 +269,9 @@ private func handleClient(
         guard let auth = try? CapabilityRPCCodec.decode(
             CapabilityRPCAuthenticationFrame.self, from: firstFrame
         ), constantTimeEqual(auth.token, token.bytes) else {
-            let requestID = (
-                try? CapabilityRPCCodec.decode(
-                    CapabilityRPCRequestEnvelope.self, from: firstFrame
-                )
-            )?.requestID ?? UUID()
             try writeRPCFrame(
                 CapabilityRPCResponseEnvelope(
-                    requestID: requestID,
+                    requestID: UUID(),
                     response: .failed(nil, code: "authentication_failed")
                 ),
                 to: descriptor

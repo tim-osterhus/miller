@@ -64,6 +64,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a2",
     "Miller@0.1.0",
+    "MillerCapabilityBridge@0.1.1",
     "Node.js@22.22.0",
     "openai@6.26.0",
     "partial-json@0.1.7",
@@ -71,10 +72,22 @@ assert.deepEqual(
 );
 assert.equal(sbom.packages.some((entry) => /codex|avatar|cortana/i.test(entry.name)), false);
 assert.equal(
-  sbom.packages.some((entry) =>
-    entry.name === "Miller" && entry.SPDXID === "SPDXRef-Package-Miller"
-  ),
-  true,
+  sbom.packages.some((entry) => entry.name === "Miller"
+    && entry.SPDXID === "SPDXRef-Package-Miller"),
+  true
+);
+assert.equal(
+  sbom.packages.some((entry) => entry.name === "MillerCapabilityBridge"
+    && entry.SPDXID === "SPDXRef-Package-MillerCapabilityBridge"
+    && entry.packageFileName === "Contents/Helpers/MillerCapabilityBridge"),
+  true
+);
+assert.equal(
+  sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-Miller"
+      && entry.relationshipType === "CONTAINS"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MillerCapabilityBridge"),
+  true
 );
 EOF
 

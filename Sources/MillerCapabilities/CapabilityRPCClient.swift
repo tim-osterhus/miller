@@ -85,6 +85,20 @@ public struct CapabilityRPCClient: Sendable {
         }
     }
 
+    public func waitUntilEndpointUnavailable(
+        pollInterval: Duration = .milliseconds(50)
+    ) async {
+        while !Task.isCancelled {
+            var value = stat()
+            guard lstat(endpoint.socketURL.path, &value) == 0,
+                  (value.st_mode & S_IFMT) == S_IFSOCK,
+                  value.st_uid == geteuid()
+            else { return }
+            do { try await Task.sleep(for: pollInterval) }
+            catch { return }
+        }
+    }
+
     private static func perform(
         _ request: CapabilityRPCRequest,
         endpoint: CapabilityRPCEndpoint,
@@ -118,11 +132,11 @@ public struct CapabilityRPCClient: Sendable {
                 CapabilityRPCResponseEnvelope.self,
                 from: frame
             )
-            guard response.requestID == requestID else {
-                throw CapabilityRPCError.invalidRequestID
-            }
             if response.response == .failed(nil, code: "authentication_failed") {
                 throw CapabilityRPCError.authenticationFailed
+            }
+            guard response.requestID == requestID else {
+                throw CapabilityRPCError.invalidRequestID
             }
             return response.response
         }.value

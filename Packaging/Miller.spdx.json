@@ -20,6 +20,17 @@
       "copyrightText": "NOASSERTION"
     },
     {
+      "name": "MillerCapabilityBridge",
+      "SPDXID": "SPDXRef-Package-MillerCapabilityBridge",
+      "versionInfo": "0.1.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/Helpers/MillerCapabilityBridge"
+    },
+    {
       "name": "@miller/pi-mvp-overlay",
       "SPDXID": "SPDXRef-Package-PiOverlay",
       "versionInfo": "0.82.0-a2",
@@ -71,6 +82,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-Miller"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-Package-MillerCapabilityBridge"
     },
     {
       "spdxElementId": "SPDXRef-Package-Miller",

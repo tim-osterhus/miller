@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-bridge_runtime_root="/private/tmp/ai.millrace.miller-${EUID}-capability-rpc"
+bridge_runtime_parent="/private/tmp/ai.millrace.miller-${EUID}"
+bridge_runtime_root="$bridge_runtime_parent/capability-bridge"
 bridge_socket="$bridge_runtime_root/capability.sock"
 
 terminate_bridge() {
@@ -16,7 +17,11 @@ terminate_bridge() {
 
 clean_bridge_runtime() {
   [[ "$bridge_runtime_root" == \
-    "/private/tmp/ai.millrace.miller-${EUID}-capability-rpc" ]] || exit 1
+    "$bridge_runtime_parent/capability-bridge" ]] || exit 1
+  [[ ! -L "$bridge_runtime_parent" ]] || {
+    print -u2 "refusing symbolic-link capability parent: $bridge_runtime_parent"
+    exit 1
+  }
   [[ ! -L "$bridge_runtime_root" ]] || {
     print -u2 "refusing symbolic-link capability runtime: $bridge_runtime_root"
     exit 1
@@ -55,7 +60,13 @@ safe_remove_tree() {
     exit 1
   }
   [[ ! -e "$target" ]] && return
-  find -P "$target" -depth -delete
+  for _ in {1..3}; do
+    find -P "$target" -depth -delete 2>/dev/null || true
+    [[ ! -e "$target" ]] && return 0
+    sleep 0.05
+  done
+  print -u2 "could not remove generated root: $target"
+  return 1
 }
 
 if (( $# == 0 )); then

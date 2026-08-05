@@ -8,11 +8,11 @@ import Testing
 struct CapabilityRPCTests {
     @Test
     func createsPrivateRuntimeAndSocketWithEphemeralToken() async throws {
-        let parent = try temporaryDirectory()
+        let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }
-        let root = parent.appending(path: "rpc")
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
         let server = CapabilityRPCServer(
-            runtimeRoot: root,
+            trustedParent: parent,
             handler: { _ in .failed(nil, code: "unused") }
         )
 
@@ -50,12 +50,11 @@ struct CapabilityRPCTests {
 
     @Test
     func authenticatesBeforeAcceptingARequestAndCorrelatesOneID() async throws {
-        let parent = try temporaryDirectory()
+        let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }
-        let root = parent.appending(path: "rpc")
         let profileID = UUID()
         let descriptor = try makeDescriptor(profileID: profileID)
-        let server = CapabilityRPCServer(runtimeRoot: root) { request in
+        let server = CapabilityRPCServer(trustedParent: parent) { request in
             guard case .list(let received) = request, received == profileID else {
                 return .failed(nil, code: "unexpected")
             }
@@ -85,10 +84,9 @@ struct CapabilityRPCTests {
 
     @Test
     func timesOutAndRejectsPeerDisconnect() async throws {
-        let parent = try temporaryDirectory()
+        let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }
-        let root = parent.appending(path: "rpc")
-        let server = CapabilityRPCServer(runtimeRoot: root) { _ in
+        let server = CapabilityRPCServer(trustedParent: parent) { _ in
             try? await Task.sleep(for: .seconds(1))
             return .failed(nil, code: "late")
         }
@@ -114,12 +112,12 @@ struct CapabilityRPCTests {
 
     @Test
     func cancellingCallForwardsCancelAndCleansAdapterEnvironment() async throws {
-        let parent = try temporaryDirectory()
+        let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }
-        let root = parent.appending(path: "rpc")
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
         let callID = CapabilityCallID()
         let cancellation = CancellationProbe()
-        let server = CapabilityRPCServer(runtimeRoot: root) { request in
+        let server = CapabilityRPCServer(trustedParent: parent) { request in
             switch request {
             case .call:
                 try? await Task.sleep(for: .seconds(2))
@@ -159,26 +157,129 @@ struct CapabilityRPCTests {
     }
 
     @Test
-    func refusesSymlinkRuntimeRootAndUnsafeCleanupTargets() async throws {
-        let parent = try temporaryDirectory()
+    func anchorsRuntimeAuthorityToTheExactManagedChild() async throws {
+        let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
+        try CapabilityRPCRuntime.prepareManagedRoot(
+            root,
+            trustedParent: parent
+        )
+        try CapabilityRPCRuntime.removeManagedRoot(
+            root,
+            trustedParent: parent
+        )
+        #expect(FileManager.default.fileExists(atPath: parent.path))
+
+        let sibling = parent.appending(path: "arbitrary")
+        try FileManager.default.createDirectory(
+            at: sibling,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            try CapabilityRPCRuntime.removeManagedRoot(
+                sibling,
+                trustedParent: parent
+            )
+        }
+
+        let outside = parent.deletingLastPathComponent().appending(
+            path: "outside-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: outside) }
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            try CapabilityRPCRuntime.removeManagedRoot(
+                outside,
+                trustedParent: parent
+            )
+        }
+
+        let nested = root.appending(path: CapabilityRPCRuntime.managedChildName)
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            try CapabilityRPCRuntime.prepareManagedRoot(
+                nested,
+                trustedParent: parent
+            )
+        }
+    }
+
+    @Test
+    func refusesSymlinksAndUnsafeRuntimePermissions() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
         let outside = parent.appending(path: "outside")
         try FileManager.default.createDirectory(
-            at: outside, withIntermediateDirectories: false
+            at: outside,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
         )
-        let link = parent.appending(path: "link")
+        let link = root
         try FileManager.default.createSymbolicLink(
             at: link, withDestinationURL: outside
         )
-        let linked = CapabilityRPCServer(runtimeRoot: link) { _ in .catalog([]) }
+        let linked = CapabilityRPCServer(trustedParent: parent) { _ in .catalog([]) }
         await #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
             _ = try await linked.start()
         }
 
+        try FileManager.default.removeItem(at: link)
+        let realAncestor = parent.appending(path: "real")
+        let realParent = realAncestor.appending(path: "parent")
+        try FileManager.default.createDirectory(
+            at: realParent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        _ = chmod(realAncestor.path, 0o700)
+        let alias = parent.appending(path: "alias")
+        try FileManager.default.createSymbolicLink(
+            at: alias,
+            withDestinationURL: realAncestor
+        )
+        let aliasedParent = alias.appending(path: "parent")
+        let aliased = CapabilityRPCServer(trustedParent: aliasedParent) {
+            _ in .catalog([])
+        }
+        await #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try await aliased.start()
+        }
+
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o755]
+        )
         #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
-            try CapabilityRPCRuntime.removeManagedRoot(
-                outside, allowedParent: parent.appending(path: "different")
+            try CapabilityRPCRuntime.prepareManagedRoot(
+                root,
+                trustedParent: parent
             )
+        }
+
+        try FileManager.default.removeItem(at: root)
+        _ = chmod(parent.path, 0o755)
+        let unsafeParent = CapabilityRPCServer(trustedParent: parent) {
+            _ in .catalog([])
+        }
+        await #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try await unsafeParent.start()
+        }
+
+        let nonOwnedParent = CapabilityRPCServer(
+            trustedParent: URL(
+                filePath: "/private/tmp",
+                directoryHint: .isDirectory
+            )
+        ) { _ in .catalog([]) }
+        await #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try await nonOwnedParent.start()
         }
     }
 }
@@ -200,12 +301,14 @@ private func makeDescriptor(profileID: UUID) throws -> CapabilityDescriptor {
     )
 }
 
-private func temporaryDirectory() throws -> URL {
-    let url = URL(filePath: "/tmp", directoryHint: .isDirectory).appending(
+private func trustedRuntimeParent() throws -> URL {
+    let url = URL(filePath: "/private/tmp", directoryHint: .isDirectory).appending(
         path: "miller-rpc-test-\(UUID().uuidString)"
     )
     try FileManager.default.createDirectory(
-        at: url, withIntermediateDirectories: false
+        at: url,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
     )
     return url
 }

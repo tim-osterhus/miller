@@ -138,8 +138,13 @@ public struct MillerCapabilityBridgeRuntime: Sendable {
     public func run() async throws {
         let server = await makeServer()
         try await server.start(transport: StdioTransport())
-        await server.waitUntilCompleted()
-        await server.stop()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await server.waitUntilCompleted() }
+            group.addTask { await rpcClient.waitUntilEndpointUnavailable() }
+            _ = await group.next()
+            await server.stop()
+            group.cancelAll()
+        }
     }
 }
 

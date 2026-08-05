@@ -25,6 +25,31 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func sbomDeclaresTheCapabilityBridgeAsAContainedComponent() throws {
+        let data = try Data(contentsOf: repositoryRoot.appending(
+            path: "Packaging/Miller.spdx.json"
+        ))
+        let document = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let packages = try #require(document["packages"] as? [[String: Any]])
+        #expect(packages.contains { package in
+            package["name"] as? String == "MillerCapabilityBridge"
+                && package["SPDXID"] as? String
+                    == "SPDXRef-Package-MillerCapabilityBridge"
+        })
+        let relationships = try #require(
+            document["relationships"] as? [[String: Any]]
+        )
+        #expect(relationships.contains { relationship in
+            relationship["spdxElementId"] as? String == "SPDXRef-Package-Miller"
+                && relationship["relationshipType"] as? String == "CONTAINS"
+                && relationship["relatedSpdxElement"] as? String
+                    == "SPDXRef-Package-MillerCapabilityBridge"
+        })
+    }
+
+    @Test
     func manifestMatcherRejectsUnboundURLAndVersionDecoys() {
         let approved = """
             dependencies: [
