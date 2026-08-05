@@ -207,6 +207,39 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func codexRSContentReferenceIsRejected() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            "let executable = \"/opt/codex-rs/codex\"\n",
+            to: fixture.appendingPathComponent("Sources/CodexBridge.swift")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("codex-rs") })
+    }
+
+    @Test
+    func programmaticRustToolInvocationsAreRejected() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            "spawn(\"cargo\", [\"build\"])\nspawn(\"/usr/bin/rustc\", [\"main.rs\"])\n",
+            to: fixture.appendingPathComponent("Gateway/src/build.mjs")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("cargo") })
+        #expect(violations.contains { $0.contains("rustc") })
+    }
+
+    @Test
     func productionInventoryAllowsNarrowVerificationAssertions() throws {
         let fixture = try makePolicyFixture()
         defer { try? FileManager.default.removeItem(at: fixture) }
@@ -215,7 +248,12 @@ struct ReleasePackagingPolicyTests {
             #!/bin/sh
             forbidden_api="dynamicTools" # reject experimental API
             refused_endpoint="item/tool/call"
-            find Sources -type f \\( -name cargo -o -name rustc -o -iname '*codex-rs*' \\)
+            forbidden_runtime="codex-rs"
+            rejected_builder="cargo"
+            test -z "$(find Sources \\( \\
+              -type f \\( -name cargo -o -name rustc \\) -o \\
+              -iname '*codex-rs*' \\
+            \\) -print -quit)"
             find Sources -type f -iname '*VoiceInk*'
             """,
             to: fixture.appendingPathComponent("scripts/verify.sh")
@@ -303,6 +341,7 @@ private enum ReleasePackagingPolicy {
         "(^|[^a-z0-9])cargo([^a-z0-9]|$)",
         "(^|[^a-z0-9])rust([^a-z0-9]|$)",
     ]
+    private static let forbiddenRuntimeTerms = ["codex-rs", "cargo", "rustc"]
     private static let experimentalAPITerms = ["dynamicTools", "item/tool/call"]
     private static let rustCommands = ["cargo", "rustc"]
 
@@ -463,42 +502,93 @@ private enum ReleasePackagingPolicy {
         relativePath: String
     ) -> [String] {
         var violations: [String] = []
-        for (offset, line) in contents.split(
-            omittingEmptySubsequences: false,
-            whereSeparator: { $0.isNewline }
-        ).enumerated() {
-            let text = String(line)
+        for line in logicalLines(
+            in: contents,
+            joiningShellContinuations: relativePath.hasPrefix("scripts/")
+        ) {
+            let text = line.text
             let lowercased = text.lowercased()
             if lowercased.contains("voiceink"),
                 !isExplicitAssertion(of: "voiceink", in: lowercased) {
                 violations.append(
-                    "Forbidden VoiceInk reference in \(relativePath):\(offset + 1)"
+                    "Forbidden VoiceInk reference in \(relativePath):\(line.number)"
+                )
+            }
+            for term in forbiddenRuntimeTerms
+            where containsForbiddenRuntimeTerm(term, in: lowercased)
+                && !isExplicitAssertion(of: term, in: lowercased) {
+                violations.append(
+                    "Forbidden production content \(term) in \(relativePath):\(line.number)"
                 )
             }
             for term in experimentalAPITerms where text.contains(term)
                 && !isExplicitAssertion(of: term.lowercased(), in: lowercased) {
                 violations.append(
-                    "Experimental API \(term) in \(relativePath):\(offset + 1)"
+                    "Experimental API \(term) in \(relativePath):\(line.number)"
                 )
             }
             guard relativePath.hasPrefix("scripts/") else { continue }
             for command in rustCommands where invokes(command, in: lowercased) {
                 violations.append(
-                    "Forbidden \(command) invocation in \(relativePath):\(offset + 1)"
+                    "Forbidden \(command) invocation in \(relativePath):\(line.number)"
                 )
             }
         }
         return violations
     }
 
+    private static func logicalLines(
+        in contents: String,
+        joiningShellContinuations: Bool
+    ) -> [(number: Int, text: String)] {
+        let physicalLines = contents.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: { $0.isNewline }
+        ).map(String.init)
+        guard joiningShellContinuations else {
+            return physicalLines.enumerated().map { ($0.offset + 1, $0.element) }
+        }
+
+        var result: [(number: Int, text: String)] = []
+        var text = ""
+        var firstLineNumber = 1
+        for (offset, physicalLine) in physicalLines.enumerated() {
+            let trimmed = physicalLine.trimmingCharacters(in: .whitespaces)
+            if text.isEmpty { firstLineNumber = offset + 1 }
+            if trimmed.hasSuffix("\\") {
+                text += trimmed.dropLast() + " "
+            } else {
+                text += trimmed
+                result.append((firstLineNumber, text))
+                text = ""
+            }
+        }
+        if !text.isEmpty {
+            result.append((firstLineNumber, text))
+        }
+        return result
+    }
+
+    private static func containsForbiddenRuntimeTerm(_ term: String, in line: String) -> Bool {
+        if term == "codex-rs" {
+            return line.contains(term)
+        }
+        let escapedTerm = NSRegularExpression.escapedPattern(for: term)
+        let pattern = "(^|[^a-z0-9])" + escapedTerm + "([^a-z0-9]|$)"
+        return line.range(of: pattern, options: .regularExpression) != nil
+    }
+
     private static func isExplicitAssertion(of forbiddenTerm: String, in line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         let escapedTerm = NSRegularExpression.escapedPattern(for: forbiddenTerm)
+        let findBody = #"(?!.*(?:;|&&|\|\||`|\$\()).*(?:-name|-iname)\s+(?:["'][^"']*"#
+            + escapedTerm + #"[^"']*["']|[^\s;|&]*"#
+            + escapedTerm + #"[^\s;|&]*)(?:\s|$).*"#
         let patterns = [
             #"^(?:forbidden|refused|rejected|denied)_[a-z0-9_]*\s*=\s*["']"#
                 + escapedTerm + #"["']\s*(?:#.*)?$"#,
-            #"^find\s+.*(?:-name|-iname)\s+["'][^"']*"#
-                + escapedTerm + #"[^"']*["']\s*$"#,
+            #"^find\s+"# + findBody + #"$"#,
+            #"^test\s+-z\s+"\$\(find\s+"# + findBody + #"\)"\s*$"#,
             #"^(?://|#)\s*(?:deny|forbid|must not|refus|reject).*"#
                 + escapedTerm,
         ]
