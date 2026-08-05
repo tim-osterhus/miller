@@ -31,6 +31,9 @@ struct CapabilityModelsTests {
         #expect(throws: CapabilityContractError.invalidCapabilityID) {
             try CapabilityID(rawValue: "unknown/calendar/list")
         }
+        #expect(throws: CapabilityContractError.invalidCapabilityID) {
+            try CapabilityID(rawValue: "miller_mcp/Kelvin/list")
+        }
     }
 
     @Test
@@ -82,6 +85,77 @@ struct CapabilityModelsTests {
     }
 
     @Test
+    func descriptorIdentityMustMatchItsNormalizedIDTriple() throws {
+        let id = try CapabilityID(rawValue: "miller_mcp/calendar/list")
+        let matching = try CapabilityDescriptor(
+            id: id,
+            source: .millerMCP,
+            serverID: " Calendar ",
+            toolName: " LIST ",
+            displayName: "List events",
+            summary: "Lists calendar events",
+            inputSchemaJSON: Data("{}".utf8),
+            readOnlyHint: true,
+            providerProfileIDs: [],
+            isAvailable: true
+        )
+
+        #expect(matching.serverID == "calendar")
+        #expect(matching.toolName == "list")
+        #expect(
+            throws: CapabilityContractError.capabilityDescriptorIdentityMismatch
+        ) {
+            try CapabilityDescriptor(
+                id: id,
+                source: .providerNative,
+                serverID: "calendar",
+                toolName: "list",
+                displayName: "List events",
+                summary: "Lists calendar events",
+                inputSchemaJSON: Data("{}".utf8),
+                readOnlyHint: true,
+                providerProfileIDs: [],
+                isAvailable: true
+            )
+        }
+        #expect(
+            throws: CapabilityContractError.capabilityDescriptorIdentityMismatch
+        ) {
+            try CapabilityDescriptor(
+                id: id,
+                source: .millerMCP,
+                serverID: "calendar",
+                toolName: "create",
+                displayName: "Create event",
+                summary: "Creates a calendar event",
+                inputSchemaJSON: Data("{}".utf8),
+                readOnlyHint: false,
+                providerProfileIDs: [],
+                isAvailable: true
+            )
+        }
+    }
+
+    @Test
+    func descriptorDecodingCannotBypassIdentityValidation() throws {
+        let valid = try descriptor()
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(valid))
+                as? [String: Any]
+        )
+        object["toolName"] = "create"
+
+        #expect(
+            throws: CapabilityContractError.capabilityDescriptorIdentityMismatch
+        ) {
+            try JSONDecoder().decode(
+                CapabilityDescriptor.self,
+                from: JSONSerialization.data(withJSONObject: object)
+            )
+        }
+    }
+
+    @Test
     func catalogSnapshotEnforcesItsDescriptorLimit() throws {
         let value = try descriptor()
         let exact = Array(repeating: value, count: 2_048)
@@ -124,12 +198,8 @@ struct CapabilityModelsTests {
         let summary = try CapabilitySummary(
             text: String(repeating: "s", count: 1_024)
         )
-        let policy = EffectiveCapabilityPolicy(
-            value: .askBeforeChanges,
-            requiresApproval: true,
-            reason: "owner_approval_required"
-        )
-        let lifecycle = CapabilityLifecycleEvent(
+        let policy = approvalPolicy()
+        let lifecycle = try CapabilityLifecycleEvent(
             callID: callID,
             capabilityID: capabilityID,
             summary: summary,
@@ -137,7 +207,7 @@ struct CapabilityModelsTests {
             outcome: nil,
             policy: policy
         )
-        let approval = CapabilityApprovalRequest(
+        let approval = try CapabilityApprovalRequest(
             callID: callID,
             capabilityID: capabilityID,
             summary: summary,
@@ -152,6 +222,124 @@ struct CapabilityModelsTests {
         #expect(CapabilityApprovalDecision.allCases == [.allowOnce, .decline])
         #expect(throws: CapabilityContractError.capabilitySummaryTooLarge) {
             try CapabilitySummary(text: String(repeating: "s", count: 1_025))
+        }
+    }
+
+    @Test
+    func effectivePolicyDecodingRejectsContradictoryReasonState() {
+        let contradictory = Data(
+            """
+            {
+              "value": "fully_trusted",
+              "requiresApproval": true,
+              "reason": "fully_trusted"
+            }
+            """.utf8
+        )
+
+        #expect(
+            throws: CapabilityContractError.invalidEffectiveCapabilityPolicy
+        ) {
+            try JSONDecoder().decode(
+                EffectiveCapabilityPolicy.self,
+                from: contradictory
+            )
+        }
+    }
+
+    @Test
+    func lifecycleConstructorEnforcesStateOutcomeAndApprovalInvariants() throws {
+        let callID = CapabilityCallID()
+        let capabilityID = try CapabilityID(rawValue: "miller_mcp/calendar/create")
+        let summary = try CapabilitySummary(text: "Creates an event")
+
+        #expect(throws: CapabilityContractError.invalidCapabilityLifecycle) {
+            try CapabilityLifecycleEvent(
+                callID: callID,
+                capabilityID: capabilityID,
+                summary: summary,
+                state: .terminal,
+                outcome: nil,
+                policy: automaticPolicy()
+            )
+        }
+        #expect(throws: CapabilityContractError.invalidCapabilityLifecycle) {
+            try CapabilityLifecycleEvent(
+                callID: callID,
+                capabilityID: capabilityID,
+                summary: summary,
+                state: .running,
+                outcome: .succeeded,
+                policy: automaticPolicy()
+            )
+        }
+        #expect(throws: CapabilityContractError.approvalNotRequired) {
+            try CapabilityLifecycleEvent(
+                callID: callID,
+                capabilityID: capabilityID,
+                summary: summary,
+                state: .awaitingApproval,
+                outcome: nil,
+                policy: automaticPolicy()
+            )
+        }
+    }
+
+    @Test
+    func lifecycleDecodingCannotBypassStateOutcomeValidation() throws {
+        let terminal = try CapabilityLifecycleEvent(
+            callID: CapabilityCallID(),
+            capabilityID: CapabilityID(rawValue: "miller_mcp/calendar/create"),
+            summary: CapabilitySummary(text: "Created an event"),
+            state: .terminal,
+            outcome: .succeeded,
+            policy: automaticPolicy()
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(terminal))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "outcome")
+
+        #expect(throws: CapabilityContractError.invalidCapabilityLifecycle) {
+            try JSONDecoder().decode(
+                CapabilityLifecycleEvent.self,
+                from: JSONSerialization.data(withJSONObject: object)
+            )
+        }
+    }
+
+    @Test
+    func approvalRequestsRequireAnApprovalPolicyDuringConstructionAndDecoding() throws {
+        let request = try CapabilityApprovalRequest(
+            callID: CapabilityCallID(),
+            capabilityID: CapabilityID(rawValue: "miller_mcp/calendar/create"),
+            summary: CapabilitySummary(text: "Creates an event"),
+            policy: approvalPolicy()
+        )
+
+        #expect(throws: CapabilityContractError.approvalNotRequired) {
+            try CapabilityApprovalRequest(
+                callID: request.callID,
+                capabilityID: request.capabilityID,
+                summary: request.summary,
+                policy: automaticPolicy()
+            )
+        }
+
+        var requestObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request))
+                as? [String: Any]
+        )
+        requestObject["policy"] = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(automaticPolicy()))
+                as? [String: Any]
+        )
+        #expect(throws: CapabilityContractError.approvalNotRequired) {
+            try JSONDecoder().decode(
+                CapabilityApprovalRequest.self,
+                from: JSONSerialization.data(withJSONObject: requestObject)
+            )
         }
     }
 
@@ -176,7 +364,7 @@ private func descriptor(
     providerProfileIDs: Set<UUID> = [],
     isAvailable: Bool = true
 ) throws -> CapabilityDescriptor {
-    CapabilityDescriptor(
+    try CapabilityDescriptor(
         id: try CapabilityID(rawValue: "miller_mcp/calendar/list"),
         source: .millerMCP,
         serverID: "calendar",
@@ -188,6 +376,20 @@ private func descriptor(
         providerProfileIDs: providerProfileIDs,
         isAvailable: isAvailable
     )
+}
+
+private func approvalPolicy() -> EffectiveCapabilityPolicy {
+    CapabilityPolicyResolver().resolve(
+        serverPolicy: .askBeforeChanges,
+        readOnlyHint: false
+    ).effectivePolicy
+}
+
+private func automaticPolicy() -> EffectiveCapabilityPolicy {
+    CapabilityPolicyResolver().resolve(
+        serverPolicy: .fullyTrusted,
+        readOnlyHint: false
+    ).effectivePolicy
 }
 
 private actor UnsupportedApprovalGateway: ReasoningGateway {

@@ -6,6 +6,10 @@ public enum CapabilityContractError: Error, Equatable, Sendable {
     case catalogTooLarge
     case voiceHistoryAttachmentTooLarge
     case capabilitySummaryTooLarge
+    case capabilityDescriptorIdentityMismatch
+    case invalidEffectiveCapabilityPolicy
+    case invalidCapabilityLifecycle
+    case approvalNotRequired
 }
 
 public struct CapabilityID:
@@ -27,21 +31,12 @@ public struct CapabilityID:
     }
 
     public init(rawValue: String) throws {
-        let components = rawValue
-            .split(separator: "/", omittingEmptySubsequences: false)
-            .map {
-                String($0)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
-            }
-        guard components.count == 3,
-              CapabilitySource(rawValue: components[0]) != nil,
-              components.allSatisfy(Self.isValidComponent)
-        else {
-            throw CapabilityContractError.invalidCapabilityID
-        }
-
-        let normalized = components.joined(separator: "/")
+        let identity = try Self.parse(rawValue)
+        let normalized = [
+            identity.source.rawValue,
+            identity.serverID,
+            identity.toolName,
+        ].joined(separator: "/")
         guard normalized.utf8.count <= 192 else {
             throw CapabilityContractError.capabilityIDTooLarge
         }
@@ -58,12 +53,47 @@ public struct CapabilityID:
         try container.encode(rawValue)
     }
 
-    private static func isValidComponent(_ value: String) -> Bool {
-        !value.isEmpty && value.unicodeScalars.allSatisfy {
-            (33...126).contains($0.value)
-                && $0 != "/"
-                && !(65...90).contains($0.value)
+    fileprivate var identity: Identity? {
+        try? Self.parse(rawValue)
+    }
+
+    fileprivate static func normalizeComponent(
+        _ value: String
+    ) throws -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy({
+                  (33...126).contains($0.value) && $0 != "/"
+              })
+        else {
+            throw CapabilityContractError.invalidCapabilityID
         }
+        return trimmed.lowercased()
+    }
+
+    private static func parse(_ rawValue: String) throws -> Identity {
+        let components = rawValue.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 3 else {
+            throw CapabilityContractError.invalidCapabilityID
+        }
+        let sourceValue = try normalizeComponent(String(components[0]))
+        guard let source = CapabilitySource(rawValue: sourceValue) else {
+            throw CapabilityContractError.invalidCapabilityID
+        }
+        return Identity(
+            source: source,
+            serverID: try normalizeComponent(String(components[1])),
+            toolName: try normalizeComponent(String(components[2]))
+        )
+    }
+
+    fileprivate struct Identity {
+        let source: CapabilitySource
+        let serverID: String
+        let toolName: String
     }
 }
 
@@ -118,11 +148,20 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
         readOnlyHint: Bool?,
         providerProfileIDs: Set<UUID>,
         isAvailable: Bool
-    ) {
+    ) throws {
+        let normalizedServerID = try CapabilityID.normalizeComponent(serverID)
+        let normalizedToolName = try CapabilityID.normalizeComponent(toolName)
+        guard let identity = id.identity,
+              identity.source == source,
+              identity.serverID == normalizedServerID,
+              identity.toolName == normalizedToolName
+        else {
+            throw CapabilityContractError.capabilityDescriptorIdentityMismatch
+        }
         self.id = id
         self.source = source
-        self.serverID = serverID
-        self.toolName = toolName
+        self.serverID = normalizedServerID
+        self.toolName = normalizedToolName
         self.displayName = displayName
         self.summary = summary
         self.inputSchemaJSON = inputSchemaJSON
@@ -131,21 +170,92 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
         self.isAvailable = isAvailable
     }
 
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: container.decode(CapabilityID.self, forKey: .id),
+            source: container.decode(CapabilitySource.self, forKey: .source),
+            serverID: container.decode(String.self, forKey: .serverID),
+            toolName: container.decode(String.self, forKey: .toolName),
+            displayName: container.decode(String.self, forKey: .displayName),
+            summary: container.decode(String.self, forKey: .summary),
+            inputSchemaJSON: container.decode(
+                Data.self,
+                forKey: .inputSchemaJSON
+            ),
+            readOnlyHint: container.decodeIfPresent(
+                Bool.self,
+                forKey: .readOnlyHint
+            ),
+            providerProfileIDs: container.decode(
+                Set<UUID>.self,
+                forKey: .providerProfileIDs
+            ),
+            isAvailable: container.decode(Bool.self, forKey: .isAvailable)
+        )
+    }
+
     public func isAvailable(to providerProfileID: UUID) -> Bool {
         isAvailable && providerProfileIDs.contains(providerProfileID)
     }
 }
 
-public struct EffectiveCapabilityPolicy: Equatable, Sendable {
+public enum CapabilityPolicyReason: String, Codable, Equatable, Sendable {
+    case declaredReadOnly = "declared_read_only"
+    case policyDisabled = "policy_disabled"
+    case ownerApprovalRequired = "owner_approval_required"
+    case fullyTrusted = "fully_trusted"
+    case providerApprovalRequired = "provider_approval_required"
+
+    fileprivate var requiresApproval: Bool {
+        self == .ownerApprovalRequired || self == .providerApprovalRequired
+    }
+
+    fileprivate func supports(_ value: CapabilityPolicy) -> Bool {
+        switch self {
+        case .declaredReadOnly, .providerApprovalRequired:
+            true
+        case .policyDisabled:
+            value == .readOnlyAutomatic
+        case .ownerApprovalRequired:
+            value == .askBeforeChanges
+        case .fullyTrusted:
+            value == .fullyTrusted
+        }
+    }
+}
+
+public struct EffectiveCapabilityPolicy: Codable, Equatable, Sendable {
     public let value: CapabilityPolicy
     public let requiresApproval: Bool
-    public let reason: String
+    public let reason: CapabilityPolicyReason
 
-    public init(
+    init(
         value: CapabilityPolicy,
-        requiresApproval: Bool,
-        reason: String
+        reason: CapabilityPolicyReason
     ) {
+        precondition(reason.supports(value))
+        self.value = value
+        self.requiresApproval = reason.requiresApproval
+        self.reason = reason
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let value = try container.decode(CapabilityPolicy.self, forKey: .value)
+        let requiresApproval = try container.decode(
+            Bool.self,
+            forKey: .requiresApproval
+        )
+        let reason = try container.decode(
+            CapabilityPolicyReason.self,
+            forKey: .reason
+        )
+        guard reason.supports(value),
+              requiresApproval == reason.requiresApproval
+        else {
+            throw CapabilityContractError.invalidEffectiveCapabilityPolicy
+        }
         self.value = value
         self.requiresApproval = requiresApproval
         self.reason = reason
@@ -228,7 +338,7 @@ public enum CapabilityLifecycleState: String, Codable, Sendable {
     case terminal
 }
 
-public struct CapabilityLifecycleEvent: Equatable, Sendable {
+public struct CapabilityLifecycleEvent: Codable, Equatable, Sendable {
     public let callID: CapabilityCallID
     public let capabilityID: CapabilityID
     public let summary: CapabilitySummary
@@ -243,13 +353,43 @@ public struct CapabilityLifecycleEvent: Equatable, Sendable {
         state: CapabilityLifecycleState,
         outcome: CapabilityTerminalOutcome?,
         policy: EffectiveCapabilityPolicy
-    ) {
+    ) throws {
+        guard (state == .terminal) == (outcome != nil) else {
+            throw CapabilityContractError.invalidCapabilityLifecycle
+        }
+        guard state != .awaitingApproval || policy.requiresApproval else {
+            throw CapabilityContractError.approvalNotRequired
+        }
         self.callID = callID
         self.capabilityID = capabilityID
         self.summary = summary
         self.state = state
         self.outcome = outcome
         self.policy = policy
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            callID: container.decode(CapabilityCallID.self, forKey: .callID),
+            capabilityID: container.decode(
+                CapabilityID.self,
+                forKey: .capabilityID
+            ),
+            summary: container.decode(CapabilitySummary.self, forKey: .summary),
+            state: container.decode(
+                CapabilityLifecycleState.self,
+                forKey: .state
+            ),
+            outcome: container.decodeIfPresent(
+                CapabilityTerminalOutcome.self,
+                forKey: .outcome
+            ),
+            policy: container.decode(
+                EffectiveCapabilityPolicy.self,
+                forKey: .policy
+            )
+        )
     }
 }
 
@@ -260,7 +400,7 @@ public enum CapabilityApprovalDecision:
     case decline
 }
 
-public struct CapabilityApprovalRequest: Equatable, Sendable {
+public struct CapabilityApprovalRequest: Codable, Equatable, Sendable {
     public let callID: CapabilityCallID
     public let capabilityID: CapabilityID
     public let summary: CapabilitySummary
@@ -271,10 +411,29 @@ public struct CapabilityApprovalRequest: Equatable, Sendable {
         capabilityID: CapabilityID,
         summary: CapabilitySummary,
         policy: EffectiveCapabilityPolicy
-    ) {
+    ) throws {
+        guard policy.requiresApproval else {
+            throw CapabilityContractError.approvalNotRequired
+        }
         self.callID = callID
         self.capabilityID = capabilityID
         self.summary = summary
         self.policy = policy
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            callID: container.decode(CapabilityCallID.self, forKey: .callID),
+            capabilityID: container.decode(
+                CapabilityID.self,
+                forKey: .capabilityID
+            ),
+            summary: container.decode(CapabilitySummary.self, forKey: .summary),
+            policy: container.decode(
+                EffectiveCapabilityPolicy.self,
+                forKey: .policy
+            )
+        )
     }
 }

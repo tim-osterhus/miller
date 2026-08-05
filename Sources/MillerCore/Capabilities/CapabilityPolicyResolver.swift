@@ -8,12 +8,15 @@ public struct CapabilityPolicyResolution: Equatable, Sendable {
     public let effectivePolicy: EffectiveCapabilityPolicy
     public let decision: CapabilityPolicyDecision
 
-    public init(
-        effectivePolicy: EffectiveCapabilityPolicy,
-        decision: CapabilityPolicyDecision
-    ) {
+    fileprivate init(effectivePolicy: EffectiveCapabilityPolicy) {
         self.effectivePolicy = effectivePolicy
-        self.decision = decision
+        if effectivePolicy.reason == .policyDisabled {
+            decision = .decline
+        } else if effectivePolicy.requiresApproval {
+            decision = .requestApproval
+        } else {
+            decision = .executeAutomatically
+        }
     }
 }
 
@@ -31,27 +34,21 @@ public struct CapabilityPolicyResolver: Sendable {
         if readOnlyHint != true && value == .readOnlyAutomatic {
             return resolution(
                 value: value,
-                requiresApproval: false,
-                reason: "policy_disabled",
-                decision: .decline
+                reason: .policyDisabled
             )
         }
 
         if mandatoryProviderApproval {
             return resolution(
                 value: value,
-                requiresApproval: true,
-                reason: "provider_approval_required",
-                decision: .requestApproval
+                reason: .providerApprovalRequired
             )
         }
 
         if readOnlyHint == true {
             return resolution(
                 value: value,
-                requiresApproval: false,
-                reason: "declared_read_only",
-                decision: .executeAutomatically
+                reason: .declaredReadOnly
             )
         }
 
@@ -59,40 +56,30 @@ public struct CapabilityPolicyResolver: Sendable {
         case .readOnlyAutomatic:
             return resolution(
                 value: value,
-                requiresApproval: false,
-                reason: "policy_disabled",
-                decision: .decline
+                reason: .policyDisabled
             )
         case .askBeforeChanges:
             return resolution(
                 value: value,
-                requiresApproval: true,
-                reason: "owner_approval_required",
-                decision: .requestApproval
+                reason: .ownerApprovalRequired
             )
         case .fullyTrusted:
             return resolution(
                 value: value,
-                requiresApproval: false,
-                reason: "fully_trusted",
-                decision: .executeAutomatically
+                reason: .fullyTrusted
             )
         }
     }
 
     private func resolution(
         value: CapabilityPolicy,
-        requiresApproval: Bool,
-        reason: String,
-        decision: CapabilityPolicyDecision
+        reason: CapabilityPolicyReason
     ) -> CapabilityPolicyResolution {
         CapabilityPolicyResolution(
             effectivePolicy: EffectiveCapabilityPolicy(
                 value: value,
-                requiresApproval: requiresApproval,
                 reason: reason
-            ),
-            decision: decision
+            )
         )
     }
 }
