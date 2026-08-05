@@ -260,7 +260,8 @@ public actor MillerCoordinator {
         }
 
         switch event {
-        case .accepted, .usage:
+        case .accepted, .usage, .capabilityLifecycle,
+             .capabilityApprovalRequested:
             return
 
         case let .textDelta(ordinal, text):

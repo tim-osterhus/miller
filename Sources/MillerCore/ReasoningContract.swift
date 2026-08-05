@@ -19,19 +19,25 @@ public struct ReasoningRequest: Sendable, Equatable {
     public let generation: Int
     public let context: [ReasoningMessage]
     public let userText: String
+    public let capabilityCatalog: CapabilityCatalogSnapshot
+    public let voiceHistoryAttachment: VoiceHistoryAttachment?
 
     public init(
         conversationID: ConversationID,
         turnID: TurnID,
         generation: Int,
         context: [ReasoningMessage],
-        userText: String
+        userText: String,
+        capabilityCatalog: CapabilityCatalogSnapshot = .empty,
+        voiceHistoryAttachment: VoiceHistoryAttachment? = nil
     ) {
         self.conversationID = conversationID
         self.turnID = turnID
         self.generation = generation
         self.context = context
         self.userText = userText
+        self.capabilityCatalog = capabilityCatalog
+        self.voiceHistoryAttachment = voiceHistoryAttachment
     }
 }
 
@@ -42,6 +48,12 @@ public enum ReasoningEvent: Sendable, Equatable {
     case completed
     case stopped
     case failed(code: String, message: String)
+    case capabilityLifecycle(CapabilityLifecycleEvent)
+    case capabilityApprovalRequested(CapabilityApprovalRequest)
+}
+
+public enum ReasoningGatewayError: Error, Equatable, Sendable {
+    case approvalUnsupported
 }
 
 public protocol ReasoningGateway: Sendable {
@@ -50,6 +62,20 @@ public protocol ReasoningGateway: Sendable {
     ) async throws -> AsyncThrowingStream<ReasoningEvent, Error>
 
     func cancel(_ cancellation: ReasoningCancellation) async
+
+    func resolveApproval(
+        callID: CapabilityCallID,
+        decision: CapabilityApprovalDecision
+    ) async throws
+}
+
+public extension ReasoningGateway {
+    func resolveApproval(
+        callID _: CapabilityCallID,
+        decision _: CapabilityApprovalDecision
+    ) async throws {
+        throw ReasoningGatewayError.approvalUnsupported
+    }
 }
 
 public struct ReasoningCancellation: Sendable, Equatable {
