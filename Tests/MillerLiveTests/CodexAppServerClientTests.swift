@@ -342,6 +342,10 @@ struct CodexAppServerClientTests {
         "startup-out-of-band-notifications",
         "active-profile-exact",
         "forward-thread-metadata",
+        "account-completed-unknown-field",
+        "account-updated-unknown-field",
+        "thread-shape-missing",
+        "thread-shape-extra",
     ])
     func acceptsCorrelatedStartupResponsesBeforeRequiredNotifications(mode: String) async throws {
         let process = CodexAppServerProcess(configuration: try configuration(mode: mode))
@@ -358,7 +362,6 @@ struct CodexAppServerClientTests {
     @Test(arguments: [
         ("unknown-field", "initializeProtocolMismatch"),
         ("account-updated-invalid", "threadStartProtocolMismatch"),
-        ("thread-shape-extra", "threadStartProtocolMismatch"),
     ])
     func startupProtocolMismatchReportsOnlyItsPhase(
         mode: String,
@@ -831,15 +834,15 @@ struct CodexAppServerClientTests {
         "unknown-field", "oversized", "realtime-error", "crash-after-start",
         "hang-client", "feature-missing", "feature-incorrect", "unsafe-thread-response",
         "started-v1",
-        "account-completed-unknown-field", "account-completed-invalid",
-        "account-updated-unknown-field", "account-updated-invalid",
+        "account-completed-invalid",
+        "account-updated-invalid",
         "login-notifications-before-response", "account-updated-before-completed",
         "duplicate-account-completed",
         "thread-started-wrong-thread", "thread-started-unknown-field",
         "thread-notification-before-response", "duplicate-thread-started",
         "duplicate-realtime-started",
         "item-wrong-thread", "item-unknown-field",
-        "thread-shape-missing", "thread-shape-wrong", "thread-shape-extra",
+        "thread-shape-wrong",
         "unexpected-sdp", "sdp-wrong-thread", "duplicate-sdp", "missing-sdp",
     ])
     func rejectsSyntheticProtocolLifecycleAndTimeoutFailures(mode: String) async throws {

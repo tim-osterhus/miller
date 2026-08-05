@@ -3,7 +3,7 @@
 Miller is a standalone-capable personal assistant for real-time messaging,
 voice, and governed delegation.
 
-Miller is preparing its source-first v0.1 release. The initial product is a
+Miller v0.1.0 is the source-first MVP. It is a
 local Apple Silicon macOS 15 menu-bar assistant with durable typed
 conversations, Codex OAuth, an OpenAI-compatible provider path, and GPT-Live
 voice through a separately installed official Codex CLI.
@@ -84,12 +84,14 @@ See `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`.
 - `docs/release-checklist.md`: source, human, signing, and publication gates.
 - `docs/qualification/source-first-headless-report.md`: sanitized source-release
   package, reliability, M1 baseline, and cleanup evidence.
+- `docs/qualification/gate-4b-external-codex-human-report.md`: sanitized
+  owner-visible external-Codex and GPT-Live qualification evidence.
 - `docs/qualification/offline-gate-4a-report.md`: sanitized headless
   qualification evidence and remaining human gates.
 
-The deterministic source and package checks do not claim the owner-visible
-microphone/audio gate, Developer ID signing, notarization, clean-machine
-installation, or beta qualification.
+The deterministic source and package checks do not claim Developer ID signing,
+notarization, clean-machine installation, or beta qualification. The separate
+Gate 4B report records the completed owner-visible microphone/audio gate.
 
 ## License
 

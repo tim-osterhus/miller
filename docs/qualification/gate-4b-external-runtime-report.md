@@ -26,7 +26,7 @@ EXTERNAL_CODEX_RUNTIME_READY_LIVE_NOT_RUN
 
 Sanitized evidence:
 
-- 358 Swift tests passed.
+- 360 Swift tests passed.
 - 57 Gateway tests passed.
 - The clean build and ad-hoc development package completed.
 - Strict bundle-signature verification passed.
@@ -40,13 +40,20 @@ Sanitized evidence:
 
 ## Human result
 
-Status: NOT RUN
+Status: PASS
 
-The remaining owner-visible gate covers external-runtime detection, microphone
+Recorded result:
+
+```text
+GATE_4B_EXTERNAL_RUNTIME_CLOSED
+```
+
+The owner-visible gate passed external-runtime detection, microphone
 permission, spoken input and audible output, local date/time context,
 chronological nonduplicated transcripts, delayed follow-up, mute/unmute,
 immediate interruption, a fresh second session, truthful failure behavior,
-typed fallback, child-process reaping, and private-root cleanup.
+typed fallback, child-process reaping, and private-root cleanup. Sanitized
+details are retained in `gate-4b-external-codex-human-report.md`.
 
 No credential, account identifier, provider payload, SDP, transcript, audio,
 private path, or private runtime log is retained in this report.
@@ -54,6 +61,6 @@ private path, or private runtime log is retained in this report.
 ## Source-release continuation
 
 The avatar-independent source-first package and headless M1 baseline are
-recorded in `source-first-headless-report.md` with result
-`SOURCE_RELEASE_READY_HUMAN_LIVE_NOT_RUN`. This does not change the human result
-above.
+recorded in `source-first-headless-report.md`. Its automated terminal marker
+remains `SOURCE_RELEASE_READY_HUMAN_LIVE_NOT_RUN` because the headless script
+does not perform or infer the separate human gate.

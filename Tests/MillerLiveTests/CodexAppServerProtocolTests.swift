@@ -179,6 +179,10 @@ struct CodexAppServerProtocolTests {
         let initialize = try object(protocolCodec.initializeRequest(id: "request-1:initialize"))
         #expect(initialize["method"] as? String == "initialize")
         let params = try #require(initialize["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+        #expect(clientInfo.keys.sorted() == ["name", "version"])
+        #expect(clientInfo["name"] as? String == "miller")
+        #expect(clientInfo["version"] as? String == "0.1.0")
         let capabilities = try #require(params["capabilities"] as? [String: Any])
         #expect(capabilities.keys.sorted() == ["experimentalApi"])
         #expect(capabilities["experimentalApi"] as? Bool == true)
@@ -255,21 +259,40 @@ struct CodexAppServerProtocolTests {
     }
 
     @Test
-    func rejectsMissingOrInvalidExactPinThreadStartFields() throws {
+    func admitsOmittedDefaultMetadataAndAdditiveThreadStartMetadata() throws {
         let source = try object(Data(threadStartResponse(
             id: "request-1:thread-start", threadID: "helper-thread-7"
         ).utf8))
+        var root = source
+        var result = try #require(root["result"] as? [String: Any])
         for field in [
             "runtimeWorkspaceRoots", "multiAgentMode", "serviceTier", "instructionSources",
             "activePermissionProfile", "reasoningEffort",
         ] {
-            var root = source
-            var result = try #require(root["result"] as? [String: Any])
             result.removeValue(forKey: field)
-            root["result"] = result
-            let data = try JSONSerialization.data(withJSONObject: root)
-            #expect(throws: LiveProtocolError.missingField) { try protocolCodec.decode(data) }
         }
+        result["futureResultMetadata"] = ["ignored": true]
+        var thread = try #require(result["thread"] as? [String: Any])
+        for field in [
+            "extra", "forkedFromId", "parentThreadId", "historyMode", "recencyAt", "path",
+            "canAcceptDirectInput", "threadSource", "agentNickname", "agentRole", "gitInfo", "name",
+        ] {
+            thread.removeValue(forKey: field)
+        }
+        thread["isPinned"] = false
+        thread["futureThreadMetadata"] = ["ignored": true]
+        result["thread"] = thread
+        root["result"] = result
+
+        #expect(try protocolCodec.decode(try JSONSerialization.data(withJSONObject: root)) ==
+            .threadStartResponse(id: "request-1:thread-start", threadID: "helper-thread-7"))
+    }
+
+    @Test
+    func rejectsInvalidOptionalThreadStartMetadataWhenPresent() throws {
+        let source = try object(Data(threadStartResponse(
+            id: "request-1:thread-start", threadID: "helper-thread-7"
+        ).utf8))
         for (field, value) in [
             ("runtimeWorkspaceRoots", [7] as Any),
             ("multiAgentMode", 7 as Any),
@@ -289,36 +312,13 @@ struct CodexAppServerProtocolTests {
         #expect(throws: LiveProtocolError.invalidField) {
             try protocolCodec.decode(try JSONSerialization.data(withJSONObject: malformedMetadata))
         }
-
-        var invented = source
-        var inventedResult = try #require(invented["result"] as? [String: Any])
-        inventedResult["permissionProfile"] = NSNull()
-        invented["result"] = inventedResult
-        #expect(throws: LiveProtocolError.unknownField) {
-            try protocolCodec.decode(try JSONSerialization.data(withJSONObject: invented))
-        }
     }
 
     @Test
-    func requiresExactExperimentalThreadShapeWithoutLooseningUnknownFields() throws {
+    func rejectsInvalidOptionalThreadMetadataWhenPresent() throws {
         let source = try object(Data(threadStartResponse(
             id: "request-1:thread-start", threadID: "helper-thread-7"
         ).utf8))
-        let exactFields = [
-            "extra", "parentThreadId", "recencyAt", "historyMode", "canAcceptDirectInput",
-        ]
-        for field in exactFields {
-            var root = source
-            var result = try #require(root["result"] as? [String: Any])
-            var thread = try #require(result["thread"] as? [String: Any])
-            thread.removeValue(forKey: field)
-            result["thread"] = thread
-            root["result"] = result
-            #expect(throws: LiveProtocolError.missingField) {
-                try protocolCodec.decode(try JSONSerialization.data(withJSONObject: root))
-            }
-        }
-
         let hostile: [(String, Any)] = [
             ("extra", "not-an-object"),
             ("parentThreadId", 7),
@@ -336,16 +336,6 @@ struct CodexAppServerProtocolTests {
             #expect(throws: LiveProtocolError.invalidField) {
                 try protocolCodec.decode(try JSONSerialization.data(withJSONObject: root))
             }
-        }
-
-        var extraRoot = source
-        var extraResult = try #require(extraRoot["result"] as? [String: Any])
-        var extraThread = try #require(extraResult["thread"] as? [String: Any])
-        extraThread["future"] = true
-        extraResult["thread"] = extraThread
-        extraRoot["result"] = extraResult
-        #expect(throws: LiveProtocolError.unknownField) {
-            try protocolCodec.decode(try JSONSerialization.data(withJSONObject: extraRoot))
         }
     }
 
@@ -539,6 +529,12 @@ struct CodexAppServerProtocolTests {
         {"method":"account/updated","params":{"authMode":"chatgptAuthTokens","planType":"plus"}}
         """)) == .accountUpdated)
         #expect(try protocolCodec.decode(line("""
+        {"method":"account/login/completed","params":{"success":true,"futureMetadata":1}}
+        """)) == .accountLoginCompleted)
+        #expect(try protocolCodec.decode(line("""
+        {"method":"account/updated","params":{"futureMetadata":1}}
+        """)) == .accountUpdated)
+        #expect(try protocolCodec.decode(line("""
         {"method":"thread/started","params":{"thread":\(threadObject(threadID: "helper-thread-7"))}}
         """)) == .threadStarted(threadID: "helper-thread-7"))
         #expect(try protocolCodec.decode(line("""
@@ -571,12 +567,12 @@ struct CodexAppServerProtocolTests {
     }
 
     @Test
-    func decodesAndDiscardsOnlyExactHarmlessStartupNotifications() throws {
+    func decodesHarmlessStartupNotificationsAcrossOptionalMetadataChanges() throws {
         #expect(try protocolCodec.decode(line("""
-        {"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"discard-server","installationId":"discard-installation","environmentId":null},"emittedAtMs":1785758400123}
+        {"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"discard-server","installationId":"discard-installation","futureMetadata":true},"emittedAtMs":1785758400123}
         """)) == .outOfBandStartupNotification)
         #expect(try protocolCodec.decode(line("""
-        {"method":"configWarning","params":{"summary":"discard-summary","details":"discard-details","path":"/private/tmp/config.toml","range":{"start":{"line":1,"column":2},"end":{"line":3,"column":4}}},"emittedAtMs":1785758400123}
+        {"method":"configWarning","params":{"summary":"discard-summary","futureMetadata":true},"emittedAtMs":1785758400123}
         """)) == .outOfBandStartupNotification)
     }
 
@@ -628,8 +624,6 @@ struct CodexAppServerProtocolTests {
 
     @Test(arguments: [
         "{\"method\":\"remoteControl/status/changed\",\"params\":{\"status\":\"future\",\"serverName\":\"server\",\"installationId\":\"id\",\"environmentId\":null}}",
-        "{\"method\":\"remoteControl/status/changed\",\"params\":{\"status\":\"disabled\",\"serverName\":\"server\",\"installationId\":\"id\",\"environmentId\":null,\"future\":true}}",
-        "{\"method\":\"configWarning\",\"params\":{\"summary\":\"warning\",\"details\":null,\"future\":true}}",
         "{\"method\":\"configWarning\",\"params\":{\"summary\":\"warning\",\"details\":null},\"emittedAtMs\":true}",
         "{\"method\":\"configWarning\",\"params\":{\"summary\":\"warning\",\"details\":null},\"emittedAtMs\":1.5}",
         "{\"method\":\"configWarning\",\"params\":{\"summary\":\"warning\",\"details\":null},\"emittedAtMs\":-1}",

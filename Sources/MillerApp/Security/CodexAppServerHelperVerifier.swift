@@ -119,16 +119,16 @@ struct CodexAppServerHelperVerifier: Sendable {
         _ pid: pid_t
     ) throws -> CodexAppServerHelperInspection {
         guard pid > 0 else { throw CodexAppServerHelperVerificationError.rejected }
-        let executableURL = try runningExecutableURL(pid: pid)
-        let runningCode = try runningCode(for: pid)
+        let admittedCode = try runningCode(for: pid)
         let requirement = try expectedExecutionRequirement()
-        guard SecCodeCheckValidity(runningCode, validationFlags, requirement) == errSecSuccess
+        guard SecCodeCheckValidity(admittedCode, validationFlags, requirement) == errSecSuccess
         else { throw CodexAppServerHelperVerificationError.rejected }
         var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(runningCode, [], &staticCode) == errSecSuccess,
+        guard SecCodeCopyStaticCode(admittedCode, [], &staticCode) == errSecSuccess,
               let staticCode
         else { throw CodexAppServerHelperVerificationError.rejected }
         try validate(staticCode)
+        let executableURL = try executableURL(for: staticCode)
         let identity = try signingIdentity(for: staticCode)
         return .init(
             identifier: identity.identifier,
@@ -192,19 +192,12 @@ struct CodexAppServerHelperVerifier: Sendable {
         throw CodexAppServerHelperVerificationError.rejected
     }
 
-    private static func runningExecutableURL(pid: pid_t) throws -> URL {
-        // `PROC_PIDPATHINFO_MAXSIZE` is a C expression macro and is not
-        // imported into Swift. Darwin defines it as four times MAXPATHLEN.
-        var buffer = [UInt8](repeating: 0, count: 16_384)
-        let length = buffer.withUnsafeMutableBytes { bytes in
-            proc_pidpath(pid, bytes.baseAddress, UInt32(bytes.count))
-        }
-        guard length > 0 else { throw CodexAppServerHelperVerificationError.rejected }
-        let path = String(decoding: buffer.prefix(Int(length)), as: UTF8.self)
-        guard path.hasPrefix("/") else {
-            throw CodexAppServerHelperVerificationError.rejected
-        }
-        return URL(fileURLWithPath: path)
+    private static func executableURL(for staticCode: SecStaticCode) throws -> URL {
+        var path: CFURL?
+        guard SecCodeCopyPath(staticCode, [], &path) == errSecSuccess,
+              let path
+        else { throw CodexAppServerHelperVerificationError.rejected }
+        return (path as URL)
             .resolvingSymlinksInPath()
             .standardizedFileURL
     }

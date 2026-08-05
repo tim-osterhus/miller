@@ -93,3 +93,7 @@ removing the external Codex installation.
 Only this owner-visible pass may record
 `GATE_4B_EXTERNAL_RUNTIME_CLOSED`. Miller Avatar is a separate follow-on
 release and does not gate Miller v0.1.
+
+The owner-visible pass has been completed. Its sanitized result is recorded in
+`gate-4b-external-codex-human-report.md`; no sensitive live-session material is
+retained here.

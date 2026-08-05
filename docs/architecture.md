@@ -1,8 +1,9 @@
 # Miller text-alpha architecture
 
-This document describes the text-first internal alpha and the bounded Gate 4B
-GPT-Live WebRTC development harness. It does not claim that the live human gate
-ran.
+This document describes the Miller v0.1 text and GPT-Live architecture,
+including its external official Codex App Server WebRTC boundary. The completed
+owner-visible Gate 4B result is recorded separately in
+`docs/qualification/gate-4b-external-codex-human-report.md`.
 
 ## Authority and process boundary
 

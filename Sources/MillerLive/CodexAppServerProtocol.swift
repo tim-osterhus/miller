@@ -83,7 +83,7 @@ public struct CodexAppServerProtocol: Sendable {
             "id": id,
             "method": "initialize",
             "params": [
-                "clientInfo": ["name": "miller", "version": "0.0.0"],
+                "clientInfo": ["name": "miller", "version": "0.1.0"],
                 "capabilities": ["experimentalApi": true],
             ],
         ])
@@ -214,15 +214,12 @@ public struct CodexAppServerProtocol: Sendable {
             return .loginResponse(id: id)
         }
         if id.hasSuffix(":thread-start") {
-            try requireFields(
+            try requireRequiredFields(
                 result,
                 required: [
-                    "thread", "model", "modelProvider", "serviceTier", "cwd",
-                    "instructionSources", "approvalPolicy", "approvalsReviewer", "sandbox",
-                    "activePermissionProfile", "reasoningEffort",
-                    "runtimeWorkspaceRoots", "multiAgentMode",
-                ],
-                optional: []
+                    "thread", "model", "modelProvider", "cwd", "approvalPolicy",
+                    "approvalsReviewer", "sandbox",
+                ]
             )
             let threadID = try validatedThread(result["thread"])
             _ = try string(result, "model")
@@ -233,21 +230,37 @@ public struct CodexAppServerProtocol: Sendable {
                   result["approvalPolicy"] as? String == "never",
                   let sandbox = result["sandbox"] as? [String: Any]
             else { throw LiveProtocolError.invalidField }
-            try requireFields(sandbox, required: ["type", "networkAccess"], optional: [])
-            guard sandbox["type"] as? String == "readOnly",
-                  sandbox["networkAccess"] as? Bool == false
-            else { throw LiveProtocolError.invalidField }
+            try requireFields(sandbox, required: ["type"], optional: ["networkAccess"])
+            guard sandbox["type"] as? String == "readOnly" else {
+                throw LiveProtocolError.invalidField
+            }
+            if let networkAccess = sandbox["networkAccess"],
+               networkAccess as? Bool != false {
+                throw LiveProtocolError.invalidField
+            }
             guard let thread = result["thread"] as? [String: Any],
                   thread["cwd"] as? String == cwd,
                   thread["modelProvider"] as? String == modelProvider
             else { throw LiveProtocolError.invalidField }
-            try validateNullableString(result["serviceTier"])
-            try validateStringList(result["instructionSources"])
-            try validateStringList(result["runtimeWorkspaceRoots"])
-            try validateNullableJSONObject(result["activePermissionProfile"])
-            try validateNullableString(result["reasoningEffort"])
+            if let serviceTier = result["serviceTier"] {
+                try validateNullableString(serviceTier)
+            }
+            if let instructionSources = result["instructionSources"] {
+                try validateStringList(instructionSources)
+            }
+            if let runtimeWorkspaceRoots = result["runtimeWorkspaceRoots"] {
+                try validateStringList(runtimeWorkspaceRoots)
+            }
+            if let activePermissionProfile = result["activePermissionProfile"] {
+                try validateNullableJSONObject(activePermissionProfile)
+            }
+            if let reasoningEffort = result["reasoningEffort"] {
+                try validateNullableString(reasoningEffort)
+            }
             try validateNullableString(result["approvalsReviewer"])
-            _ = try string(result, "multiAgentMode")
+            if result["multiAgentMode"] != nil {
+                _ = try string(result, "multiAgentMode")
+            }
             return .threadStartResponse(id: id, threadID: threadID)
         }
         guard result.isEmpty else { throw LiveProtocolError.unknownField }
@@ -273,26 +286,25 @@ public struct CodexAppServerProtocol: Sendable {
         }
         switch method {
         case "remoteControl/status/changed":
-            try requireFields(
+            try requireRequiredFields(
                 params,
-                required: ["status", "serverName", "installationId", "environmentId"],
-                optional: []
+                required: ["status", "serverName", "installationId"]
             )
             guard let status = params["status"] as? String,
                   ["disabled", "connecting", "connected", "errored"].contains(status),
                   !(try string(params, "serverName")).isEmpty,
                   !(try string(params, "installationId")).isEmpty
             else { throw LiveProtocolError.invalidField }
-            try validateNullableNonemptyString(params["environmentId"])
+            if let environmentID = params["environmentId"] {
+                try validateNullableNonemptyString(environmentID)
+            }
             return .outOfBandStartupNotification
         case "configWarning":
-            try requireFields(
-                params,
-                required: ["summary", "details"],
-                optional: ["path", "range"]
-            )
+            try requireRequiredFields(params, required: ["summary"])
             _ = try boundedText(params, "summary")
-            try validateNullableString(params["details"])
+            if let details = params["details"] {
+                try validateNullableString(details)
+            }
             if let path = params["path"] {
                 guard !(path is NSNull) else { throw LiveProtocolError.invalidField }
                 _ = try string(params, "path")
@@ -302,18 +314,26 @@ public struct CodexAppServerProtocol: Sendable {
             }
             return .outOfBandStartupNotification
         case "account/login/completed":
-            try requireFields(params, required: ["loginId", "success", "error"], optional: [])
-            guard params["loginId"] is NSNull,
-                  params["success"] as? Bool == true,
-                  params["error"] is NSNull
-            else { throw LiveProtocolError.invalidField }
+            try requireRequiredFields(params, required: ["success"])
+            guard params["success"] as? Bool == true else {
+                throw LiveProtocolError.invalidField
+            }
+            if let loginID = params["loginId"] {
+                try validateNullableString(loginID)
+            }
+            if let error = params["error"] {
+                guard error is NSNull else { throw LiveProtocolError.invalidField }
+            }
             return .accountLoginCompleted
         case "account/updated":
-            try requireFields(params, required: ["authMode", "planType"], optional: [])
-            try validateNullableEnum(
-                params["authMode"], values: ["apikey", "chatgpt", "chatgptAuthTokens", "agentIdentity"]
-            )
-            try validateNullableString(params["planType"])
+            if let authMode = params["authMode"] {
+                try validateNullableEnum(
+                    authMode, values: ["apikey", "chatgpt", "chatgptAuthTokens", "agentIdentity"]
+                )
+            }
+            if let planType = params["planType"] {
+                try validateNullableString(planType)
+            }
             return .accountUpdated
         case "thread/started":
             try requireFields(params, required: ["thread"], optional: [])
@@ -566,16 +586,12 @@ public struct CodexAppServerProtocol: Sendable {
 
     private func validatedThread(_ value: Any?) throws -> String {
         guard let thread = value as? [String: Any] else { throw LiveProtocolError.invalidField }
-        try requireFields(
+        try requireRequiredFields(
             thread,
             required: [
-                "id", "extra", "sessionId", "forkedFromId", "parentThreadId", "preview",
-                "ephemeral", "historyMode", "modelProvider", "createdAt", "updatedAt",
-                "recencyAt", "status", "path", "cwd", "cliVersion", "source",
-                "canAcceptDirectInput", "threadSource", "agentNickname", "agentRole",
-                "gitInfo", "name", "turns",
-            ],
-            optional: []
+                "id", "sessionId", "preview", "ephemeral", "modelProvider", "createdAt",
+                "updatedAt", "status", "cwd", "cliVersion", "source", "turns",
+            ]
         )
         let threadID = try string(thread, "id")
         let modelProvider = try string(thread, "modelProvider")
@@ -587,27 +603,43 @@ public struct CodexAppServerProtocol: Sendable {
               let turns = thread["turns"] as? [Any], turns.isEmpty,
               let status = thread["status"] as? [String: Any]
         else { throw LiveProtocolError.invalidField }
-        try validateNullableJSONObject(thread["extra"])
+        if let extra = thread["extra"] {
+            try validateNullableJSONObject(extra)
+        }
         _ = try string(thread, "sessionId")
-        _ = try string(thread, "historyMode")
+        if thread["historyMode"] != nil {
+            _ = try string(thread, "historyMode")
+        }
         _ = try string(thread, "preview")
         try validateBoundedJSON(status)
         _ = try integer(thread, "createdAt")
         _ = try integer(thread, "updatedAt")
-        try validateNullableInteger(thread["recencyAt"])
+        if let recencyAt = thread["recencyAt"] {
+            try validateNullableInteger(recencyAt)
+        }
         for key in [
             "forkedFromId", "parentThreadId", "path", "agentNickname", "agentRole", "name",
         ] {
-            try validateNullableString(thread[key])
+            if let value = thread[key] {
+                try validateNullableString(value)
+            }
         }
-        let directInput = thread["canAcceptDirectInput"]!
-        guard directInput is NSNull || directInput is Bool else {
+        if let directInput = thread["canAcceptDirectInput"] {
+            guard directInput is NSNull || directInput is Bool else {
+                throw LiveProtocolError.invalidField
+            }
+        }
+        if let isPinned = thread["isPinned"], !(isPinned is Bool) {
             throw LiveProtocolError.invalidField
         }
         _ = try string(thread, "cliVersion")
         _ = try string(thread, "source")
-        try validateNullableString(thread["threadSource"])
-        try validateNullableJSONObject(thread["gitInfo"])
+        if let threadSource = thread["threadSource"] {
+            try validateNullableString(threadSource)
+        }
+        if let gitInfo = thread["gitInfo"] {
+            try validateNullableJSONObject(gitInfo)
+        }
         return threadID
     }
 
@@ -730,6 +762,15 @@ public struct CodexAppServerProtocol: Sendable {
         guard required.isSubset(of: Set(object.keys)) else { throw LiveProtocolError.missingField }
         guard Set(object.keys).isSubset(of: required.union(optional)) else {
             throw LiveProtocolError.unknownField
+        }
+    }
+
+    private func requireRequiredFields(
+        _ object: [String: Any],
+        required: Set<String>
+    ) throws {
+        guard required.isSubset(of: Set(object.keys)) else {
+            throw LiveProtocolError.missingField
         }
     }
 }

@@ -2,20 +2,22 @@
 
 ## Source-first closure
 
-- [ ] Complete Swift and Gateway suites pass from a clean dependency install.
-- [ ] Release-mode package contains only the production gateway and reviewed
+- [x] Complete Swift and Gateway suites pass from a clean dependency install.
+- [x] Release-mode package contains only the production gateway and reviewed
       runtime closure.
-- [ ] Release inventory, SPDX SBOM, provenance, licenses, and notices agree.
-- [ ] No Codex, Rust/Cargo, Cortana, fake helper, avatar renderer, or VRM asset
+- [x] Release inventory, SPDX SBOM, provenance, licenses, and notices agree.
+- [x] No Codex, Rust/Cargo, Cortana, fake helper, avatar renderer, or VRM asset
       is distributed.
-- [ ] Headless M1 size, process, write-root, and cleanup evidence is retained.
+- [x] Headless M1 size, process, write-root, and cleanup evidence is retained.
 
 ## Owner-visible closure
 
-- [ ] External Codex discovery and compatibility pass on the M1 floor.
-- [ ] Microphone permission, spoken input/output, transcript ordering,
+- [x] External Codex discovery and compatibility pass on the M1 floor.
+- [x] Microphone permission, spoken input/output, transcript ordering,
       delayed follow-up, mute, interruption, second session, failure handling,
       typed fallback, and cleanup pass.
+
+Evidence: `docs/qualification/gate-4b-external-codex-human-report.md`.
 
 ## Deferred signing and publication
 

@@ -1,5 +1,6 @@
 import Foundation
 import MillerCore
+import MillerLive
 import Security
 import Testing
 @testable import MillerApp
@@ -82,6 +83,38 @@ struct CodexAppServerHelperVerifierTests {
         #expect(throws: CodexAppServerHelperVerificationError.rejected) {
             try verifier.verifyRunningProcess(pid: 4242, expectedExecutableURL: expected)
         }
+    }
+
+    @Test
+    func installedOfficialCodexSurvivesSpawnAdmission() async throws {
+        guard let path = ProcessInfo.processInfo.environment["MILLER_EXTERNAL_CODEX"] else {
+            return
+        }
+        let executable = URL(fileURLWithPath: path)
+        let verifier = CodexAppServerHelperVerifier()
+        try verifier.verify(executable)
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-installed-codex-admission-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: executable,
+            arguments: ["app-server", "--listen", "stdio://", "--strict-config"],
+            temporaryParentURL: parent,
+            spawnedProcessVerifier: { pid in
+                try verifier.verifyRunningProcess(
+                    pid: pid,
+                    expectedExecutableURL: executable
+                )
+            }
+        ))
+
+        _ = try process.start()
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(process.isRunning)
+        await process.stop()
     }
 
     @Test
