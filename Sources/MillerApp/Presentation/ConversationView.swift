@@ -160,6 +160,7 @@ struct AssistantMarkdownView: View {
 struct ConversationView: View {
     @ObservedObject var model: AppPresentationModel
     @State private var confirmDelete = false
+    @State private var showVoiceHistory = false
 
     var body: some View {
         HSplitView {
@@ -175,6 +176,9 @@ struct ConversationView: View {
                         model.newConversation()
                     }
                     .disabled(!model.menuState.canCreateConversation)
+                    Button("Voice History") {
+                        showVoiceHistory = true
+                    }
                 }
 
                 FollowTailScrollView(
@@ -187,6 +191,22 @@ struct ConversationView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if let attachment = model.pendingVoiceHistoryAttachment {
+                    HStack(spacing: 8) {
+                        Label(
+                            voiceHistoryAttachmentLabel(attachment),
+                            systemImage: "waveform.badge.plus"
+                        )
+                        .font(.caption)
+                        Spacer()
+                        Button("Remove") {
+                            model.cancelVoiceHistoryAttachment()
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                 }
 
                 HStack {
@@ -233,7 +253,19 @@ struct ConversationView: View {
         } message: {
             Text("This removes the conversation from Miller's database.")
         }
+        .sheet(isPresented: $showVoiceHistory) {
+            VoiceHistoryView(model: model)
+        }
         .task { await model.refresh() }
+    }
+
+    private func voiceHistoryAttachmentLabel(
+        _ attachment: PreparedVoiceHistoryAttachment
+    ) -> String {
+        let count = attachment.sessionIDs.count
+        let noun = count == 1 ? "session" : "sessions"
+        let truncation = attachment.truncated ? " (truncated)" : ""
+        return "\(count) voice \(noun) attached\(truncation)"
     }
 }
 

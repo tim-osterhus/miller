@@ -38,7 +38,8 @@ public actor MillerCoordinator {
     @discardableResult
     public func submit(
         text: String,
-        conversationID: ConversationID
+        conversationID: ConversationID,
+        voiceHistoryAttachment: VoiceHistoryAttachment? = nil
     ) async throws -> TurnID {
         guard storageAvailable else {
             throw CoreError.storageUnavailable
@@ -109,7 +110,8 @@ public actor MillerCoordinator {
             turnID: turnID,
             generation: generation,
             context: context,
-            userText: text
+            userText: text,
+            voiceHistoryAttachment: voiceHistoryAttachment
         )
         let events: AsyncThrowingStream<ReasoningEvent, Error>
         do {

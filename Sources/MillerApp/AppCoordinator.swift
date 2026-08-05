@@ -100,7 +100,8 @@ struct ConversationListItem: Identifiable, Equatable, Sendable {
 }
 
 struct HostDependencies: Sendable {
-    let submit: @Sendable (String, ConversationID) async throws -> TurnID
+    private let submitOperation:
+        @Sendable (String, ConversationID, VoiceHistoryAttachment?) async throws -> TurnID
     let stop: @Sendable () async throws -> Void
     let loadTurn: @Sendable (TurnID) async throws -> Turn?
     let loadConversations: @Sendable () async throws -> [Conversation]
@@ -108,6 +109,78 @@ struct HostDependencies: Sendable {
     let archive: @Sendable (ConversationID) async throws -> Void
     let unarchive: @Sendable (ConversationID) async throws -> Void
     let delete: @Sendable (ConversationID) async throws -> Void
+
+    init(
+        submit: @escaping @Sendable (String, ConversationID) async throws -> TurnID,
+        stop: @escaping @Sendable () async throws -> Void,
+        loadTurn: @escaping @Sendable (TurnID) async throws -> Turn?,
+        loadConversations: @escaping @Sendable () async throws -> [Conversation],
+        loadTurns: @escaping @Sendable (ConversationID) async throws -> [Turn],
+        archive: @escaping @Sendable (ConversationID) async throws -> Void,
+        unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
+        delete: @escaping @Sendable (ConversationID) async throws -> Void
+    ) {
+        submitOperation = { text, conversationID, _ in
+            try await submit(text, conversationID)
+        }
+        self.stop = stop
+        self.loadTurn = loadTurn
+        self.loadConversations = loadConversations
+        self.loadTurns = loadTurns
+        self.archive = archive
+        self.unarchive = unarchive
+        self.delete = delete
+    }
+
+    init(
+        submit: @escaping @Sendable (
+            String,
+            ConversationID,
+            VoiceHistoryAttachment?
+        ) async throws -> TurnID,
+        stop: @escaping @Sendable () async throws -> Void,
+        loadTurn: @escaping @Sendable (TurnID) async throws -> Turn?,
+        loadConversations: @escaping @Sendable () async throws -> [Conversation],
+        loadTurns: @escaping @Sendable (ConversationID) async throws -> [Turn],
+        archive: @escaping @Sendable (ConversationID) async throws -> Void,
+        unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
+        delete: @escaping @Sendable (ConversationID) async throws -> Void
+    ) {
+        submitOperation = submit
+        self.stop = stop
+        self.loadTurn = loadTurn
+        self.loadConversations = loadConversations
+        self.loadTurns = loadTurns
+        self.archive = archive
+        self.unarchive = unarchive
+        self.delete = delete
+    }
+
+    func submit(
+        _ text: String,
+        _ conversationID: ConversationID,
+        _ voiceHistoryAttachment: VoiceHistoryAttachment? = nil
+    ) async throws -> TurnID {
+        try await submitOperation(text, conversationID, voiceHistoryAttachment)
+    }
+}
+
+struct VoiceHistoryDependencies: Sendable {
+    let sessions:
+        @Sendable (Date?, Date?) async throws -> [VoiceHistorySession]
+    let exportProjection:
+        @Sendable ([UUID]) async throws -> [VoiceHistoryExportSession]
+    let deleteSession: @Sendable (UUID) async throws -> Void
+    let deleteRange: @Sendable (Date, Date) async throws -> Void
+    let deleteAll: @Sendable () async throws -> Void
+
+    static let unavailable = Self(
+        sessions: { _, _ in [] },
+        exportProjection: { _ in [] },
+        deleteSession: { _ in },
+        deleteRange: { _, _ in },
+        deleteAll: {}
+    )
 }
 
 struct ProviderSettingsInput: Equatable, Sendable {
@@ -226,11 +299,17 @@ final class AppPresentationModel: ObservableObject {
     @Published private(set) var liveVoiceMuted = false
     @Published private(set) var liveVoiceFailureCode: String?
     @Published private(set) var liveTranscriptPersistenceMessage: String?
+    @Published private(set) var voiceHistorySessions: [VoiceHistorySession] = []
+    @Published private(set) var pendingVoiceHistoryAttachment:
+        PreparedVoiceHistoryAttachment?
+    @Published private(set) var voiceHistoryStatus: String?
 
     private let dependencies: HostDependencies
     private let providerSettings: ProviderSettingsDependencies
     private let liveVoice: LiveVoiceDependencies
     private let liveTranscriptRecorder: LiveVoiceTranscriptRecorder
+    private let voiceHistory: VoiceHistoryDependencies
+    private let voiceHistoryAttachmentBuilder = VoiceHistoryAttachmentBuilder()
     private var turnObservation: Task<Void, Never>?
     private var shortcutRegistration: ((GlobalShortcut) -> Bool)?
     private var liveVoiceStartPending = false
@@ -257,12 +336,14 @@ final class AppPresentationModel: ObservableObject {
         dependencies: HostDependencies,
         providerSettings: ProviderSettingsDependencies = .unavailable,
         liveVoice: LiveVoiceDependencies = .unavailable,
-        liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init()
+        liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init(),
+        voiceHistory: VoiceHistoryDependencies = .unavailable
     ) {
         self.dependencies = dependencies
         self.providerSettings = providerSettings
         self.liveVoice = liveVoice
         self.liveTranscriptRecorder = liveTranscriptRecorder
+        self.voiceHistory = voiceHistory
         voiceState = liveVoice.initialAvailability
         liveVoiceAvailability = liveVoice.initialAvailability
     }
@@ -753,11 +834,32 @@ final class AppPresentationModel: ObservableObject {
                 typedSubmissionPending = false
             }
         }
+        let voiceHistoryAttachment: VoiceHistoryAttachment?
+        if let pendingVoiceHistoryAttachment {
+            do {
+                let refreshed = try await preparedVoiceHistoryAttachment(
+                    sessionIDs: pendingVoiceHistoryAttachment.sessionIDs
+                )
+                voiceHistoryAttachment = refreshed.attachment
+            } catch {
+                self.pendingVoiceHistoryAttachment = nil
+                voiceHistoryStatus = "Selected voice history is no longer available."
+                return
+            }
+        } else {
+            voiceHistoryAttachment = nil
+        }
+        pendingVoiceHistoryAttachment = nil
+        voiceHistoryStatus = nil
         draft = ""
         presentationState = .waiting
         errorCode = nil
         do {
-            let turnID = try await dependencies.submit(text, selectedConversationID)
+            let turnID = try await dependencies.submit(
+                text,
+                selectedConversationID,
+                voiceHistoryAttachment
+            )
             activeTurnID = turnID
             typedSubmissionPending = false
             voiceState = .unavailable
@@ -771,6 +873,144 @@ final class AppPresentationModel: ObservableObject {
                 allowTypedSubmissionPending: true
             )
         }
+    }
+
+    func refreshVoiceHistory(
+        from start: Date? = nil,
+        through end: Date? = nil
+    ) async {
+        do {
+            voiceHistorySessions = try await voiceHistory.sessions(start, end)
+            voiceHistoryStatus = nil
+        } catch {
+            voiceHistorySessions = []
+            voiceHistoryStatus = "Voice history is unavailable."
+        }
+    }
+
+    func prepareVoiceHistoryAttachment(sessionIDs: [UUID]) async {
+        do {
+            pendingVoiceHistoryAttachment = try await preparedVoiceHistoryAttachment(
+                sessionIDs: sessionIDs
+            )
+            voiceHistoryStatus = pendingVoiceHistoryAttachment?.truncated == true
+                ? "Selection was truncated to 32 KiB."
+                : nil
+        } catch {
+            pendingVoiceHistoryAttachment = nil
+            voiceHistoryStatus = "Selected voice history is no longer available."
+        }
+    }
+
+    func prepareVoiceHistoryAttachment(from start: Date, through end: Date) async {
+        do {
+            let sessions = try await voiceHistory.sessions(start, end)
+            try await prepareVoiceHistoryAttachmentThrowing(
+                sessionIDs: sessions.map(\.id)
+            )
+        } catch {
+            pendingVoiceHistoryAttachment = nil
+            voiceHistoryStatus = "Selected voice history is no longer available."
+        }
+    }
+
+    func cancelVoiceHistoryAttachment() {
+        pendingVoiceHistoryAttachment = nil
+        voiceHistoryStatus = nil
+    }
+
+    func exportVoiceHistory(sessionIDs: [UUID], to url: URL) async {
+        do {
+            let projection = try await checkedProjection(sessionIDs: sessionIDs)
+            try VoiceHistoryExportDocument.write(projection, to: url)
+            voiceHistoryStatus = "Voice history exported."
+        } catch {
+            voiceHistoryStatus = "Voice history export failed."
+        }
+    }
+
+    func exportVoiceHistory(from start: Date, through end: Date, to url: URL) async {
+        do {
+            let sessions = try await voiceHistory.sessions(start, end)
+            let projection = try await checkedProjection(
+                sessionIDs: sessions.map(\.id)
+            )
+            try VoiceHistoryExportDocument.write(projection, to: url)
+            voiceHistoryStatus = "Voice history exported."
+        } catch {
+            voiceHistoryStatus = "Voice history export failed."
+        }
+    }
+
+    func deleteVoiceHistorySession(_ id: UUID) async {
+        do {
+            try await voiceHistory.deleteSession(id)
+            clearPendingVoiceHistory(ifItContains: [id])
+            await refreshVoiceHistory()
+        } catch {
+            voiceHistoryStatus = "Voice history deletion failed."
+        }
+    }
+
+    func deleteVoiceHistory(from start: Date, through end: Date) async {
+        do {
+            let deleted = try await voiceHistory.sessions(start, end).map(\.id)
+            try await voiceHistory.deleteRange(start, end)
+            clearPendingVoiceHistory(ifItContains: deleted)
+            await refreshVoiceHistory()
+        } catch {
+            voiceHistoryStatus = "Voice history deletion failed."
+        }
+    }
+
+    func deleteAllVoiceHistory() async {
+        do {
+            try await voiceHistory.deleteAll()
+            pendingVoiceHistoryAttachment = nil
+            await refreshVoiceHistory()
+        } catch {
+            voiceHistoryStatus = "Voice history deletion failed."
+        }
+    }
+
+    private func prepareVoiceHistoryAttachmentThrowing(
+        sessionIDs: [UUID]
+    ) async throws {
+        pendingVoiceHistoryAttachment = try await preparedVoiceHistoryAttachment(
+            sessionIDs: sessionIDs
+        )
+        voiceHistoryStatus = pendingVoiceHistoryAttachment?.truncated == true
+            ? "Selection was truncated to 32 KiB."
+            : nil
+    }
+
+    private func preparedVoiceHistoryAttachment(
+        sessionIDs: [UUID]
+    ) async throws -> PreparedVoiceHistoryAttachment {
+        try voiceHistoryAttachmentBuilder.build(
+            from: try await checkedProjection(sessionIDs: sessionIDs)
+        )
+    }
+
+    private func checkedProjection(
+        sessionIDs: [UUID]
+    ) async throws -> [VoiceHistoryExportSession] {
+        let unique = Array(Set(sessionIDs))
+        guard !unique.isEmpty else {
+            throw VoiceHistoryAttachmentBuilderError.emptySelection
+        }
+        let projection = try await voiceHistory.exportProjection(unique)
+        guard Set(projection.map(\.session.id)) == Set(unique) else {
+            throw VoiceHistoryAttachmentBuilderError.selectedHistoryUnavailable
+        }
+        return projection
+    }
+
+    private func clearPendingVoiceHistory(ifItContains ids: [UUID]) {
+        guard let pendingVoiceHistoryAttachment,
+              !Set(pendingVoiceHistoryAttachment.sessionIDs).isDisjoint(with: ids)
+        else { return }
+        self.pendingVoiceHistoryAttachment = nil
     }
 
     func startLiveVoice(
@@ -1383,8 +1623,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         core = MillerCoordinator(repository: repository, gateway: gateway)
 
         let dependencies = HostDependencies(
-            submit: { [core] text, conversationID in
-                try await core.submit(text: text, conversationID: conversationID)
+            submit: { [core] text, conversationID, voiceHistoryAttachment in
+                try await core.submit(
+                    text: text,
+                    conversationID: conversationID,
+                    voiceHistoryAttachment: voiceHistoryAttachment
+                )
             },
             stop: { [core] in try await core.stop() },
             loadTurn: { [repository] id in try await repository.turn(id: id) },
@@ -1566,11 +1810,37 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 }
             )
         )
+        let voiceHistory = VoiceHistoryDependencies(
+            sessions: { [voiceHistoryRepository] start, end in
+                try await voiceHistoryRepository.sessions(
+                    from: start,
+                    through: end
+                )
+            },
+            exportProjection: { [voiceHistoryRepository] sessionIDs in
+                try await voiceHistoryRepository.exportProjection(
+                    sessionIDs: sessionIDs
+                )
+            },
+            deleteSession: { [voiceHistoryRepository] id in
+                try await voiceHistoryRepository.deleteSession(id: id)
+            },
+            deleteRange: { [voiceHistoryRepository] start, end in
+                try await voiceHistoryRepository.deleteSessions(
+                    from: start,
+                    through: end
+                )
+            },
+            deleteAll: { [voiceHistoryRepository] in
+                try await voiceHistoryRepository.deleteAll()
+            }
+        )
         model = AppPresentationModel(
             dependencies: dependencies,
             providerSettings: providerSettings,
             liveVoice: liveVoice,
-            liveTranscriptRecorder: liveTranscriptRecorder
+            liveTranscriptRecorder: liveTranscriptRecorder,
+            voiceHistory: voiceHistory
         )
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         overlayController = OverlayPanelController(

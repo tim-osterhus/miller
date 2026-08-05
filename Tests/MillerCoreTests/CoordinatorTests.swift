@@ -225,6 +225,47 @@ struct CoordinatorTests {
     }
 
     @Test
+    func explicitVoiceHistoryAttachmentIsForwardedWithoutChangingUserText() async throws {
+        let repository = FakeRepository()
+        let gateway = FakeGateway()
+        let coordinator = MillerCoordinator(repository: repository, gateway: gateway)
+        let conversationID = ConversationID()
+        let attachment = try VoiceHistoryAttachment(text: """
+            <miller_voice_history selection="explicit" truncated="false">
+            [2026-08-05T12:34:56Z] You: hello
+            </miller_voice_history>
+            """)
+
+        _ = try await coordinator.submit(
+            text: "review this",
+            conversationID: conversationID,
+            voiceHistoryAttachment: attachment
+        )
+
+        let request = try #require(await gateway.starts.first)
+        #expect(request.userText == "review this")
+        #expect(request.voiceHistoryAttachment == attachment)
+        #expect(await repository.acceptedUserTexts == ["review this"])
+        try await coordinator.stop()
+    }
+
+    @Test
+    func ordinarySubmissionDefaultsToNoVoiceHistoryAttachment() async throws {
+        let gateway = FakeGateway()
+        let coordinator = MillerCoordinator(
+            repository: FakeRepository(),
+            gateway: gateway
+        )
+
+        _ = try await coordinator.submit(
+            text: "ordinary",
+            conversationID: ConversationID()
+        )
+
+        #expect(try #require(await gateway.starts.first).voiceHistoryAttachment == nil)
+    }
+
+    @Test
     func capabilityRegistryGatesOnlyRequiredTextCapabilities() async {
         let registry = CapabilityRegistry()
         await registry.update(.init(capability: .durableStorage, status: .ready))
@@ -291,6 +332,7 @@ private actor FakeRepository: ConversationRepository {
     private(set) var acceptStarted = false
     private var storedCompletedTurns: [Turn] = []
     private(set) var accepted: [TurnID] = []
+    private(set) var acceptedUserTexts: [String] = []
     private(set) var appends: [AppendRecord] = []
     private(set) var completions: [CompletionRecord] = []
     private(set) var stops: [StopRecord] = []
@@ -326,7 +368,7 @@ private actor FakeRepository: ConversationRepository {
     func accept(
         conversationID _: ConversationID,
         turnID: TurnID,
-        userText _: String,
+        userText: String,
         inputMode _: InputMode,
         generation _: Int
     ) async throws {
@@ -340,6 +382,7 @@ private actor FakeRepository: ConversationRepository {
             throw TestFailure()
         }
         accepted.append(turnID)
+        acceptedUserTexts.append(userText)
         await trace?.append("accept")
     }
 
