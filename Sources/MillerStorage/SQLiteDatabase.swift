@@ -52,8 +52,7 @@ final class SQLiteDatabase {
                 )
             }
             try qualifyIntegrity()
-            try validateMigrationLedger(userVersion: version)
-            try applyMigrations(after: version)
+            try applyMigrationsAndValidate()
 
             _ = try scalarText("PRAGMA journal_mode = WAL")
             try execute("PRAGMA synchronous = NORMAL")
@@ -171,13 +170,19 @@ final class SQLiteDatabase {
         return Int(sqlite3_changes(handle))
     }
 
-    private func applyMigrations(after currentVersion: Int) throws {
-        let pending = SQLiteMigrations.all.filter { $0.version > currentVersion }
-        guard !pending.isEmpty else {
-            return
-        }
-
+    private func applyMigrationsAndValidate() throws {
         try transaction(mode: "EXCLUSIVE") {
+            let currentVersion = try scalarInt("PRAGMA user_version")
+            guard currentVersion <= SQLiteMigrations.latestVersion else {
+                throw SQLiteError.newerSchema(
+                    found: currentVersion,
+                    supported: SQLiteMigrations.latestVersion
+                )
+            }
+            try validateMigrationLedger(userVersion: currentVersion)
+            let pending = SQLiteMigrations.all.filter {
+                $0.version > currentVersion
+            }
             for migration in pending {
                 do {
                     try executeScript(migration.sql)
@@ -193,18 +198,33 @@ final class SQLiteDatabase {
                     throw SQLiteError.migrationFailed(version: migration.version)
                 }
             }
+            try validateMigrationLedger(
+                userVersion: SQLiteMigrations.latestVersion
+            )
         }
     }
 
     private func validateMigrationLedger(userVersion: Int) throws {
-        guard userVersion > 0 else {
-            return
-        }
         do {
-            let ledgerVersion = try scalarInt(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            let tableExists = try scalarInt(
+                """
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'table' AND name = 'schema_migrations'
+                """
+            ) == 1
+            guard tableExists || userVersion == 0 else {
+                throw SQLiteError.integrityFailed
+            }
+            guard tableExists else { return }
+            let rows = try query(
+                "SELECT version FROM schema_migrations ORDER BY version ASC"
             )
-            guard ledgerVersion == userVersion else {
+            let versions = rows.compactMap { row -> Int? in
+                guard case let .integer(value)? = row.first else { return nil }
+                return Int(value)
+            }
+            let expected = userVersion == 0 ? [] : Array(1...userVersion)
+            guard versions == expected else {
                 throw SQLiteError.integrityFailed
             }
         } catch let error as SQLiteError where error == .integrityFailed {

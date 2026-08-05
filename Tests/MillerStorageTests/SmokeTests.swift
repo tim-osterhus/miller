@@ -418,6 +418,69 @@ struct MillerStorageTests {
     }
 
     @Test
+    func testMigrationLedgerRequiresEveryContiguousVersion() throws {
+        let fixture = try TestDatabase(named: #function)
+        do {
+            let database = try SQLiteDatabase(path: fixture.path)
+            try database.execute("DELETE FROM schema_migrations WHERE version = 2")
+        }
+        XCTAssertThrowsError(try SQLiteDatabase(path: fixture.path)) {
+            XCTAssertEqual($0 as? SQLiteError, .integrityFailed)
+        }
+
+        let duplicate = try TestDatabase(named: "\(#function)-duplicate")
+        let database = try SQLiteDatabase(path: duplicate.path)
+        XCTAssertThrowsError(
+            try database.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+                bindings: [.text(now)]
+            )
+        ) { XCTAssertEqual($0 as? SQLiteError, .constraintFailed) }
+    }
+
+    @Test
+    func testConcurrentVersionTwoInitializationAppliesMigrationOnce() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let versionTwoSQL = SQLiteMigrations.all
+            .filter { $0.version <= 2 }
+            .map(\.sql)
+            .joined(separator: "\n")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            fixture.path,
+            """
+            BEGIN;
+            \(versionTwoSQL)
+            INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, '\(now)'), (2, '\(now)');
+            PRAGMA user_version = 2;
+            COMMIT;
+            """,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    let database = try SQLiteDatabase(path: fixture.path)
+                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
+                }
+            }
+            try await group.waitForAll()
+        }
+        let database = try SQLiteDatabase(path: fixture.path)
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+            ),
+            1
+        )
+    }
+
+    @Test
     func testCorruptDatabaseFailsIntegrityQualification() throws {
         let fixture = try TestDatabase(named: #function)
         do {

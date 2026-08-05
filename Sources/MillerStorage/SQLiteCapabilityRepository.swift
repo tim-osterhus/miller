@@ -102,26 +102,11 @@ public struct CapabilityToolRecord: Equatable, Sendable {
     }
 }
 
-public struct SanitizedCapabilitySummary: Codable, Equatable, Sendable {
-    public let text: String
-
-    public init(text: String) throws {
-        let lowercased = text.lowercased()
-        let forbidden = [
-            "authorization:", "bearer ", "api_key", "api-key", "token=",
-            "\"arguments\"", "\"result\"", "<document", "email body",
-        ]
-        guard !text.isEmpty,
-              text.utf8.count <= 1_024,
-              !text.unicodeScalars.contains(where: {
-                  CharacterSet.controlCharacters.contains($0)
-              }),
-              !forbidden.contains(where: lowercased.contains)
-        else {
-            throw CapabilityStorageError.unsanitizedAuditSummary
-        }
-        self.text = text
-    }
+public enum CapabilityAuditSummaryCode: String, Codable, Sendable {
+    case capabilityOperation = "capability_operation"
+    case readOnlyOperation = "read_only_operation"
+    case stateChangingOperation = "state_changing_operation"
+    case opaqueProviderActivity = "opaque_provider_activity"
 }
 
 public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
@@ -138,7 +123,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
     public let approvalRequested: Bool
     public let approvalDecision: CapabilityApprovalDecision?
     public let terminalOutcome: CapabilityTerminalOutcome?
-    public let summary: SanitizedCapabilitySummary
+    public let summaryCode: CapabilityAuditSummaryCode?
     public let visibility: CapabilityAuditVisibility
 
     public init(
@@ -155,7 +140,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
         approvalRequested: Bool,
         approvalDecision: CapabilityApprovalDecision?,
         terminalOutcome: CapabilityTerminalOutcome?,
-        summary: SanitizedCapabilitySummary,
+        summaryCode: CapabilityAuditSummaryCode?,
         visibility: CapabilityAuditVisibility
     ) {
         self.id = id
@@ -171,7 +156,7 @@ public struct CapabilityAuditRecord: Codable, Equatable, Sendable {
         self.approvalRequested = approvalRequested
         self.approvalDecision = approvalDecision
         self.terminalOutcome = terminalOutcome
-        self.summary = summary
+        self.summaryCode = summaryCode
         self.visibility = visibility
     }
 }
@@ -250,7 +235,6 @@ public enum CapabilityStorageError: Error, Equatable, Sendable {
     case toolNotFound
     case auditNotFound
     case invalidAudit
-    case unsanitizedAuditSummary
     case pluginSummaryTooLarge
     case skillMarkdownTooLarge
     case invalidRecord
@@ -259,15 +243,24 @@ public enum CapabilityStorageError: Error, Equatable, Sendable {
 public actor SQLiteCapabilityRepository {
     private let database: SQLiteDatabase
     private let simulatedWriteFailure: SQLiteError?
+    private let simulatedReconcileFailure: SQLiteError?
 
     public init(path: String = SQLiteConversationRepository.defaultPath) throws {
         database = try SQLiteDatabase(path: path)
         simulatedWriteFailure = nil
+        simulatedReconcileFailure = nil
     }
 
     init(path: String, simulatedWriteFailure: SQLiteError) throws {
         database = try SQLiteDatabase(path: path)
         self.simulatedWriteFailure = simulatedWriteFailure
+        simulatedReconcileFailure = nil
+    }
+
+    init(path: String, simulatedReconcileFailure: SQLiteError) throws {
+        database = try SQLiteDatabase(path: path)
+        simulatedWriteFailure = nil
+        self.simulatedReconcileFailure = simulatedReconcileFailure
     }
 
     public func saveServer(_ server: CapabilityServerRecord) throws {
@@ -436,7 +429,7 @@ public actor SQLiteCapabilityRepository {
                 """,
                 bindings: [.text(serverID)]
             )
-            for descriptor in descriptors {
+            for (index, descriptor) in descriptors.enumerated() {
                 try database.execute(
                     """
                     INSERT INTO capability_tools
@@ -468,6 +461,9 @@ public actor SQLiteCapabilityRepository {
                         .text(Self.timestamp(refreshedAt)),
                     ]
                 )
+                if index == 0, let simulatedReconcileFailure {
+                    throw simulatedReconcileFailure
+                }
             }
             try database.execute(
                 """
@@ -558,7 +554,9 @@ public actor SQLiteCapabilityRepository {
     }
 
     public func beginAudit(_ audit: CapabilityAuditRecord) throws {
-        guard (audit.terminalAt == nil) == (audit.terminalOutcome == nil),
+        guard audit.terminalAt == nil,
+              audit.terminalOutcome == nil,
+              audit.approvalDecision == nil,
               audit.conversationID != nil
                 || audit.turnID != nil
                 || audit.voiceSessionID != nil,
@@ -571,6 +569,30 @@ public actor SQLiteCapabilityRepository {
         try preflightWrite()
         try database.transaction {
             let conversationID = try coherentConversationID(for: audit)
+            let normalized = CapabilityAuditRecord(
+                id: audit.id,
+                conversationID: conversationID,
+                turnID: audit.turnID,
+                voiceSessionID: audit.voiceSessionID,
+                source: audit.source,
+                serverID: audit.serverID,
+                toolName: audit.toolName,
+                startedAt: Self.date(Self.timestamp(audit.startedAt))
+                    ?? audit.startedAt,
+                terminalAt: nil,
+                effectivePolicy: audit.effectivePolicy,
+                approvalRequested: audit.approvalRequested,
+                approvalDecision: nil,
+                terminalOutcome: nil,
+                summaryCode: audit.summaryCode,
+                visibility: audit.visibility
+            )
+            if let existing = try self.audit(id: audit.id) {
+                guard existing == normalized else {
+                    throw CapabilityStorageError.invalidAudit
+                }
+                return
+            }
             try database.execute(
                 """
                 INSERT INTO capability_audit
@@ -582,7 +604,7 @@ public actor SQLiteCapabilityRepository {
                 ON CONFLICT(id) DO NOTHING
                 """,
                 bindings: Self.auditBindings(
-                    audit,
+                    normalized,
                     conversationID: conversationID
                 )
             )
@@ -598,15 +620,42 @@ public actor SQLiteCapabilityRepository {
         try preflightWrite()
         try database.transaction {
             let rows = try database.query(
-                "SELECT terminal_outcome FROM capability_audit WHERE id = ?",
+                """
+                SELECT started_at, terminal_at, terminal_outcome,
+                       approval_requested, approval_decision
+                FROM capability_audit WHERE id = ?
+                """,
                 bindings: [.text(Self.id(id.rawValue))]
             )
-            guard let row = rows.first else {
+            guard let row = rows.first,
+                  let startedValue = Self.string(row[0]),
+                  let startedAt = Self.date(startedValue),
+                  let approvalRequested = Self.bool(row[3])
+            else {
                 throw CapabilityStorageError.auditNotFound
             }
-            guard row.first == .null else {
+            if let existingOutcomeValue = Self.string(row[2]),
+               let existingOutcome = CapabilityTerminalOutcome(
+                   rawValue: existingOutcomeValue
+               ),
+               let existingTerminalValue = Self.string(row[1]),
+               let existingTerminal = Self.date(existingTerminalValue) {
+                let existingDecision = Self.string(row[4]).flatMap(
+                    CapabilityApprovalDecision.init(rawValue:)
+                )
+                guard existingOutcome == outcome,
+                      existingDecision == approvalDecision,
+                      existingTerminal == terminalAt
+                else { throw CapabilityStorageError.invalidAudit }
                 return
             }
+            guard terminalAt >= startedAt,
+                  Self.validTerminal(
+                      outcome: outcome,
+                      approvalRequested: approvalRequested,
+                      decision: approvalDecision
+                  )
+            else { throw CapabilityStorageError.invalidAudit }
             try database.execute(
                 """
                 UPDATE capability_audit
@@ -837,8 +886,28 @@ public actor SQLiteCapabilityRepository {
         return audit.conversationID
     }
 
+    private static func validTerminal(
+        outcome: CapabilityTerminalOutcome,
+        approvalRequested: Bool,
+        decision: CapabilityApprovalDecision?
+    ) -> Bool {
+        guard decision == nil || approvalRequested else { return false }
+        switch outcome {
+        case .declined:
+            return approvalRequested ? decision == .decline : decision == nil
+        case .succeeded, .failed:
+            return !approvalRequested || decision == .allowOnce
+        case .cancelled, .timedOut:
+            return decision != .decline
+        }
+    }
+
     private static func validate(server: CapabilityServerRecord) throws -> String {
         guard !server.id.isEmpty, server.id.utf8.count <= 128,
+              server.id == server.id.lowercased(),
+              server.id.unicodeScalars.allSatisfy({
+                  (33...126).contains($0.value) && $0 != "/"
+              }),
               !server.displayName.isEmpty, server.displayName.utf8.count <= 256
         else {
             throw CapabilityStorageError.invalidServer
@@ -880,9 +949,9 @@ public actor SQLiteCapabilityRepository {
             guard descriptor.inputSchemaJSON.count <= 64 * 1_024 else {
                 throw CapabilityStorageError.schemaTooLarge
             }
-            guard (try? JSONSerialization.jsonObject(
+            guard let object = try? JSONSerialization.jsonObject(
                 with: descriptor.inputSchemaJSON
-            )) != nil else {
+            ), object is [String: Any] else {
                 throw CapabilityStorageError.malformedSchema
             }
         }
@@ -973,7 +1042,8 @@ public actor SQLiteCapabilityRepository {
             .integer(audit.approvalRequested ? 1 : 0),
             audit.approvalDecision.map { .text($0.rawValue) } ?? .null,
             audit.terminalOutcome.map { .text($0.rawValue) } ?? .null,
-            .text(audit.summary.text), .text(audit.visibility.rawValue),
+            audit.summaryCode.map { .text($0.rawValue) } ?? .null,
+            .text(audit.visibility.rawValue),
         ]
     }
 
@@ -988,8 +1058,6 @@ public actor SQLiteCapabilityRepository {
               let policyValue = string(row[9]),
               let policy = CapabilityPolicy(rawValue: policyValue),
               let approvalRequested = bool(row[10]),
-              let summaryValue = string(row[13]),
-              let summary = try? SanitizedCapabilitySummary(text: summaryValue),
               let visibilityValue = string(row[14]),
               let visibility = CapabilityAuditVisibility(rawValue: visibilityValue)
         else { throw CapabilityStorageError.invalidRecord }
@@ -1004,7 +1072,10 @@ public actor SQLiteCapabilityRepository {
             terminalAt: string(row[8]).flatMap(date),
             effectivePolicy: policy, approvalRequested: approvalRequested,
             approvalDecision: decision, terminalOutcome: outcome,
-            summary: summary, visibility: visibility
+            summaryCode: string(row[13]).flatMap(
+                CapabilityAuditSummaryCode.init(rawValue:)
+            ),
+            visibility: visibility
         )
     }
 

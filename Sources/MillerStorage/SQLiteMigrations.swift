@@ -94,7 +94,8 @@ enum SQLiteMigrations {
                 CHECK (
                     (ended_at IS NULL AND terminal_outcome IS NULL)
                     OR (ended_at IS NOT NULL AND terminal_outcome IS NOT NULL)
-                )
+                ),
+                CHECK (ended_at IS NULL OR ended_at >= started_at)
             );
 
             CREATE TABLE voice_entries (
@@ -115,7 +116,8 @@ enum SQLiteMigrations {
                 CHECK (
                     (completion_state = 'incomplete' AND completed_at IS NULL)
                     OR (completion_state = 'complete' AND completed_at IS NOT NULL)
-                )
+                ),
+                CHECK (completed_at IS NULL OR completed_at >= started_at)
             );
 
             CREATE TABLE capability_servers (
@@ -254,8 +256,11 @@ enum SQLiteMigrations {
                         'succeeded', 'failed', 'declined', 'cancelled', 'timed_out'
                     )
                 ),
-                sanitized_summary TEXT NOT NULL CHECK (
-                    length(CAST(sanitized_summary AS BLOB)) <= 1024
+                sanitized_summary TEXT CHECK (
+                    sanitized_summary IS NULL OR sanitized_summary IN (
+                        'capability_operation', 'read_only_operation',
+                        'state_changing_operation', 'opaque_provider_activity'
+                    )
                 ),
                 visibility TEXT NOT NULL CHECK (
                     visibility IN ('complete', 'opaque_provider_activity')
@@ -269,7 +274,28 @@ enum SQLiteMigrations {
                     OR turn_id IS NOT NULL
                     OR voice_session_id IS NOT NULL
                 ),
-                CHECK (turn_id IS NULL OR voice_session_id IS NULL)
+                CHECK (turn_id IS NULL OR voice_session_id IS NULL),
+                CHECK (terminal_at IS NULL OR terminal_at >= started_at),
+                CHECK (approval_decision IS NULL OR approval_requested = 1),
+                CHECK (terminal_at IS NOT NULL OR approval_decision IS NULL),
+                CHECK (
+                    approval_decision != 'decline'
+                    OR terminal_outcome = 'declined'
+                ),
+                CHECK (
+                    approval_decision != 'allow_once'
+                    OR terminal_outcome != 'declined'
+                ),
+                CHECK (
+                    terminal_outcome NOT IN ('succeeded', 'failed')
+                    OR approval_requested = 0
+                    OR approval_decision = 'allow_once'
+                ),
+                CHECK (
+                    terminal_outcome != 'declined'
+                    OR (approval_requested = 0 AND approval_decision IS NULL)
+                    OR (approval_requested = 1 AND approval_decision = 'decline')
+                )
             );
 
             CREATE TABLE plugin_packages (

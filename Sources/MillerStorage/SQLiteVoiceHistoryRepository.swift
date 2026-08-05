@@ -100,6 +100,7 @@ public struct VoiceHistoryExportSession: Codable, Equatable, Sendable {
 public enum VoiceHistoryRepositoryError: Error, Equatable, Sendable {
     case entryTooLarge
     case invalidEntry
+    case conflictingEntryReplay
     case sessionNotFound
     case entryNotFound
     case invalidRange
@@ -163,10 +164,32 @@ public actor SQLiteVoiceHistoryRepository {
             text: text,
             sequence: sequence,
             completionState: completionState,
+            startedAt: startedAt,
             completedAt: completedAt
         )
         try preflightWrite()
         try database.transaction {
+            let existing = try database.query(
+                """
+                SELECT id, session_id, sequence, role, text, completion_state
+                FROM voice_entries
+                WHERE id = ? OR (session_id = ? AND sequence = ?)
+                LIMIT 1
+                """,
+                bindings: [
+                    .text(Self.id(id)), .text(Self.id(sessionID)),
+                    .integer(Int64(sequence)),
+                ]
+            )
+            if let row = existing.first {
+                guard Self.string(row[1]) == Self.id(sessionID),
+                      row[2] == .integer(Int64(sequence)),
+                      Self.string(row[3]) == role.rawValue,
+                      Self.string(row[4]) == text,
+                      Self.string(row[5]) == completionState.rawValue
+                else { throw VoiceHistoryRepositoryError.conflictingEntryReplay }
+                return
+            }
             try database.execute(
                 """
                 INSERT INTO voice_entries
@@ -199,11 +222,18 @@ public actor SQLiteVoiceHistoryRepository {
         try preflightWrite()
         try database.transaction {
             let rows = try database.query(
-                "SELECT completion_state FROM voice_entries WHERE id = ?",
+                "SELECT completion_state, started_at FROM voice_entries WHERE id = ?",
                 bindings: [.text(Self.id(id))]
             )
-            guard case let .text(state)? = rows.first?.first else {
+            guard let row = rows.first,
+                  case let .text(state) = row[0],
+                  let startedValue = Self.string(row[1]),
+                  let startedAt = Self.date(startedValue)
+            else {
                 throw VoiceHistoryRepositoryError.entryNotFound
+            }
+            guard completedAt >= startedAt else {
+                throw VoiceHistoryRepositoryError.invalidEntry
             }
             guard state == VoiceEntryCompletionState.incomplete.rawValue else {
                 return
@@ -231,12 +261,16 @@ public actor SQLiteVoiceHistoryRepository {
         try preflightWrite()
         try database.transaction {
             let rows = try database.query(
-                "SELECT terminal_outcome FROM voice_sessions WHERE id = ?",
+                "SELECT terminal_outcome, started_at FROM voice_sessions WHERE id = ?",
                 bindings: [.text(Self.id(id))]
             )
             guard let row = rows.first else {
                 throw VoiceHistoryRepositoryError.sessionNotFound
             }
+            guard let startedValue = Self.string(row[1]),
+                  let startedAt = Self.date(startedValue),
+                  endedAt >= startedAt
+            else { throw VoiceHistoryRepositoryError.invalidEntry }
             guard row.first == .null else {
                 return
             }
@@ -374,10 +408,14 @@ public actor SQLiteVoiceHistoryRepository {
         text: String,
         sequence: Int,
         completionState: VoiceEntryCompletionState,
+        startedAt: Date,
         completedAt: Date?
     ) throws {
         guard text.utf8.count <= maximumEntryBytes else {
             throw VoiceHistoryRepositoryError.entryTooLarge
+        }
+        if let completedAt, completedAt < startedAt {
+            throw VoiceHistoryRepositoryError.invalidEntry
         }
         guard sequence >= 0,
               (completionState == .complete) == (completedAt != nil)

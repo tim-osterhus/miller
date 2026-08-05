@@ -94,6 +94,48 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func serverIDsAndInputSchemasAreCanonicalBeforeWrite() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        for invalidID in ["UPPER", "has space", "has/slash", "café"] {
+            let server = CapabilityServerRecord(
+                id: invalidID, displayName: "Invalid", transport: .stdio,
+                command: "/usr/bin/env", endpoint: nil, arguments: [],
+                enabled: true, defaultPolicy: .askBeforeChanges,
+                staleState: .current, createdAt: Date(), updatedAt: Date()
+            )
+            await #expect(throws: CapabilityStorageError.invalidServer) {
+                try await repository.saveServer(server)
+            }
+        }
+        #expect(try await repository.servers().isEmpty)
+
+        try await repository.saveServer(makeServer())
+        let arraySchema = try CapabilityDescriptor(
+            id: CapabilityID(
+                source: .millerMCP,
+                serverID: "local-tools",
+                toolName: "array"
+            ),
+            source: .millerMCP, serverID: "local-tools", toolName: "array",
+            displayName: "Array", summary: "Array",
+            inputSchemaJSON: Data("[]".utf8), readOnlyHint: true,
+            providerProfileIDs: [], isAvailable: true
+        )
+        await #expect(throws: CapabilityStorageError.malformedSchema) {
+            try await repository.reconcileCatalog(
+                serverID: "local-tools",
+                descriptors: [arraySchema]
+            )
+        }
+        let canonical = try descriptor(tool: "canonical", summary: "Canonical")
+        try await repository.reconcileCatalog(
+            serverID: "local-tools", descriptors: [canonical]
+        )
+        #expect(try await repository.catalog(serverID: "local-tools").count == 1)
+    }
+
+    @Test
     func catalogReconciliationRetainsStaleToolsAndPreservesOverrides() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)
@@ -157,14 +199,23 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
-    func auditAcceptsSanitizedSummaryAndTerminalizesIdempotently() async throws {
+    func auditUsesClosedSummaryCodesAndTerminalizesIdempotently() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)
         let conversationID = ConversationID()
         let database = try SQLiteDatabase(path: fixture.path)
         try insertConversation(conversationID, database: database)
-        #expect(throws: CapabilityStorageError.unsanitizedAuditSummary) {
-            _ = try SanitizedCapabilitySummary(text: "Authorization: Bearer secret")
+        for adversary in [
+            "password=hunter2", "access_token=secret", "Cookie: session=x",
+            "{\"result\":\"raw\"}", "private email body",
+        ] {
+            let data = Data("\"\(adversary)\"".utf8)
+            #expect(throws: (any Error).self) {
+                _ = try JSONDecoder().decode(
+                    CapabilityAuditSummaryCode.self,
+                    from: data
+                )
+            }
         }
         let callID = CapabilityCallID()
         let started = Date(timeIntervalSince1970: 100)
@@ -182,10 +233,26 @@ struct SQLiteCapabilityRepositoryTests {
             approvalRequested: true,
             approvalDecision: nil,
             terminalOutcome: nil,
-            summary: try SanitizedCapabilitySummary(text: "Search local index"),
+            summaryCode: .capabilityOperation,
             visibility: .complete
         )
         try await repository.beginAudit(audit)
+        try await repository.beginAudit(audit)
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.beginAudit(
+                CapabilityAuditRecord(
+                    id: callID, conversationID: conversationID,
+                    turnID: nil, voiceSessionID: nil, source: .millerMCP,
+                    serverID: "local-tools", toolName: "different",
+                    startedAt: started, terminalAt: nil,
+                    effectivePolicy: .askBeforeChanges,
+                    approvalRequested: true, approvalDecision: nil,
+                    terminalOutcome: nil,
+                    summaryCode: .capabilityOperation,
+                    visibility: .complete
+                )
+            )
+        }
         try await repository.terminalizeAudit(
             id: callID,
             outcome: .succeeded,
@@ -194,14 +261,44 @@ struct SQLiteCapabilityRepositoryTests {
         )
         try await repository.terminalizeAudit(
             id: callID,
-            outcome: .failed,
-            approvalDecision: .decline,
-            terminalAt: started.addingTimeInterval(9)
+            outcome: .succeeded,
+            approvalDecision: .allowOnce,
+            terminalAt: started.addingTimeInterval(2)
         )
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.terminalizeAudit(
+                id: callID, outcome: .failed,
+                approvalDecision: .allowOnce,
+                terminalAt: started.addingTimeInterval(3)
+            )
+        }
         let stored = try #require(try await repository.audit(id: callID))
         #expect(stored.terminalOutcome == .succeeded)
         #expect(stored.approvalDecision == .allowOnce)
         #expect(stored.terminalAt == started.addingTimeInterval(2))
+
+        let invalidTerminalID = CapabilityCallID()
+        try await repository.beginAudit(
+            CapabilityAuditRecord(
+                id: invalidTerminalID, conversationID: conversationID,
+                turnID: nil, voiceSessionID: nil, source: .millerMCP,
+                serverID: "local-tools", toolName: "search",
+                startedAt: started, terminalAt: nil,
+                effectivePolicy: .askBeforeChanges,
+                approvalRequested: true, approvalDecision: nil,
+                terminalOutcome: nil,
+                summaryCode: .capabilityOperation,
+                visibility: .complete
+            )
+        )
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.terminalizeAudit(
+                id: invalidTerminalID, outcome: .succeeded,
+                approvalDecision: nil,
+                terminalAt: started.addingTimeInterval(-1)
+            )
+        }
+        #expect(try await repository.audit(id: invalidTerminalID)?.terminalAt == nil)
     }
 
     @Test
@@ -225,7 +322,7 @@ struct SQLiteCapabilityRepositoryTests {
                 effectivePolicy: .fullyTrusted,
                 approvalRequested: false, approvalDecision: nil,
                 terminalOutcome: nil,
-                summary: try SanitizedCapabilitySummary(text: "Search"),
+                summaryCode: .capabilityOperation,
                 visibility: .opaqueProviderActivity
             )
         )
@@ -503,6 +600,28 @@ struct SQLiteCapabilityRepositoryTests {
             )
         }
         #expect(try await repository.catalog(serverID: "local-tools").isEmpty)
+
+        let original = try descriptor(tool: "original", summary: "Original")
+        try await repository.reconcileCatalog(
+            serverID: "local-tools", descriptors: [original]
+        )
+
+        let midTransaction = try SQLiteCapabilityRepository(
+            path: fixture.path,
+            simulatedReconcileFailure: .writeFailed
+        )
+        await #expect(throws: SQLiteError.writeFailed) {
+            try await midTransaction.reconcileCatalog(
+                serverID: "local-tools",
+                descriptors: [
+                    try descriptor(tool: "first", summary: "First"),
+                    try descriptor(tool: "second", summary: "Second"),
+                ]
+            )
+        }
+        let retained = try await repository.catalog(serverID: "local-tools")
+        #expect(retained.map(\.descriptor.id) == [original.id])
+        #expect(retained.first?.staleState == .current)
     }
 }
 
@@ -554,7 +673,7 @@ private func makeAudit(
         approvalRequested: false,
         approvalDecision: nil,
         terminalOutcome: nil,
-        summary: try SanitizedCapabilitySummary(text: "Search local index"),
+        summaryCode: .capabilityOperation,
         visibility: .complete
     )
 }
@@ -614,7 +733,8 @@ private func insertRawAudit(
              effective_policy, approval_requested, approval_decision,
              terminal_outcome, sanitized_summary, visibility)
         VALUES (?, ?, ?, ?, 'miller_mcp', 'local-tools', 'search', ?,
-                NULL, 'ask_before_changes', 0, NULL, NULL, 'Search', 'complete')
+                NULL, 'ask_before_changes', 0, NULL, NULL,
+                'capability_operation', 'complete')
         """,
         bindings: [
             .text(id.uuidString.lowercased()),

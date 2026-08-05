@@ -141,7 +141,8 @@ struct SQLiteVoiceHistoryRepositoryTests {
                      effective_policy, approval_requested, approval_decision,
                      terminal_outcome, sanitized_summary, visibility)
                 VALUES (?, NULL, NULL, ?, 'miller_mcp', 'server', 'tool', ?,
-                        NULL, 'ask_before_changes', 0, NULL, NULL, 'safe', 'complete')
+                        NULL, 'ask_before_changes', 0, NULL, NULL,
+                        'capability_operation', 'complete')
                 """,
                 bindings: [
                     .text(auditID.uuidString.lowercased()),
@@ -194,5 +195,48 @@ struct SQLiteVoiceHistoryRepositoryTests {
             try await readOnly.deleteAll()
         }
         #expect(try await repository.session(id: sessionID) != nil)
+    }
+
+    @Test
+    func completeEntryReplayIsIdempotentAndConflictsAreRejected() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteVoiceHistoryRepository(path: fixture.path)
+        let sessionID = UUID()
+        let entryID = UUID()
+        let started = Date(timeIntervalSince1970: 100)
+        let completed = started.addingTimeInterval(2)
+        try await repository.startSession(
+            id: sessionID, conversationID: nil,
+            activationSource: .manual, saveChoice: .save,
+            startedAt: started
+        )
+        for replayID in [entryID, UUID()] {
+            try await repository.appendEntry(
+                id: replayID, sessionID: sessionID, sequence: 1,
+                role: .assistant, text: "done", completionState: .complete,
+                startedAt: started, completedAt: completed
+            )
+        }
+        #expect(try await repository.entries(sessionID: sessionID).count == 1)
+        await #expect(throws: VoiceHistoryRepositoryError.conflictingEntryReplay) {
+            try await repository.appendEntry(
+                id: entryID, sessionID: sessionID, sequence: 2,
+                role: .user, text: "conflict", completionState: .complete,
+                startedAt: started, completedAt: completed
+            )
+        }
+        await #expect(throws: VoiceHistoryRepositoryError.invalidEntry) {
+            try await repository.appendEntry(
+                id: UUID(), sessionID: sessionID, sequence: 2,
+                role: .user, text: "bad time", completionState: .complete,
+                startedAt: started, completedAt: started.addingTimeInterval(-1)
+            )
+        }
+        await #expect(throws: VoiceHistoryRepositoryError.invalidEntry) {
+            try await repository.finalizeSession(
+                id: sessionID, outcome: .completed,
+                endedAt: started.addingTimeInterval(-1)
+            )
+        }
     }
 }
