@@ -51,6 +51,29 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func manifestMatcherIgnoresCommentedApprovedDeclarations() {
+        let blockCommentDecoy = """
+            /*
+            .package(
+                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+                exact: "0.12.1"
+            )
+            */
+            .package(
+                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+                from: "0.12.1"
+            )
+            """
+        let lineCommentDecoy = """
+            // .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1")
+            .package(url: "https://example.invalid/not-mcp.git", exact: "0.12.1")
+            """
+
+        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: blockCommentDecoy))
+        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: lineCommentDecoy))
+    }
+
+    @Test
     func lockMatcherRejectsAnUnapprovedRevision() {
         let approved = PackageLock(pins: [
             PackagePin(
@@ -134,6 +157,56 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func scriptFailureSuffixDoesNotMaskCargoInvocation() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            "#!/bin/sh\ncargo build || exit 1\n"
+                + "rustc main.rs || forbidden_result=1\n",
+            to: fixture.appendingPathComponent("scripts/build.sh")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("Forbidden cargo invocation") })
+        #expect(violations.contains { $0.contains("Forbidden rustc invocation") })
+    }
+
+    @Test
+    func nestedCargoDirectoryIsRejected() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            "[build]",
+            to: fixture.appendingPathComponent("Sources/vendor/.cargo/config.toml")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("Sources/vendor/.cargo") })
+    }
+
+    @Test
+    func voiceInkContentUseIsRejected() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            "forbidden_result = VoiceInk.Recorder()\n",
+            to: fixture.appendingPathComponent("Sources/Recorder.swift")
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("VoiceInk") })
+    }
+
+    @Test
     func productionInventoryAllowsNarrowVerificationAssertions() throws {
         let fixture = try makePolicyFixture()
         defer { try? FileManager.default.removeItem(at: fixture) }
@@ -143,6 +216,7 @@ struct ReleasePackagingPolicyTests {
             forbidden_api="dynamicTools" # reject experimental API
             refused_endpoint="item/tool/call"
             find Sources -type f \\( -name cargo -o -name rustc -o -iname '*codex-rs*' \\)
+            find Sources -type f -iname '*VoiceInk*'
             """,
             to: fixture.appendingPathComponent("scripts/verify.sh")
         )
@@ -221,6 +295,7 @@ private enum ReleasePackagingPolicy {
         "rust-toolchain.toml",
     ]
     private static let forbiddenPathFragments = ["voiceink", "codex-rs", "rust-toolchain"]
+    private static let forbiddenPathComponents = [".cargo"]
     private static let forbiddenFileNames = [".cargo", "cargo", "cargo.lock", "cargo.toml", "rustc"]
     private static let forbiddenPackagePatterns = [
         "voiceink",
@@ -229,26 +304,10 @@ private enum ReleasePackagingPolicy {
         "(^|[^a-z0-9])rust([^a-z0-9]|$)",
     ]
     private static let experimentalAPITerms = ["dynamicTools", "item/tool/call"]
-    private static let explicitAssertionMarkers = [
-        "#expect(",
-        "assert(",
-        "denied_",
-        "exit 1",
-        "forbidden_",
-        "! grep ",
-        "! rg ",
-        "if grep ",
-        "if rg ",
-        "precondition(",
-        "refused_",
-        "rejected_",
-        "return false",
-        "test !",
-        "throw ",
-    ]
     private static let rustCommands = ["cargo", "rustc"]
 
     static func hasApprovedSDKDeclaration(in manifest: String) -> Bool {
+        let activeManifest = removingSwiftComments(from: manifest)
         let escapedURL = NSRegularExpression.escapedPattern(for: officialSDKURL)
         let escapedVersion = NSRegularExpression.escapedPattern(for: approvedSDKVersion)
         let pattern = #"\.package\s*\(\s*url\s*:\s*""#
@@ -260,8 +319,8 @@ private enum ReleasePackagingPolicy {
             return false
         }
         return expression.numberOfMatches(
-            in: manifest,
-            range: NSRange(manifest.startIndex..., in: manifest)
+            in: activeManifest,
+            range: NSRange(activeManifest.startIndex..., in: activeManifest)
         ) == 1
     }
 
@@ -314,16 +373,16 @@ private enum ReleasePackagingPolicy {
                 let values = try entry.resourceValues(
                     forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
                 )
+                violations.append(contentsOf: pathViolations(
+                    for: entry,
+                    relativePath: relativePath
+                ))
                 if values.isSymbolicLink == true {
                     violations.append("Symlinked production entry: \(relativePath)")
                     continue
                 }
                 guard values.isRegularFile == true else { continue }
 
-                violations.append(contentsOf: pathViolations(
-                    for: entry,
-                    relativePath: relativePath
-                ))
                 guard let contents = try? String(contentsOf: entry, encoding: .utf8) else {
                     continue
                 }
@@ -389,7 +448,8 @@ private enum ReleasePackagingPolicy {
         var violations: [String] = []
         if components.contains(where: { component in
             forbiddenPathFragments.contains { component.contains($0) }
-        }) || forbiddenFileNames.contains(fileName) {
+        }) || components.contains(where: { forbiddenPathComponents.contains($0) })
+            || forbiddenFileNames.contains(fileName) {
             violations.append("Forbidden production path: \(relativePath)")
         }
         if url.pathExtension.lowercased() == "rs" {
@@ -409,15 +469,19 @@ private enum ReleasePackagingPolicy {
         ).enumerated() {
             let text = String(line)
             let lowercased = text.lowercased()
-            let isAssertion = explicitAssertionMarkers.contains {
-                lowercased.contains($0)
+            if lowercased.contains("voiceink"),
+                !isExplicitAssertion(of: "voiceink", in: lowercased) {
+                violations.append(
+                    "Forbidden VoiceInk reference in \(relativePath):\(offset + 1)"
+                )
             }
-            for term in experimentalAPITerms where text.contains(term) && !isAssertion {
+            for term in experimentalAPITerms where text.contains(term)
+                && !isExplicitAssertion(of: term.lowercased(), in: lowercased) {
                 violations.append(
                     "Experimental API \(term) in \(relativePath):\(offset + 1)"
                 )
             }
-            guard relativePath.hasPrefix("scripts/"), !isAssertion else { continue }
+            guard relativePath.hasPrefix("scripts/") else { continue }
             for command in rustCommands where invokes(command, in: lowercased) {
                 violations.append(
                     "Forbidden \(command) invocation in \(relativePath):\(offset + 1)"
@@ -425,6 +489,82 @@ private enum ReleasePackagingPolicy {
             }
         }
         return violations
+    }
+
+    private static func isExplicitAssertion(of forbiddenTerm: String, in line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let escapedTerm = NSRegularExpression.escapedPattern(for: forbiddenTerm)
+        let patterns = [
+            #"^(?:forbidden|refused|rejected|denied)_[a-z0-9_]*\s*=\s*["']"#
+                + escapedTerm + #"["']\s*(?:#.*)?$"#,
+            #"^find\s+.*(?:-name|-iname)\s+["'][^"']*"#
+                + escapedTerm + #"[^"']*["']\s*$"#,
+            #"^(?://|#)\s*(?:deny|forbid|must not|refus|reject).*"#
+                + escapedTerm,
+        ]
+        return patterns.contains {
+            trimmed.range(of: $0, options: .regularExpression) != nil
+        }
+    }
+
+    private static func removingSwiftComments(from source: String) -> String {
+        var result = ""
+        var index = source.startIndex
+        var inString = false
+        var isEscaped = false
+        var inLineComment = false
+        var blockCommentDepth = 0
+
+        while index < source.endIndex {
+            let character = source[index]
+            if inLineComment {
+                result.append(character.isNewline ? character : " ")
+                if character.isNewline { inLineComment = false }
+                index = source.index(after: index)
+                continue
+            }
+            if blockCommentDepth > 0 {
+                if source[index...].hasPrefix("/*") {
+                    blockCommentDepth += 1
+                    result.append("  ")
+                    index = source.index(index, offsetBy: 2)
+                } else if source[index...].hasPrefix("*/") {
+                    blockCommentDepth -= 1
+                    result.append("  ")
+                    index = source.index(index, offsetBy: 2)
+                } else {
+                    result.append(character.isNewline ? character : " ")
+                    index = source.index(after: index)
+                }
+                continue
+            }
+            if inString {
+                result.append(character)
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+                index = source.index(after: index)
+                continue
+            }
+            if source[index...].hasPrefix("//") {
+                inLineComment = true
+                result.append("  ")
+                index = source.index(index, offsetBy: 2)
+            } else if source[index...].hasPrefix("/*") {
+                blockCommentDepth = 1
+                result.append("  ")
+                index = source.index(index, offsetBy: 2)
+            } else {
+                result.append(character)
+                if character == "\"" { inString = true }
+                index = source.index(after: index)
+            }
+        }
+        return result
     }
 
     private static func invokes(_ command: String, in line: String) -> Bool {
