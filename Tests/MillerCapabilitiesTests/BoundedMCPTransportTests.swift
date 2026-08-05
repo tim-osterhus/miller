@@ -8,10 +8,12 @@ struct BoundedMCPTransportTests {
     func oversizedUnterminatedStdioFrameFailsQuickly() async throws {
         let input = Pipe()
         let output = Pipe()
+        let failure = TransportFailureProbe()
         let transport = BoundedStdioTransport(
             inputDescriptor: input.fileHandleForReading.fileDescriptor,
             outputDescriptor: output.fileHandleForWriting.fileDescriptor,
-            maximumInboundBytes: 64
+            maximumInboundBytes: 64,
+            failureHandler: { failure.record() }
         )
         try await transport.connect()
         let stream = await transport.receive()
@@ -28,6 +30,7 @@ struct BoundedMCPTransportTests {
             _ = try await receive.value
         }
         #expect(started.duration(to: .now) < .milliseconds(500))
+        #expect(failure.didFail)
 
         await transport.disconnect()
         try input.fileHandleForWriting.close()
@@ -93,6 +96,29 @@ struct BoundedMCPTransportTests {
         #expect(MCPHTTPClientFixtureURLProtocol.authorizationHeader
             == "Bearer fixture-token")
         await session.disconnect()
+    }
+
+    @Test
+    func inboundMessageQueueIsBounded() async throws {
+        HTTPFixtureURLProtocol.setPlan(HTTPFixturePlan(
+            headers: ["Content-Type": "application/json"],
+            chunks: [Data("{}".utf8)]
+        ))
+        let transport = BoundedHTTPTransport(
+            endpoint: URL(string: "https://example.com/mcp")!,
+            headers: [:], maximumInboundBytes: 64,
+            configuration: MCPHTTPTransportPolicy.ephemeralConfiguration(
+                protocolClasses: [HTTPFixtureURLProtocol.self]
+            )
+        )
+        try await transport.connect()
+        for _ in 0..<4 {
+            try await transport.send(Data(#"{"jsonrpc":"2.0"}"#.utf8))
+        }
+        await #expect(throws: MCPClientSessionError.inboundTooLarge) {
+            try await transport.send(Data(#"{"jsonrpc":"2.0"}"#.utf8))
+        }
+        await transport.disconnect()
     }
 
     @Test
@@ -172,6 +198,21 @@ struct BoundedMCPTransportTests {
 private struct HTTPFixturePlan: Sendable {
     let headers: [String: String]
     let chunks: [Data]
+}
+
+private final class TransportFailureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+    var didFail: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failed
+    }
+    func record() {
+        lock.lock()
+        failed = true
+        lock.unlock()
+    }
 }
 
 private final class HTTPFixtureURLProtocol: URLProtocol, @unchecked Sendable {

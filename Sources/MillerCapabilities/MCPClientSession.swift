@@ -119,7 +119,8 @@ public actor MCPClientSession: MCPClientSessionProtocol {
             transport = BoundedStdioTransport(
                 inputDescriptor: stdio.stdoutReadDescriptor,
                 outputDescriptor: stdio.stdinWriteDescriptor,
-                maximumInboundBytes: configuration.bounds.maximumInboundBytes
+                maximumInboundBytes: configuration.bounds.maximumInboundBytes,
+                failureHandler: { stdio.terminate() }
             )
         case .http(let endpoint):
             let headers = try await resolvedHeaders(

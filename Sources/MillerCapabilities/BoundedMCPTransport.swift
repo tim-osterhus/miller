@@ -9,6 +9,7 @@ actor BoundedStdioTransport: Transport {
     private let inputDescriptor: Int32
     private let outputDescriptor: Int32
     private let maximumInboundBytes: Int
+    private let failureHandler: @Sendable () -> Void
     private let messageStream: AsyncThrowingStream<Data, Error>
     private let continuation: AsyncThrowingStream<Data, Error>.Continuation
     private var connected = false
@@ -17,13 +18,17 @@ actor BoundedStdioTransport: Transport {
     init(
         inputDescriptor: Int32,
         outputDescriptor: Int32,
-        maximumInboundBytes: Int
+        maximumInboundBytes: Int,
+        failureHandler: @escaping @Sendable () -> Void = {}
     ) {
         self.inputDescriptor = inputDescriptor
         self.outputDescriptor = outputDescriptor
         self.maximumInboundBytes = maximumInboundBytes
+        self.failureHandler = failureHandler
         var continuation: AsyncThrowingStream<Data, Error>.Continuation!
-        self.messageStream = AsyncThrowingStream { continuation = $0 }
+        self.messageStream = AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(4)
+        ) { continuation = $0 }
         self.continuation = continuation
     }
 
@@ -86,13 +91,21 @@ actor BoundedStdioTransport: Transport {
                             throw MCPClientSessionError.inboundTooLarge
                         }
                         pending.removeSubrange(...newline)
-                        if !frame.isEmpty { continuation.yield(Data(frame)) }
+                        if !frame.isEmpty {
+                            switch continuation.yield(Data(frame)) {
+                            case .enqueued: break
+                            case .dropped: throw MCPClientSessionError.inboundTooLarge
+                            case .terminated: return
+                            @unknown default: throw MCPClientSessionError.inboundTooLarge
+                            }
+                        }
                     }
                     guard pending.count <= maximumInboundBytes else {
                         throw MCPClientSessionError.inboundTooLarge
                     }
                 } catch {
                     connected = false
+                    failureHandler()
                     continuation.finish(throwing: error)
                     return
                 }
@@ -104,6 +117,7 @@ actor BoundedStdioTransport: Transport {
                 try? await Task.sleep(for: .milliseconds(2))
             } else if errno != EINTR {
                 connected = false
+                failureHandler()
                 continuation.finish(throwing: MCPClientSessionError.notConnected)
                 return
             }
@@ -179,7 +193,9 @@ actor BoundedHTTPTransport: Transport {
             configuration: configuration, delegate: delegate, delegateQueue: nil
         )
         var continuation: AsyncThrowingStream<Data, Error>.Continuation!
-        self.messageStream = AsyncThrowingStream { continuation = $0 }
+        self.messageStream = AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(4)
+        ) { continuation = $0 }
         self.continuation = continuation
     }
 
@@ -226,10 +242,10 @@ actor BoundedHTTPTransport: Transport {
             var parser = BoundedSSEParser(limit: maximumInboundBytes)
             for try await byte in bytes {
                 for message in try parser.consume(byte) {
-                    continuation.yield(message)
+                    try yield(message)
                 }
             }
-            if let message = try parser.finish() { continuation.yield(message) }
+            if let message = try parser.finish() { try yield(message) }
         } else {
             var body = Data()
             body.reserveCapacity(min(maximumInboundBytes, 64 * 1_024))
@@ -239,11 +255,20 @@ actor BoundedHTTPTransport: Transport {
                 }
                 body.append(byte)
             }
-            if !body.isEmpty { continuation.yield(body) }
+            if !body.isEmpty { try yield(body) }
         }
     }
 
     func receive() -> AsyncThrowingStream<Data, Error> { messageStream }
+
+    private func yield(_ data: Data) throws {
+        switch continuation.yield(data) {
+        case .enqueued: return
+        case .dropped: throw MCPClientSessionError.inboundTooLarge
+        case .terminated: throw MCPClientSessionError.notConnected
+        @unknown default: throw MCPClientSessionError.inboundTooLarge
+        }
+    }
 }
 
 private struct BoundedSSEParser {
