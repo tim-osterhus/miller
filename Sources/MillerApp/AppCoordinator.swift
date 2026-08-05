@@ -854,6 +854,10 @@ final class AppPresentationModel: ObservableObject {
                 else { return }
                 voiceHistoryAttachment = refreshed.attachment
             } catch {
+                guard generation == voiceHistoryGeneration,
+                      self.pendingVoiceHistoryAttachment?.sessionIDs
+                        == pendingVoiceHistoryAttachment.sessionIDs
+                else { return }
                 self.pendingVoiceHistoryAttachment = nil
                 voiceHistoryStatus = "Selected voice history is no longer available."
                 return

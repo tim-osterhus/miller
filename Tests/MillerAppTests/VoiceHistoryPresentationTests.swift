@@ -267,6 +267,55 @@ struct VoiceHistoryPresentationTests {
         #expect(model.pendingVoiceHistoryAttachment == nil)
     }
 
+    @Test(arguments: VoiceHistoryStaleFailureInterference.allCases)
+    func staleSubmitRevalidationFailureCannotOverwriteCurrentState(
+        interference: VoiceHistoryStaleFailureInterference
+    ) async {
+        let first = UUID()
+        let replacement = UUID()
+        let gate = VoiceHistoryProjectionGate()
+        let submits = VoiceHistorySubmitProbe()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: submits),
+            voiceHistory: gate.dependencies()
+        )
+        let preparation = Task { await model.prepareVoiceHistoryAttachment(sessionIDs: [first]) }
+        await gate.waitUntilRequestCount(1)
+        await gate.resumeNext(with: attachmentProjection(id: first, text: "first"))
+        await preparation.value
+        model.draft = "review"
+        let submission = Task { await model.submit() }
+        await gate.waitUntilRequestCount(2)
+
+        var replacementPreparation: Task<Void, Never>?
+        switch interference {
+        case .replacement:
+            replacementPreparation = Task {
+                await model.prepareVoiceHistoryAttachment(sessionIDs: [replacement])
+            }
+            await gate.waitUntilRequestCount(3)
+            await gate.resume(at: 1, with: attachmentProjection(id: replacement, text: "current"))
+            await replacementPreparation?.value
+        case .cancellation:
+            model.cancelVoiceHistoryAttachment()
+        case .deletion:
+            await model.deleteVoiceHistorySession(first)
+        }
+
+        await gate.failNext()
+        await submission.value
+
+        #expect(await submits.calls.isEmpty)
+        #expect(model.draft == "review")
+        if interference == .replacement {
+            #expect(model.pendingVoiceHistoryAttachment?.sessionIDs == [replacement])
+            #expect(model.voiceHistoryStatus == nil)
+        } else {
+            #expect(model.pendingVoiceHistoryAttachment == nil)
+            #expect(model.voiceHistoryStatus == nil)
+        }
+    }
+
     private func hostDependencies(
         submits: VoiceHistorySubmitProbe
     ) -> HostDependencies {
@@ -331,23 +380,33 @@ struct VoiceHistoryPresentationTests {
     }
 }
 
+enum VoiceHistoryStaleFailureInterference: CaseIterable, Sendable {
+    case replacement
+    case cancellation
+    case deletion
+}
+
+private enum VoiceHistoryProjectionTestError: Error {
+    case projectedFailure
+}
+
 private actor VoiceHistoryProjectionGate {
-    private var continuations: [CheckedContinuation<VoiceHistoryAttachmentProjection, Never>] = []
+    private var continuations: [CheckedContinuation<VoiceHistoryAttachmentProjection, any Error>] = []
     private var requestCount = 0
 
     nonisolated func dependencies() -> VoiceHistoryDependencies {
         VoiceHistoryDependencies(
             sessions: { _, _ in [] },
             exportProjection: { _ in [] },
-            attachmentProjection: { [self] _, _ in await suspend() },
-            rangeAttachmentProjection: { [self] _, _, _ in await suspend() },
+            attachmentProjection: { [self] _, _ in try await suspend() },
+            rangeAttachmentProjection: { [self] _, _, _ in try await suspend() },
             deleteSession: { _ in }, deleteRange: { _, _ in }, deleteAll: {}
         )
     }
 
-    private func suspend() async -> VoiceHistoryAttachmentProjection {
+    private func suspend() async throws -> VoiceHistoryAttachmentProjection {
         requestCount += 1
-        return await withCheckedContinuation { continuations.append($0) }
+        return try await withCheckedThrowingContinuation { continuations.append($0) }
     }
 
     func waitUntilRequested() async { await waitUntilRequestCount(1) }
@@ -362,6 +421,14 @@ private actor VoiceHistoryProjectionGate {
 
     func resumeNext(with projection: VoiceHistoryAttachmentProjection) {
         continuations.removeFirst().resume(returning: projection)
+    }
+
+    func resume(at index: Int, with projection: VoiceHistoryAttachmentProjection) {
+        continuations.remove(at: index).resume(returning: projection)
+    }
+
+    func failNext() {
+        continuations.removeFirst().resume(throwing: VoiceHistoryProjectionTestError.projectedFailure)
     }
 }
 
