@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "MillerGateway", targets: ["MillerGateway"]),
         .library(name: "MillerLive", targets: ["MillerLive"]),
         .library(name: "MillerLiveAudio", targets: ["MillerLiveAudio"]),
+        .library(name: "MillerCapabilities", targets: ["MillerCapabilities"]),
         .executable(name: "MillerApp", targets: ["MillerApp"]),
     ],
     dependencies: [
@@ -30,6 +31,13 @@ let package = Package(
             dependencies: ["MillerCore"]
         ),
         .target(name: "MillerLive"),
+        .target(
+            name: "MillerCapabilities",
+            dependencies: [
+                "MillerCore",
+                .product(name: "MCP", package: "swift-sdk"),
+            ]
+        ),
         .target(
             name: "MillerLiveAudio",
             dependencies: ["MillerLive"],
@@ -64,6 +72,11 @@ let package = Package(
         .testTarget(
             name: "MillerLiveAudioTests",
             dependencies: ["MillerLiveAudio", "MillerLive"]
+        ),
+        .testTarget(
+            name: "MillerCapabilitiesTests",
+            dependencies: ["MillerCapabilities", "MillerCore"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "MillerAppTests",
