@@ -12,6 +12,12 @@ let package = Package(
         .library(name: "MillerLiveAudio", targets: ["MillerLiveAudio"]),
         .executable(name: "MillerApp", targets: ["MillerApp"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+            exact: "0.12.1"
+        ),
+    ],
     targets: [
         .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
         .target(name: "MillerCore"),

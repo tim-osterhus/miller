@@ -1,5 +1,31 @@
 # Third-party notices
 
+## Model Context Protocol Swift SDK 0.12.1
+
+Miller locks the official Model Context Protocol Swift SDK from
+`https://github.com/modelcontextprotocol/swift-sdk.git` at release `0.12.1`,
+revision `a0ae212ebf6eab5f754c3129608bc5557637e605`.
+
+The upstream project is transitioning from MIT to Apache-2.0. Contributions
+are licensed under the applicable Apache-2.0 or MIT terms identified by the
+upstream `LICENSE` file. In Task 1 the package is locked but is not linked into
+a Miller target or bundled in a Miller distribution.
+
+## Planned optional wakeword inputs
+
+Miller plans to fetch and verify, during a future optional wakeword build,
+Sherpa-ONNX 1.13.2 and the Apache-2.0 GigaSpeech keyword model from the official
+Sherpa-ONNX releases, plus ONNX Runtime 1.24.4 static libraries licensed under
+MIT. Exact source URLs and approved hashes are recorded in `PROVENANCE.md`.
+
+These archives, binaries, and model files are not currently downloaded,
+committed, linked, bundled, or shipped by Miller. Required upstream license
+files and notices must accompany any future distribution that includes them.
+
+The planned owner-authored Cortana donor commit is not third-party material;
+its later file-level authorship review is recorded separately in
+`PROVENANCE.md`. No donor source is included in Task 1.
+
 ## Pi AI 0.82.0
 
 Portions of `@miller/pi-mvp-overlay@0.82.0-a2` derive from

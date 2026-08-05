@@ -56,6 +56,73 @@ their implementation must not be copied into Miller. Any independently
 authored Cortana material proposed for reuse requires a file-level authorship
 and provenance review before incorporation.
 
+## Miller v0.1.1 capability and wakeword inputs
+
+### Model Context Protocol Swift SDK
+
+- Upstream: `https://github.com/modelcontextprotocol/swift-sdk.git`
+- Release: `0.12.1`
+- Resolved revision: `a0ae212ebf6eab5f754c3129608bc5557637e605`
+- License: upstream mixed Apache-2.0/MIT transition terms recorded in the
+  revision's `LICENSE` file.
+- Current scope: package dependency lock only. Task 1 does not add the SDK to a
+  Miller target, copy SDK source, or bundle SDK artifacts.
+
+`Package.swift` pins the release exactly and `Package.resolved` records the
+official repository, revision, and complete SwiftPM resolution. The planned
+Swift MCP broker will consume the SDK in a later task.
+
+### Planned Cortana wakeword donor
+
+- Canonical donor repository: `/Users/alex/Desktop/bonzo-dashboard/cortana` on
+  `kindly-macmini`
+- Approved donor commit: `8f4af867c575c089f45a8df4768663a521f88203`
+- Ownership: owner-authored Cortana material, subject to a later file-level
+  authorship and provenance audit.
+- Current scope: provenance checkpoint only. No donor file was inspected,
+  copied, adapted, or committed in Task 1.
+
+The later donor audit must read only committed files from the approved commit.
+It must not use an installed application or a dirty working tree.
+
+### Planned fetched-and-verified wakeword build inputs
+
+These are future build inputs for the optional wakeword subsystem. They are
+not currently downloaded, committed, linked, bundled, or shipped by Miller.
+The later bootstrap task will fetch the exact official archives into a bounded
+build directory, verify them before extraction, retain only the required
+arm64 inputs, and verify the retained bytes again.
+
+- Sherpa-ONNX 1.13.2 static macOS XCFramework archive:
+  `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-macos-xcframework-static.tar.bz2`
+  - Archive SHA-256:
+    `8756afb64ef7a1d612040c323e6f2cf707f90e703395413c79c572e37eddd65e`
+  - Planned retained library SHA-256:
+    `cd6f73e84bb78d5041a085fb388f43d6c66107e6f12e97a39cda6c7ce534b8a6`
+  - License: Apache-2.0.
+- ONNX Runtime 1.24.4 arm64 static library archive:
+  `https://github.com/csukuangfj/onnxruntime-libs/releases/download/v1.24.4/onnxruntime-osx-arm64-static_lib-1.24.4.zip`
+  - Archive SHA-256:
+    `4752fa848d9d36143e3942537ff71736d2e581ce192a528482f7edd8d02c9ebf`
+  - Planned retained library SHA-256:
+    `9f3e92dd112cd39aa495aec55352f9daaac756c3879bc1b4b3586105c1e85e34`
+  - License: MIT.
+- Sherpa-ONNX GigaSpeech 3.3M keyword model, dated 2024-01-01:
+  `https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2`
+  - Archive SHA-256:
+    `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`
+  - Planned encoder SHA-256:
+    `1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678`
+  - Planned decoder SHA-256:
+    `f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3`
+  - Planned joiner SHA-256:
+    `eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c`
+  - Planned BPE SHA-256:
+    `c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24`
+  - Planned tokens SHA-256:
+    `fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53`
+  - License: Apache-2.0.
+
 ## Codex App Server protocol reference
 
 The `MillerLive` spike was independently authored from public Apache-2.0
