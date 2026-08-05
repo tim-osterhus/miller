@@ -11,6 +11,9 @@ test -d "$bundle_root"
 test ! -L "$bundle_root"
 test -f "$plist"
 test -x "$bundle_root/Contents/MacOS/Miller"
+bridge="$bundle_root/Contents/Helpers/MillerCapabilityBridge"
+test -x "$bridge"
+test ! -L "$bridge"
 test -x "$gateway/runtime/node"
 test -f "$gateway/app/server.mjs"
 test -f "$gateway/app/node_modules/@miller/pi-mvp-overlay/package.json"
@@ -45,6 +48,11 @@ test -z "$(strings "$bundle_root/Contents/MacOS/Miller" \
 
 test "$("$gateway/runtime/node" --version)" = "v22.22.0"
 codesign --verify --deep --strict "$bundle_root"
+codesign --verify --strict "$bridge"
+test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)" = \
+  "$(codesign -dvvv "$bridge" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)"
 "$gateway/runtime/node" --input-type=module - "$legal/Miller.spdx.json" <<'EOF'
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -62,6 +70,12 @@ assert.deepEqual(
   ].sort(),
 );
 assert.equal(sbom.packages.some((entry) => /codex|avatar|cortana/i.test(entry.name)), false);
+assert.equal(
+  sbom.packages.some((entry) =>
+    entry.name === "Miller" && entry.SPDXID === "SPDXRef-Package-Miller"
+  ),
+  true,
+);
 EOF
 
 printf 'MILLER_RELEASE_PACKAGE_VERIFIED=%s\n' "$bundle_root"

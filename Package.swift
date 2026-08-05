@@ -12,6 +12,10 @@ let package = Package(
         .library(name: "MillerLiveAudio", targets: ["MillerLiveAudio"]),
         .library(name: "MillerCapabilities", targets: ["MillerCapabilities"]),
         .executable(name: "MillerApp", targets: ["MillerApp"]),
+        .executable(
+            name: "MillerCapabilityBridge",
+            targets: ["MillerCapabilityBridge"]
+        ),
     ],
     dependencies: [
         .package(
@@ -42,6 +46,14 @@ let package = Package(
             name: "MillerLiveAudio",
             dependencies: ["MillerLive"],
             linkerSettings: [.linkedFramework("AVFoundation")]
+        ),
+        .executableTarget(
+            name: "MillerCapabilityBridge",
+            dependencies: [
+                "MillerCore",
+                "MillerCapabilities",
+                .product(name: "MCP", package: "swift-sdk"),
+            ]
         ),
         .executableTarget(
             name: "MillerApp",
@@ -75,7 +87,12 @@ let package = Package(
         ),
         .testTarget(
             name: "MillerCapabilitiesTests",
-            dependencies: ["MillerCapabilities", "MillerCore"],
+            dependencies: [
+                "MillerCapabilities",
+                "MillerCapabilityBridge",
+                "MillerCore",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(

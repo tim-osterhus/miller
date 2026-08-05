@@ -22,6 +22,7 @@ fi
 swift_cache="$repo_root/.cache/swift-module-cache"
 clang_cache="$repo_root/.cache/clang-module-cache"
 binary_path=""
+bridge_binary_path=""
 gateway_source="$repo_root/Gateway/src"
 gateway_root="$repo_root/Gateway"
 node_path="/opt/homebrew/opt/node@22/bin/node"
@@ -90,6 +91,9 @@ test -d "$bin_path"
 test ! -L "$bin_path"
 binary_path="$bin_path/MillerApp"
 test -x "$binary_path"
+bridge_binary_path="$bin_path/MillerCapabilityBridge"
+test -x "$bridge_binary_path"
+test ! -L "$bridge_binary_path"
 
 resource_bundle_matches=("$bin_path"/Miller_MillerApp.bundle(N))
 if (( ${#resource_bundle_matches} != 1 )); then
@@ -112,6 +116,7 @@ cleanup_staging
 
 mkdir -p \
   "$staging_root/Miller.app/Contents/MacOS" \
+  "$staging_root/Miller.app/Contents/Helpers" \
   "$gateway_app/node_modules/@miller" \
   "$gateway_runtime"
 
@@ -123,6 +128,8 @@ if [[ "$package_mode" == "development" ]]; then
     "$staging_root/Miller.app/Contents/Info.plist"
 fi
 cp "$binary_path" "$staging_root/Miller.app/Contents/MacOS/Miller"
+cp "$bridge_binary_path" \
+  "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 cp -R "$resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
 if [[ "$package_mode" == "release" ]]; then
   legal_root="$staging_root/Miller.app/Contents/Resources/Legal"
@@ -238,6 +245,7 @@ cp "$node_stage/node-v22.22.0-darwin-arm64/LICENSE" \
 
 chmod 0755 \
   "$staging_root/Miller.app/Contents/MacOS/Miller" \
+  "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge" \
   "$gateway_runtime/node"
 if [[ "$package_mode" == "development" ]]; then
   chmod 0755 "$gateway_bundle/fake-helper.mjs"
@@ -245,6 +253,8 @@ fi
 
 plutil -lint "$staging_root/Miller.app/Contents/Info.plist" >/dev/null
 test -x "$staging_root/Miller.app/Contents/MacOS/Miller"
+test -x "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
+test ! -L "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 test -f "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png"
 test -z "$(
   find -P "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle" \
@@ -307,6 +317,12 @@ mkdir -p "${bundle_root:h}"
 mv "$staging_root/Miller.app" "$bundle_root"
 codesign --force --deep --sign - "$bundle_root"
 codesign --verify --deep --strict "$bundle_root"
+codesign --verify --strict \
+  "$bundle_root/Contents/Helpers/MillerCapabilityBridge"
+test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)" = \
+  "$(codesign -dvvv "$bundle_root/Contents/Helpers/MillerCapabilityBridge" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)"
 if [[ "$package_mode" == "development" ]]; then
   test "$("$bundle_root/Contents/MacOS/Miller" --gpt-live-harness-smoke-test)" = "GPT_LIVE_HARNESS_SMOKE_TEXT_ONLY"
 fi
