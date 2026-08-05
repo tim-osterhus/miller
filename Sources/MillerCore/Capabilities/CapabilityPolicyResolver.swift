@@ -8,9 +8,12 @@ public struct CapabilityPolicyResolution: Equatable, Sendable {
     public let effectivePolicy: EffectiveCapabilityPolicy
     public let decision: CapabilityPolicyDecision
 
-    fileprivate init(effectivePolicy: EffectiveCapabilityPolicy) {
+    fileprivate init(
+        effectivePolicy: EffectiveCapabilityPolicy,
+        reason: CapabilityPolicyReason
+    ) {
         self.effectivePolicy = effectivePolicy
-        if effectivePolicy.reason == .policyDisabled {
+        if reason == .policyDisabled {
             decision = .decline
         } else if effectivePolicy.requiresApproval {
             decision = .requestApproval
@@ -75,11 +78,13 @@ public struct CapabilityPolicyResolver: Sendable {
         value: CapabilityPolicy,
         reason: CapabilityPolicyReason
     ) -> CapabilityPolicyResolution {
-        CapabilityPolicyResolution(
-            effectivePolicy: EffectiveCapabilityPolicy(
-                value: value,
-                reason: reason
-            )
+        let effectivePolicy = EffectiveCapabilityPolicy(
+            value: value,
+            reason: reason
+        )
+        return CapabilityPolicyResolution(
+            effectivePolicy: effectivePolicy,
+            reason: reason
         )
     }
 }

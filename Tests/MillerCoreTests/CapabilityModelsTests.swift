@@ -248,6 +248,35 @@ struct CapabilityModelsTests {
     }
 
     @Test
+    func effectivePolicyExposesABoundedStringReason() {
+        let reason: String = approvalPolicy().reason
+        #expect(reason == "owner_approval_required")
+    }
+
+    @Test(arguments: [
+        "custom_policy_reason",
+        String(repeating: "x", count: 65),
+    ])
+    func effectivePolicyDecodingRejectsUnrecognizedOrOversizedReasons(
+        reason: String
+    ) throws {
+        let object: [String: Any] = [
+            "value": "ask_before_changes",
+            "requiresApproval": true,
+            "reason": reason,
+        ]
+
+        #expect(
+            throws: CapabilityContractError.invalidEffectiveCapabilityPolicy
+        ) {
+            try JSONDecoder().decode(
+                EffectiveCapabilityPolicy.self,
+                from: JSONSerialization.data(withJSONObject: object)
+            )
+        }
+    }
+
+    @Test
     func lifecycleConstructorEnforcesStateOutcomeAndApprovalInvariants() throws {
         let callID = CapabilityCallID()
         let capabilityID = try CapabilityID(rawValue: "miller_mcp/calendar/create")

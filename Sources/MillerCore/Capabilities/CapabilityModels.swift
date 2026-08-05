@@ -200,7 +200,7 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
     }
 }
 
-public enum CapabilityPolicyReason: String, Codable, Equatable, Sendable {
+enum CapabilityPolicyReason: String, Sendable {
     case declaredReadOnly = "declared_read_only"
     case policyDisabled = "policy_disabled"
     case ownerApprovalRequired = "owner_approval_required"
@@ -228,7 +228,7 @@ public enum CapabilityPolicyReason: String, Codable, Equatable, Sendable {
 public struct EffectiveCapabilityPolicy: Codable, Equatable, Sendable {
     public let value: CapabilityPolicy
     public let requiresApproval: Bool
-    public let reason: CapabilityPolicyReason
+    public let reason: String
 
     init(
         value: CapabilityPolicy,
@@ -237,7 +237,7 @@ public struct EffectiveCapabilityPolicy: Codable, Equatable, Sendable {
         precondition(reason.supports(value))
         self.value = value
         self.requiresApproval = reason.requiresApproval
-        self.reason = reason
+        self.reason = reason.rawValue
     }
 
     public init(from decoder: any Decoder) throws {
@@ -247,12 +247,11 @@ public struct EffectiveCapabilityPolicy: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .requiresApproval
         )
-        let reason = try container.decode(
-            CapabilityPolicyReason.self,
-            forKey: .reason
-        )
-        guard reason.supports(value),
-              requiresApproval == reason.requiresApproval
+        let reason = try container.decode(String.self, forKey: .reason)
+        guard reason.utf8.count <= 64,
+              let reasonCode = CapabilityPolicyReason(rawValue: reason),
+              reasonCode.supports(value),
+              requiresApproval == reasonCode.requiresApproval
         else {
             throw CapabilityContractError.invalidEffectiveCapabilityPolicy
         }

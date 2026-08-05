@@ -42,7 +42,7 @@ struct CapabilityPolicyResolverTests {
 
         #expect(resolution.decision == .decline)
         #expect(!resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .policyDisabled)
+        #expect(resolution.effectivePolicy.reason == "policy_disabled")
     }
 
     @Test(arguments: [false, nil] as [Bool?])
@@ -56,7 +56,7 @@ struct CapabilityPolicyResolverTests {
 
         #expect(resolution.decision == .requestApproval)
         #expect(resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .ownerApprovalRequired)
+        #expect(resolution.effectivePolicy.reason == "owner_approval_required")
     }
 
     @Test(arguments: [false, nil] as [Bool?])
@@ -70,7 +70,7 @@ struct CapabilityPolicyResolverTests {
 
         #expect(resolution.decision == .executeAutomatically)
         #expect(!resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .fullyTrusted)
+        #expect(resolution.effectivePolicy.reason == "fully_trusted")
     }
 
     @Test(arguments: CapabilityPolicy.allCases)
@@ -84,7 +84,7 @@ struct CapabilityPolicyResolverTests {
 
         #expect(resolution.decision == .executeAutomatically)
         #expect(!resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .declaredReadOnly)
+        #expect(resolution.effectivePolicy.reason == "declared_read_only")
     }
 
     @Test(arguments: CapabilityPolicy.allCases)
@@ -101,7 +101,7 @@ struct CapabilityPolicyResolverTests {
         #expect(resolution.effectivePolicy.value == policy)
         #expect(resolution.decision == .requestApproval)
         #expect(resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .providerApprovalRequired)
+        #expect(resolution.effectivePolicy.reason == "provider_approval_required")
     }
 
     @Test(arguments: [false, nil] as [Bool?])
@@ -116,6 +116,6 @@ struct CapabilityPolicyResolverTests {
 
         #expect(resolution.decision == .decline)
         #expect(!resolution.effectivePolicy.requiresApproval)
-        #expect(resolution.effectivePolicy.reason == .policyDisabled)
+        #expect(resolution.effectivePolicy.reason == "policy_disabled")
     }
 }
