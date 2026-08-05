@@ -214,4 +214,42 @@ public struct MCPServerConfiguration: Hashable, Codable, Sendable {
     }
 }
 
-extension MCPBounds: Codable {}
+extension MCPBounds: Codable {
+    private enum CodingKeys: CodingKey {
+        case startupTimeout, callTimeout, maximumTools, maximumSchemaBytes
+        case maximumArgumentBytes, maximumResultBytes, maximumStderrBytes
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            startupTimeout: try container.decode(Duration.self, forKey: .startupTimeout),
+            callTimeout: try container.decode(Duration.self, forKey: .callTimeout),
+            maximumTools: try container.decode(Int.self, forKey: .maximumTools),
+            maximumSchemaBytes: try container.decode(
+                Int.self, forKey: .maximumSchemaBytes
+            ),
+            maximumArgumentBytes: try container.decode(
+                Int.self, forKey: .maximumArgumentBytes
+            ),
+            maximumResultBytes: try container.decode(
+                Int.self, forKey: .maximumResultBytes
+            ),
+            maximumStderrBytes: try container.decode(
+                Int.self, forKey: .maximumStderrBytes
+            )
+        )
+        try validate()
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startupTimeout, forKey: .startupTimeout)
+        try container.encode(callTimeout, forKey: .callTimeout)
+        try container.encode(maximumTools, forKey: .maximumTools)
+        try container.encode(maximumSchemaBytes, forKey: .maximumSchemaBytes)
+        try container.encode(maximumArgumentBytes, forKey: .maximumArgumentBytes)
+        try container.encode(maximumResultBytes, forKey: .maximumResultBytes)
+        try container.encode(maximumStderrBytes, forKey: .maximumStderrBytes)
+    }
+}

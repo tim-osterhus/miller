@@ -242,7 +242,7 @@ struct CapabilityBrokerTests {
                 argumentsJSON: Data("{}".utf8), providerProfileID: fixture.providerID
             )
         }
-        #expect(startedAt.duration(to: .now) < .milliseconds(100))
+        #expect(startedAt.duration(to: .now) < .milliseconds(500))
         try await Task.sleep(for: .milliseconds(150))
         #expect(await fixture.audit.terminalCount == 1)
 

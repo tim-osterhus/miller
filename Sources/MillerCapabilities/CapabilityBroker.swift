@@ -3,6 +3,8 @@ import MillerCore
 
 public enum CapabilityBrokerError: Error, Equatable, Sendable {
     case capabilityUnavailable
+    case duplicateCallID
+    case callIDCapacityExceeded
     case invalidArguments
     case argumentsTooLarge
     case declined
@@ -35,7 +37,23 @@ public typealias CapabilityAuditHandler = @Sendable (
     CapabilityLifecycleEvent
 ) async -> Void
 
+private struct SessionLease: Sendable {
+    let token: UUID
+    let session: any MCPClientSessionProtocol
+}
+
+private struct PendingConnection: Sendable {
+    let token: UUID
+    let lifecycleGeneration: UInt64
+    let task: Task<any MCPClientSessionProtocol, Error>
+}
+
 public actor CapabilityBroker {
+    /// A broker remembers at most this many active or completed call identities.
+    /// Once exhausted, it fails closed instead of evicting IDs and permitting replay.
+    public nonisolated static let maximumRememberedCallIDs = 4_096
+    public nonisolated static let maximumCatalogRows = 2_048
+
     private let configurations: [String: MCPServerConfiguration]
     private var toolPolicies: [CapabilityID: CapabilityPolicy]
     private let sessionFactory: MCPClientSessionFactory
@@ -45,9 +63,15 @@ public actor CapabilityBroker {
     private let globalGate = AsyncCapacityGate(limit: 4)
     private let serverGates: [String: AsyncCapacityGate]
 
-    private var sessions: [String: any MCPClientSessionProtocol] = [:]
+    private var sessions: [String: SessionLease] = [:]
+    private var pendingConnections: [String: PendingConnection] = [:]
+    private var lifecycleGeneration: UInt64 = 0
+    private var refreshGeneration: UInt64 = 0
     private var successfulCatalogs: [String: [CapabilityDescriptor]] = [:]
     private var visibleCatalog: [CapabilityID: CapabilityDescriptor] = [:]
+    private var visibleStaleServerIDs = Set<String>()
+    private var activeCallIDs = Set<CapabilityCallID>()
+    private var completedCallIDs = Set<CapabilityCallID>()
 
     public init(
         configurations: [MCPServerConfiguration],
@@ -87,6 +111,10 @@ public actor CapabilityBroker {
     }
 
     public func refresh() async -> CapabilityBrokerCatalog {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let baselineCatalogs = successfulCatalogs
+        var stagedCatalogs = baselineCatalogs
         var descriptors: [CapabilityDescriptor] = []
         var staleServerIDs = Set<String>()
 
@@ -95,12 +123,12 @@ public actor CapabilityBroker {
                   !configuration.providerProfileIDs.isEmpty
             else { continue }
             do {
-                let session = try await session(for: configuration)
+                let lease = try await session(for: configuration)
                 let tools = try await boundedAsync(
                     timeout: configuration.bounds.startupTimeout,
                     timeoutError: MCPClientSessionError.startupTimedOut
                 ) {
-                    try await session.listTools()
+                    try await lease.session.listTools()
                 }
                 guard tools.count <= configuration.bounds.maximumTools else {
                     throw MCPClientSessionError.tooManyTools
@@ -134,34 +162,39 @@ public actor CapabilityBroker {
                     ))
                 }
                 serverDescriptors.sort { $0.id.rawValue < $1.id.rawValue }
-                successfulCatalogs[configuration.id] = serverDescriptors
+                stagedCatalogs[configuration.id] = serverDescriptors
                 descriptors.append(contentsOf: serverDescriptors)
             } catch {
                 staleServerIDs.insert(configuration.id)
-                if let last = successfulCatalogs[configuration.id] {
-                    descriptors.append(contentsOf: last.compactMap {
-                        try? CapabilityDescriptor(
-                            id: $0.id,
-                            source: $0.source,
-                            serverID: $0.serverID,
-                            toolName: $0.toolName,
-                            displayName: $0.displayName,
-                            summary: $0.summary,
-                            inputSchemaJSON: $0.inputSchemaJSON,
-                            readOnlyHint: $0.readOnlyHint,
-                            providerProfileIDs: $0.providerProfileIDs,
-                            isAvailable: false
-                        )
-                    })
+                if let last = baselineCatalogs[configuration.id] {
+                    descriptors.append(contentsOf: last.compactMap(Self.unavailable))
                 }
-                await discardSession(serverID: configuration.id)
             }
         }
 
         descriptors.sort { $0.id.rawValue < $1.id.rawValue }
+        guard generation == refreshGeneration else {
+            return currentCatalog()
+        }
+        guard descriptors.count <= Self.maximumCatalogRows else {
+            let enabledServerIDs = Set(configurations.values.compactMap {
+                $0.enabled && !$0.providerProfileIDs.isEmpty ? $0.id : nil
+            })
+            let unavailable = visibleCatalog.values.compactMap(Self.unavailable)
+                .sorted { $0.id.rawValue < $1.id.rawValue }
+            visibleCatalog = Dictionary(
+                uniqueKeysWithValues: unavailable.map { ($0.id, $0) }
+            )
+            visibleStaleServerIDs = enabledServerIDs
+            return CapabilityBrokerCatalog(
+                descriptors: unavailable, staleServerIDs: enabledServerIDs
+            )
+        }
+        successfulCatalogs = stagedCatalogs
         visibleCatalog = Dictionary(
             uniqueKeysWithValues: descriptors.map { ($0.id, $0) }
         )
+        visibleStaleServerIDs = staleServerIDs
         return CapabilityBrokerCatalog(
             descriptors: descriptors,
             staleServerIDs: staleServerIDs
@@ -180,6 +213,8 @@ public actor CapabilityBroker {
         argumentsJSON: Data,
         providerProfileID: UUID
     ) async throws -> SanitizedCapabilityResult {
+        try reserve(callID: callID)
+        defer { complete(callID: callID) }
         guard let descriptor = visibleCatalog[capabilityID],
               descriptor.isAvailable(to: providerProfileID),
               let configuration = configurations[descriptor.serverID],
@@ -238,6 +273,7 @@ public actor CapabilityBroker {
         guard let serverGate = serverGates[configuration.id] else {
             throw CapabilityBrokerError.capabilityUnavailable
         }
+        var callLease: SessionLease?
         do {
             try await serverGate.acquire()
         } catch {
@@ -264,12 +300,13 @@ public actor CapabilityBroker {
                 code: "tool_call_running", state: .running,
                 outcome: nil, policy: resolution.effectivePolicy
             )
-            let session = try await session(for: configuration)
+            let lease = try await session(for: configuration)
+            callLease = lease
             let raw = try await boundedAsync(
                 timeout: configuration.bounds.callTimeout,
                 timeoutError: CapabilityBrokerError.timedOut
             ) {
-                try await session.callTool(
+                try await lease.session.callTool(
                     name: descriptor.toolName,
                     argumentsJSON: argumentsJSON
                 )
@@ -289,7 +326,9 @@ public actor CapabilityBroker {
         } catch is CancellationError {
             await globalGate.release()
             await serverGate.release()
-            await discardSession(serverID: configuration.id)
+            if let lease = callLease {
+                await discardSession(lease)
+            }
             await emitCancellation(
                 callID: callID, capabilityID: capabilityID,
                 policy: resolution.effectivePolicy
@@ -298,7 +337,9 @@ public actor CapabilityBroker {
         } catch CapabilityBrokerError.timedOut {
             await globalGate.release()
             await serverGate.release()
-            await discardSession(serverID: configuration.id)
+            if let lease = callLease {
+                await discardSession(lease)
+            }
             await emit(
                 callID: callID, capabilityID: capabilityID,
                 code: "tool_call_timed_out", state: .terminal,
@@ -308,7 +349,9 @@ public actor CapabilityBroker {
         } catch {
             await globalGate.release()
             await serverGate.release()
-            await discardSession(serverID: configuration.id)
+            if let lease = callLease {
+                await discardSession(lease)
+            }
             await emit(
                 callID: callID, capabilityID: capabilityID,
                 code: "tool_call_failed", state: .terminal,
@@ -319,28 +362,95 @@ public actor CapabilityBroker {
     }
 
     public func disconnectAll() async {
-        let sessions = self.sessions.values
+        lifecycleGeneration &+= 1
+        refreshGeneration &+= 1
+        let pending = pendingConnections.values.map(\.task)
+        pendingConnections.removeAll()
+        let sessions = self.sessions.values.map(\.session)
         self.sessions.removeAll()
-        for session in sessions { await session.disconnect() }
+        successfulCatalogs.removeAll()
+        visibleCatalog.removeAll()
+        visibleStaleServerIDs.removeAll()
+        for task in pending { task.cancel() }
+        await disconnectConcurrently(sessions, maximumParallel: 4)
     }
 
     private func session(
         for configuration: MCPServerConfiguration
-    ) async throws -> any MCPClientSessionProtocol {
+    ) async throws -> SessionLease {
         if let existing = sessions[configuration.id] { return existing }
-        let created = try await sessionFactory(configuration)
+        let pending: PendingConnection
+        if let existing = pendingConnections[configuration.id] {
+            pending = existing
+        } else {
+            let token = UUID()
+            let factory = sessionFactory
+            let task = Task { try await factory(configuration) }
+            pending = PendingConnection(
+                token: token,
+                lifecycleGeneration: lifecycleGeneration,
+                task: task
+            )
+            pendingConnections[configuration.id] = pending
+        }
+
+        let created: any MCPClientSessionProtocol
+        do {
+            created = try await pending.task.value
+        } catch {
+            if pendingConnections[configuration.id]?.token == pending.token {
+                pendingConnections.removeValue(forKey: configuration.id)
+            }
+            throw error
+        }
+
+        if let installed = sessions[configuration.id], installed.token == pending.token {
+            return installed
+        }
+        guard pendingConnections[configuration.id]?.token == pending.token,
+              pending.lifecycleGeneration == lifecycleGeneration
+        else {
+            await created.disconnect()
+            throw CancellationError()
+        }
+        pendingConnections.removeValue(forKey: configuration.id)
         guard created.serverID == configuration.id else {
             await created.disconnect()
             throw CapabilityBrokerError.callFailed
         }
-        sessions[configuration.id] = created
-        return created
+        let lease = SessionLease(token: pending.token, session: created)
+        sessions[configuration.id] = lease
+        return lease
     }
 
-    private func discardSession(serverID: String) async {
-        if let session = sessions.removeValue(forKey: serverID) {
-            await session.disconnect()
+    private func discardSession(_ lease: SessionLease) async {
+        guard sessions[lease.session.serverID]?.token == lease.token else { return }
+        sessions.removeValue(forKey: lease.session.serverID)
+        await lease.session.disconnect()
+    }
+
+    private func reserve(callID: CapabilityCallID) throws {
+        guard !activeCallIDs.contains(callID), !completedCallIDs.contains(callID) else {
+            throw CapabilityBrokerError.duplicateCallID
         }
+        guard activeCallIDs.count + completedCallIDs.count
+                < Self.maximumRememberedCallIDs
+        else { throw CapabilityBrokerError.callIDCapacityExceeded }
+        activeCallIDs.insert(callID)
+    }
+
+    private func complete(callID: CapabilityCallID) {
+        guard activeCallIDs.remove(callID) != nil else { return }
+        completedCallIDs.insert(callID)
+    }
+
+    private func currentCatalog() -> CapabilityBrokerCatalog {
+        CapabilityBrokerCatalog(
+            descriptors: visibleCatalog.values.sorted {
+                $0.id.rawValue < $1.id.rawValue
+            },
+            staleServerIDs: visibleStaleServerIDs
+        )
     }
 
     private func emitCancellation(
@@ -389,6 +499,41 @@ public actor CapabilityBroker {
             result = candidate
         }
         return result
+    }
+
+    private static func unavailable(
+        _ descriptor: CapabilityDescriptor
+    ) -> CapabilityDescriptor? {
+        try? CapabilityDescriptor(
+            id: descriptor.id,
+            source: descriptor.source,
+            serverID: descriptor.serverID,
+            toolName: descriptor.toolName,
+            displayName: descriptor.displayName,
+            summary: descriptor.summary,
+            inputSchemaJSON: descriptor.inputSchemaJSON,
+            readOnlyHint: descriptor.readOnlyHint,
+            providerProfileIDs: descriptor.providerProfileIDs,
+            isAvailable: false
+        )
+    }
+}
+
+private func disconnectConcurrently(
+    _ sessions: [any MCPClientSessionProtocol],
+    maximumParallel: Int
+) async {
+    await withTaskGroup(of: Void.self) { group in
+        var iterator = sessions.makeIterator()
+        for _ in 0..<min(maximumParallel, sessions.count) {
+            guard let session = iterator.next() else { break }
+            group.addTask { await session.disconnect() }
+        }
+        while await group.next() != nil {
+            if let session = iterator.next() {
+                group.addTask { await session.disconnect() }
+            }
+        }
     }
 }
 

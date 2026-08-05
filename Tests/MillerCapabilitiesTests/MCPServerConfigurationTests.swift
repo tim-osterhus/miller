@@ -111,6 +111,15 @@ struct MCPServerConfigurationTests {
     }
 
     @Test
+    func directBoundsDecodeRejectsInvalidValues() throws {
+        let invalid = MCPBounds(startupTimeout: .seconds(11))
+        let encoded = try JSONEncoder().encode(invalid)
+        #expect(throws: MCPConfigurationError.invalidBounds) {
+            try JSONDecoder().decode(MCPBounds.self, from: encoded)
+        }
+    }
+
+    @Test
     func stdioEnvironmentDoesNotInheritUnboundCredentials() {
         let environment = MCPClientSession.safeBaseEnvironment(from: [
             "PATH": "/usr/bin",
