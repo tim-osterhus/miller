@@ -263,7 +263,13 @@ enum SQLiteMigrations {
                 CHECK (
                     (terminal_at IS NULL AND terminal_outcome IS NULL)
                     OR (terminal_at IS NOT NULL AND terminal_outcome IS NOT NULL)
-                )
+                ),
+                CHECK (
+                    conversation_id IS NOT NULL
+                    OR turn_id IS NOT NULL
+                    OR voice_session_id IS NOT NULL
+                ),
+                CHECK (turn_id IS NULL OR voice_session_id IS NULL)
             );
 
             CREATE TABLE plugin_packages (

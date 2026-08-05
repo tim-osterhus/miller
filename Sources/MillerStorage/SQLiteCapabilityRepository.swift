@@ -559,6 +559,10 @@ public actor SQLiteCapabilityRepository {
 
     public func beginAudit(_ audit: CapabilityAuditRecord) throws {
         guard (audit.terminalAt == nil) == (audit.terminalOutcome == nil),
+              audit.conversationID != nil
+                || audit.turnID != nil
+                || audit.voiceSessionID != nil,
+              audit.turnID == nil || audit.voiceSessionID == nil,
               !audit.serverID.isEmpty,
               !audit.toolName.isEmpty
         else {
@@ -566,6 +570,7 @@ public actor SQLiteCapabilityRepository {
         }
         try preflightWrite()
         try database.transaction {
+            let conversationID = try coherentConversationID(for: audit)
             try database.execute(
                 """
                 INSERT INTO capability_audit
@@ -576,7 +581,10 @@ public actor SQLiteCapabilityRepository {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO NOTHING
                 """,
-                bindings: Self.auditBindings(audit)
+                bindings: Self.auditBindings(
+                    audit,
+                    conversationID: conversationID
+                )
             )
         }
     }
@@ -789,6 +797,46 @@ public actor SQLiteCapabilityRepository {
         }
     }
 
+    private func coherentConversationID(
+        for audit: CapabilityAuditRecord
+    ) throws -> ConversationID? {
+        if let turnID = audit.turnID {
+            let rows = try database.query(
+                "SELECT conversation_id FROM turns WHERE id = ?",
+                bindings: [.text(turnID.description)]
+            )
+            guard let value = rows.first?.first,
+                  let parentID = Self.uuid(value).map({
+                      ConversationID(rawValue: $0)
+                  }),
+                  audit.conversationID == nil
+                    || audit.conversationID == parentID
+            else {
+                throw CapabilityStorageError.invalidAudit
+            }
+            return parentID
+        }
+
+        if let voiceSessionID = audit.voiceSessionID {
+            let rows = try database.query(
+                "SELECT conversation_id FROM voice_sessions WHERE id = ?",
+                bindings: [.text(Self.id(voiceSessionID))]
+            )
+            guard let value = rows.first?.first else {
+                throw CapabilityStorageError.invalidAudit
+            }
+            let parentID = Self.uuid(value).map {
+                ConversationID(rawValue: $0)
+            }
+            guard audit.conversationID == parentID else {
+                throw CapabilityStorageError.invalidAudit
+            }
+            return parentID
+        }
+
+        return audit.conversationID
+    }
+
     private static func validate(server: CapabilityServerRecord) throws -> String {
         guard !server.id.isEmpty, server.id.utf8.count <= 128,
               !server.displayName.isEmpty, server.displayName.utf8.count <= 256
@@ -910,11 +958,12 @@ public actor SQLiteCapabilityRepository {
     }
 
     private static func auditBindings(
-        _ audit: CapabilityAuditRecord
+        _ audit: CapabilityAuditRecord,
+        conversationID: ConversationID?
     ) -> [SQLiteValue] {
         [
             .text(id(audit.id.rawValue)),
-            audit.conversationID.map { .text($0.description) } ?? .null,
+            conversationID.map { .text($0.description) } ?? .null,
             audit.turnID.map { .text($0.description) } ?? .null,
             audit.voiceSessionID.map { .text(id($0)) } ?? .null,
             .text(audit.source.rawValue), .text(audit.serverID),
