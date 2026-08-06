@@ -1,4 +1,5 @@
 import Foundation
+import MillerCapabilities
 import MillerCore
 import MillerLive
 import MillerLiveAudio
@@ -70,6 +71,8 @@ actor GPTLiveController {
     private let millerCapabilityCatalog: @Sendable () -> [CapabilityDescriptor]
     private let bridgeConfiguration:
         @Sendable () throws -> CodexMCPBridgeConfiguration?
+    private let portableSkillAttachment:
+        @Sendable (UUID) async throws -> PortableSkillAttachment?
     private let makeSession: @Sendable (CodexAppServerClient) -> LiveAudioSession
     private let makePeer: (@Sendable () async throws -> any LiveAudioPeer)?
     private let makeDirectSession: (@Sendable (any LiveAudioPeer) -> DirectGPTLiveSession)?
@@ -115,6 +118,8 @@ actor GPTLiveController {
         millerCapabilityCatalog: (@Sendable () -> [CapabilityDescriptor])? = nil,
         bridgeConfiguration: @escaping @Sendable () throws
             -> CodexMCPBridgeConfiguration? = { nil },
+        portableSkillAttachment: @escaping @Sendable (UUID) async throws
+            -> PortableSkillAttachment? = { _ in nil },
         makeSession: @escaping @Sendable (CodexAppServerClient) -> LiveAudioSession = {
             LiveAudioSession(client: $0)
         },
@@ -161,6 +166,7 @@ actor GPTLiveController {
         self.millerCapabilityCatalog = millerCapabilityCatalog
             ?? { existingMillerCapabilities }
         self.bridgeConfiguration = bridgeConfiguration
+        self.portableSkillAttachment = portableSkillAttachment
         self.makeSession = makeSession
         self.makePeer = makePeer
         self.makeDirectSession = makeDirectSession
@@ -283,6 +289,28 @@ actor GPTLiveController {
                   confirmedProfile.credentialReference
               ) == false
         else { throw GPTLiveCredentialError.unavailable }
+        let sessionID = UUID()
+        let projector = PortableSkillProjector()
+        var projectedSkillRoot: URL?
+        var projectedSkillInstructions: String?
+        if makeDirectSession == nil,
+           let attachment = try await portableSkillAttachment(confirmedProfile.id),
+           !attachment.skills.isEmpty
+        {
+            projectedSkillRoot = try projector.materialize(
+                attachment, under: temporaryParentURL, sessionID: sessionID
+            )
+            projectedSkillInstructions = attachment.instructionText(
+                maximumBytes: 48 * 1_024
+            )
+        }
+        defer {
+            if let projectedSkillRoot {
+                try? projector.removeMaterializedRoot(
+                    projectedSkillRoot, under: temporaryParentURL
+                )
+            }
+        }
         let peer = try await makePeer?()
         hasAttachedPeer = peer != nil
         let admittedReference = refreshedProfile.credentialReference
@@ -335,7 +363,9 @@ actor GPTLiveController {
                 onCapabilityActivity: providerCallbacks.activity,
                 resolveProviderApproval: providerCallbacks.approval,
                 resolveProviderApprovalDetails: providerCallbacks.approvalDetails,
-                existingMillerCapabilities: millerCapabilityCatalog()
+                existingMillerCapabilities: millerCapabilityCatalog(),
+                portableSkillRoot: projectedSkillRoot?.path,
+                portableSkillInstructions: projectedSkillInstructions
             )
             session = peer.map { LiveAudioSession(client: client, peer: $0) }
                 ?? makeSession(client)
@@ -348,7 +378,6 @@ actor GPTLiveController {
             }
             return
         }
-        let sessionID = UUID()
         let identity = LiveSessionIdentity(
             requestID: sessionID.uuidString.lowercased(),
             threadID: UUID().uuidString.lowercased(),

@@ -9,6 +9,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         let turnID: TurnID
         let generation: Int
         let client: CodexAppServerClient
+        let skillRoot: URL?
         var cancelled: Bool
     }
 
@@ -46,6 +47,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
             turnID: request.turnID,
             generation: request.generation,
             client: client,
+            skillRoot: nil,
             cancelled: false
         )
         let credential: CodexOAuthCredential
@@ -67,6 +69,20 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
             currentText += "\n\nExplicitly selected voice-history attachment:\n"
                 + attachment.text
         }
+        if let notice = request.portableSkillAttachment?.omissionNotice {
+            currentText += "\n\nPortable skill notice: \(notice)"
+        }
+        let skillRuntime: (root: URL, inputs: [CodexTypedSkillInput])?
+        do {
+            skillRuntime = try Self.materializeSkills(
+                request.portableSkillAttachment,
+                parent: URL(fileURLWithPath: cwd, isDirectory: true),
+                requestID: requestID
+            )
+        } catch {
+            activeRun = nil
+            throw error
+        }
         let source = client.typedEvents(
             requestID: requestID,
             credential: credential,
@@ -74,10 +90,15 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
             cwd: cwd,
             context: context,
             userText: currentText,
+            skillRoot: skillRuntime?.root.path,
+            skills: skillRuntime?.inputs ?? [],
             timeout: timeout
         )
         return AsyncThrowingStream { continuation in
             continuation.yield(.accepted)
+            if request.portableSkillAttachment?.omittedCount ?? 0 > 0 {
+                continuation.yield(.status(.portableSkillsOmitted))
+            }
             let task = Task {
                 await self.consume(
                     source,
@@ -86,6 +107,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
                         turnID: request.turnID,
                         generation: request.generation,
                         client: client,
+                        skillRoot: skillRuntime?.root,
                         cancelled: false
                     ),
                     continuation: continuation
@@ -115,6 +137,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         run: ActiveRun,
         continuation: AsyncThrowingStream<ReasoningEvent, Error>.Continuation
     ) async {
+        defer { Self.removeSkillRoot(run.skillRoot) }
         var ordinal = 0
         var eventCount = 0
         var responseScalars = 0
@@ -186,6 +209,52 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
             activeRun = nil
             continuation.finish(throwing: error)
         }
+    }
+
+    private static func materializeSkills(
+        _ attachment: PortableSkillAttachment?,
+        parent: URL,
+        requestID: String
+    ) throws -> (root: URL, inputs: [CodexTypedSkillInput])? {
+        guard let attachment, !attachment.skills.isEmpty else { return nil }
+        let root = parent.appending(path: "portable-skills-\(requestID)")
+        guard root.deletingLastPathComponent().standardizedFileURL
+                == parent.standardizedFileURL
+        else { throw CodexTypedProtocolError.invalidField }
+        try FileManager.default.createDirectory(
+            at: root.appending(path: "skills"), withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            let inputs = try attachment.skills.map { skill in
+                guard !skill.id.isEmpty, skill.id.utf8.count <= 96,
+                      skill.id.unicodeScalars.allSatisfy({
+                          $0.isASCII && ($0.properties.isAlphabetic
+                              || (48...57).contains($0.value) || $0 == "-" || $0 == "_")
+                      })
+                else { throw CodexTypedProtocolError.invalidField }
+                let directory = root.appending(path: "skills/\(skill.id)")
+                try FileManager.default.createDirectory(
+                    at: directory, withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                let file = directory.appending(path: "SKILL.md")
+                try Data(skill.markdown.utf8).write(to: file, options: [.atomic])
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: file.path
+                )
+                return CodexTypedSkillInput(name: skill.name, path: file.path)
+            }
+            return (root, inputs)
+        } catch {
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+    }
+
+    private static func removeSkillRoot(_ root: URL?) {
+        guard let root, root.lastPathComponent.hasPrefix("portable-skills-") else { return }
+        try? FileManager.default.removeItem(at: root)
     }
 
     private func isActive(_ run: ActiveRun) -> Bool {

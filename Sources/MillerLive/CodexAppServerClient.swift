@@ -129,6 +129,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private let resolveProviderApproval: CodexProviderApprovalResolver
     private let resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver?
     private let existingMillerCapabilities: [CapabilityDescriptor]
+    private let portableSkillRoot: String?
+    private let portableSkillInstructions: String?
     private let state = State()
 
     public init(
@@ -139,7 +141,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
         onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
         resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
         resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver? = nil,
-        existingMillerCapabilities: [CapabilityDescriptor] = []
+        existingMillerCapabilities: [CapabilityDescriptor] = [],
+        portableSkillRoot: String? = nil,
+        portableSkillInstructions: String? = nil
     ) {
         self.process = process
         self.codec = codec ?? CodexAppServerProtocol(
@@ -151,6 +155,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         self.resolveProviderApproval = resolveProviderApproval
         self.resolveProviderApprovalDetails = resolveProviderApprovalDetails
         self.existingMillerCapabilities = existingMillerCapabilities
+        self.portableSkillRoot = portableSkillRoot
+        self.portableSkillInstructions = portableSkillInstructions
     }
 
     public var sessionState: LiveSessionState { state.locked { $0.contract.state } }
@@ -313,6 +319,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         cwd: String,
         context: [CodexTypedContextMessage],
         userText: String,
+        skillRoot: String? = nil,
+        skills: [CodexTypedSkillInput] = [],
         timeout: Duration = .seconds(120),
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) -> AsyncThrowingStream<CodexTypedMessage, Error> {
@@ -326,6 +334,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                         cwd: cwd,
                         context: context,
                         userText: userText,
+                        skillRoot: skillRoot,
+                        skills: skills,
                         timeout: timeout,
                         onCleanupPending: onCleanupPending,
                         emit: { continuation.yield($0) }
@@ -778,6 +788,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         cwd: String,
         context: [CodexTypedContextMessage],
         userText: String,
+        skillRoot: String?,
+        skills: [CodexTypedSkillInput],
         timeout: Duration,
         onCleanupPending: @escaping @Sendable () async -> Void,
         emit: @escaping @Sendable (CodexTypedMessage) -> Void
@@ -820,6 +832,22 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     codec: codec,
                     iterator: &iterator
                 )
+                if let skillRoot {
+                    let rootsID = "\(requestID):skills-roots"
+                    try process.send(try codec.skillsExtraRootsSetRequest(
+                        id: rootsID, roots: [skillRoot]
+                    ))
+                    try await awaitTypedFeature(
+                        id: rootsID, credential: &currentCredential,
+                        codec: codec, iterator: &iterator
+                    )
+                    let listID = "\(requestID):skills-list"
+                    try process.send(try codec.skillsListRequest(id: listID, cwd: cwd))
+                    try await awaitTypedFeature(
+                        id: listID, credential: &currentCredential,
+                        codec: codec, iterator: &iterator
+                    )
+                }
                 let threadRequestID = "\(requestID):thread-start"
                 try process.send(try codec.threadStartRequest(
                     id: threadRequestID, model: model, cwd: cwd
@@ -838,7 +866,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     threadID: helperThreadID,
                     cwd: cwd,
                     context: context,
-                    userText: userText
+                    userText: userText,
+                    skills: skills
                 ))
                 let responseTurnID = try await awaitTypedTurn(
                     id: turnRequestID,
@@ -931,6 +960,73 @@ public final class CodexAppServerClient: @unchecked Sendable {
             if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
             throw error
         }
+    }
+
+    private func awaitTypedFeature(
+        id: String,
+        credential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws {
+        while let data = try await iterator.next() {
+            switch try codec.decode(data) {
+            case .featureResponse(let responseID) where responseID == id:
+                return
+            case .credentialRefresh(let refreshID, let previousAccountID):
+                try await refreshCredential(
+                    id: refreshID, previousAccountID: previousAccountID,
+                    currentCredential: &credential
+                )
+            case .unsupportedApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+            case .unsupportedPermissionsApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedPermissionsApproval(id: approvalID))
+            case .ignored:
+                continue
+            case .requestError(let responseID, _) where responseID == id:
+                throw CodexTypedProtocolError.featureUnavailable
+            default:
+                throw CodexTypedProtocolError.invalidSequence
+            }
+        }
+        throw CodexAppServerClientError.wrongResponse
+    }
+
+    private func awaitLiveSkillFeature(
+        id: String,
+        helperThreadID: String,
+        credential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        notifications: inout StartupNotifications,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws {
+        while let data = try await iterator.next() {
+            switch try codec.decode(data) {
+            case .featureResponse(let responseID) where responseID == id:
+                return
+            case .threadStarted(let threadID):
+                guard threadID == helperThreadID,
+                      notifications.threadStartedID == nil
+                else { throw CodexTypedProtocolError.invalidSequence }
+                notifications.threadStartedID = threadID
+            case .credentialRefresh(let refreshID, let previousAccountID):
+                try await refreshCredential(
+                    id: refreshID, previousAccountID: previousAccountID,
+                    currentCredential: &credential
+                )
+            case .unsupportedApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+            case .unsupportedPermissionsApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedPermissionsApproval(id: approvalID))
+            case .ignored:
+                continue
+            case .requestError(let responseID, _) where responseID == id:
+                throw CodexTypedProtocolError.featureUnavailable
+            default:
+                throw CodexTypedProtocolError.invalidSequence
+            }
+        }
+        throw CodexAppServerClientError.wrongResponse
     }
 
     private func typedHandshake(
@@ -1210,10 +1306,34 @@ public final class CodexAppServerClient: @unchecked Sendable {
             throw Self.classifyStartup(error, phase: .threadStart)
         }
         state.locked { $0.helperThreadID = helperThreadID }
+        if let portableSkillRoot {
+            let typed = CodexTypedProtocol()
+            let rootsID = "\(identity.requestID):skills-roots"
+            try process.send(try typed.skillsExtraRootsSetRequest(
+                id: rootsID, roots: [portableSkillRoot]
+            ))
+            try await awaitLiveSkillFeature(
+                id: rootsID, helperThreadID: helperThreadID,
+                credential: &currentCredential, codec: typed,
+                notifications: &startupNotifications, iterator: &iterator
+            )
+            let listID = "\(identity.requestID):skills-list"
+            try process.send(try typed.skillsListRequest(
+                id: listID, cwd: process.temporaryRootURL.path
+            ))
+            try await awaitLiveSkillFeature(
+                id: listID, helperThreadID: helperThreadID,
+                credential: &currentCredential, codec: typed,
+                notifications: &startupNotifications, iterator: &iterator
+            )
+        }
         try process.send(try codec.realtimeStartRequest(
             id: startID,
             threadID: helperThreadID,
-            offerSDP: offerSDP
+            offerSDP: offerSDP,
+            prompt: CodexRealtimePrompt.make(
+                additionalInstructions: portableSkillInstructions
+            )
         ))
         let answerSDP: String
         do {

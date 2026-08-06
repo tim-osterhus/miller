@@ -1188,11 +1188,126 @@ final class CapabilityController: ObservableObject {
                     }
                 )
             }
+        var skillSnapshots: [PortableSkillSettingsSnapshot] = []
+        for skill in try await repository.skills() {
+            skillSnapshots.append(.init(
+                record: skill,
+                enabledProviderProfileIDs: Set(
+                    try await repository.enabledSkillProviderProfileIDs(
+                        skillID: skill.id
+                    )
+                )
+            ))
+        }
         return CapabilitySettingsSnapshot(
             codexApps: apps,
             servers: serverSnapshots,
-            providerNames: providerNames
+            providerNames: providerNames,
+            plugins: try await repository.plugins(),
+            skills: skillSnapshots
         )
+    }
+
+    func importPortableSkillFromSettings(at url: URL) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        let existing = try await repository.skills().count
+        let snapshot = try PortableSkillImporter().importSkill(
+            at: url, existingSkillCount: existing
+        )
+        let now = Date()
+        try await repository.saveSkill(.init(
+            id: snapshot.id, pluginID: nil, name: snapshot.name,
+            description: snapshot.description,
+            markdownSnapshot: snapshot.markdown, sourceHash: snapshot.sourceHash,
+            enabled: false, createdAt: now, updatedAt: now
+        ))
+    }
+
+    func importPluginFromSettings(at url: URL) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        let snapshot = try PluginBundleImporter().importBundle(at: url)
+        let summary = try Self.pluginReviewSummary(snapshot)
+        let now = Date()
+        let plugin = PluginPackageRecord(
+            id: snapshot.plugin.id, version: snapshot.plugin.version,
+            sourceHash: snapshot.plugin.sourceHash,
+            supportedComponentSummary: summary, enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let skills = snapshot.skills.map { skill in
+            PortableSkillRecord(
+                id: skill.id, pluginID: snapshot.plugin.id, name: skill.name,
+                description: skill.description,
+                markdownSnapshot: skill.markdown, sourceHash: skill.sourceHash,
+                enabled: false, createdAt: now, updatedAt: now
+            )
+        }
+        let servers: [CapabilityServerRecord] = snapshot.mcpDrafts.compactMap { draft in
+            let transport: CapabilityServerTransport
+            let command: String?
+            let endpoint: String?
+            if let absolute = draft.command, absolute.hasPrefix("/") {
+                transport = .stdio; command = absolute; endpoint = nil
+            } else if let remote = draft.endpoint {
+                transport = .streamableHTTP; command = nil; endpoint = remote
+            } else {
+                return nil
+            }
+            return CapabilityServerRecord(
+                id: "plugin-\(snapshot.plugin.id)-\(draft.id)",
+                displayName: "\(snapshot.plugin.id) · \(draft.id)",
+                transport: transport, command: command, endpoint: endpoint,
+                arguments: draft.arguments, enabled: false,
+                defaultPolicy: .askBeforeChanges, staleState: .stale,
+                createdAt: now, updatedAt: now
+            )
+        }
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: skills, disabledServers: servers
+        )
+    }
+
+    func setPortableSkillEnabledFromSettings(
+        _ enabled: Bool, skillID: String, providerProfileID: UUID
+    ) async throws {
+        try await settingsRepositoryOrThrow().setSkillEnabled(
+            enabled, skillID: skillID, providerProfileID: providerProfileID
+        )
+    }
+
+    func deletePortableSkillFromSettings(id: String) async throws {
+        try await settingsRepositoryOrThrow().deleteSkill(id: id)
+    }
+
+    func deletePluginFromSettings(id: String) async throws {
+        try await settingsRepositoryOrThrow().deletePlugin(id: id)
+    }
+
+    private static func pluginReviewSummary(
+        _ snapshot: PluginBundleSnapshot
+    ) throws -> String {
+        let skills = snapshot.skills.map(\.name).joined(separator: ", ")
+        let mcp = snapshot.mcpDrafts.map { draft in
+            var labels = [draft.id]
+            if let path = draft.relativeExecutablePath {
+                labels.append("relative executable: \(path)")
+            }
+            if !draft.unresolvedSecrets.isEmpty {
+                labels.append("unresolved secrets: \(draft.unresolvedSecrets.joined(separator: ","))")
+            }
+            return labels.joined(separator: " — ")
+        }.joined(separator: "; ")
+        let apps = snapshot.apps.map { "\($0.name) (Codex only)" }
+            .joined(separator: ", ")
+        let ignored = snapshot.ignoredComponents.joined(separator: ", ")
+        let value = "Skills (disabled): \(skills.isEmpty ? "none" : skills)\n"
+            + "MCP drafts (disabled): \(mcp.isEmpty ? "none" : mcp)\n"
+            + "Apps metadata: \(apps.isEmpty ? "none" : apps)\n"
+            + "Ignored hooks/assets: \(ignored.isEmpty ? "none" : ignored)"
+        guard value.utf8.count <= 4 * 1_024 else {
+            throw PluginBundleImportError.bundleTooLarge
+        }
+        return value
     }
 
     func diagnosticsSnapshot() async -> CapabilityControllerDiagnostics {
@@ -1996,6 +2111,7 @@ final class CapabilityController: ObservableObject {
             kind: .typed(turnID: request.turnID, generation: request.generation)
         )
         let capabilityCatalog: CapabilityCatalogSnapshot
+        let portableSkillAttachment: PortableSkillAttachment?
         do {
             await finalizeProviderActivities()
             try Task.checkCancellation()
@@ -2009,6 +2125,9 @@ final class CapabilityController: ObservableObject {
                 try validatePreparation(reservation)
             }
             capabilityCatalog = await catalog(providerProfileID: providerProfileID)
+            portableSkillAttachment = try await selectedSkillAttachment(
+                providerProfileID: providerProfileID
+            )
             try Task.checkCancellation()
             try validatePreparation(reservation)
             try admitTypedAssociation(
@@ -2027,7 +2146,40 @@ final class CapabilityController: ObservableObject {
             context: request.context,
             userText: request.userText,
             capabilityCatalog: capabilityCatalog,
-            voiceHistoryAttachment: request.voiceHistoryAttachment
+            voiceHistoryAttachment: request.voiceHistoryAttachment,
+            portableSkillAttachment: portableSkillAttachment
+        )
+    }
+
+    func selectedSkillAttachment(
+        providerProfileID: UUID
+    ) async throws -> PortableSkillAttachment? {
+        guard let settingsRepository else { return nil }
+        let records = try await settingsRepository.skills()
+        var eligible: [PortableSkillSnapshot] = []
+        for record in records {
+            let providers = try await settingsRepository
+                .enabledSkillProviderProfileIDs(skillID: record.id)
+            guard providers.contains(providerProfileID) else { continue }
+            eligible.append(.init(
+                id: record.id, pluginID: record.pluginID,
+                name: record.name, description: record.description,
+                markdown: record.markdownSnapshot,
+                sourceHash: record.sourceHash, enabled: true
+            ))
+        }
+        let sorted = eligible.sorted { $0.id < $1.id }
+        var admitted: [PortableSkillSnapshot] = []
+        for skill in sorted {
+            guard (try? PortableSkillAttachment(
+                skills: admitted + [skill],
+                omittedCount: sorted.count - admitted.count - 1
+            )) != nil else { break }
+            admitted.append(skill)
+        }
+        guard !admitted.isEmpty || !sorted.isEmpty else { return nil }
+        return try PortableSkillAttachment(
+            skills: admitted, omittedCount: sorted.count - admitted.count
         )
     }
 

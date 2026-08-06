@@ -215,6 +215,7 @@ public struct GatewayRecord: Equatable, Sendable {
         case nullableString
         case capabilityID
         case toolDefinitions
+        case portableSkills
         case argumentsObject
         case boundedResult
         case toolOutcome
@@ -312,7 +313,11 @@ public struct GatewayRecord: Equatable, Sendable {
             "generation": .nonnegativeInteger, "provider_profile": .object,
             "context": .objectArray, "user_text": .string,
             "tools": .toolDefinitions,
-        ], optional: ["voice_history_attachment": .string]),
+        ], optional: [
+            "voice_history_attachment": .string,
+            "portable_skills": .portableSkills,
+            "portable_skills_omitted": .nonnegativeInteger,
+        ]),
         "reasoning.cancel": .init(required: [
             "turn_id": .uuid, "target_generation": .nonnegativeInteger,
         ]),
@@ -376,6 +381,7 @@ public struct GatewayRecord: Equatable, Sendable {
              (.objectArray, .array),
              (.modelChoices, .array),
              (.anyArray, .array),
+             (.portableSkills, .array),
              (.stringArray, .array),
              (.integerArray, .array):
             break
@@ -467,6 +473,9 @@ public struct GatewayRecord: Equatable, Sendable {
         {
             throw GatewayProtocolError.invalidField
         }
+        if case .portableSkills = kind {
+            try validatePortableSkills(value)
+        }
         if field == "provider_profile" {
             try validateProviderProfile(value)
         }
@@ -489,6 +498,38 @@ public struct GatewayRecord: Equatable, Sendable {
         }
         if case .boundedResult = kind {
             try validateJSONBytes(value, maximum: 256 * 1_024)
+        }
+    }
+
+    private static func validatePortableSkills(_ value: JSONValue) throws {
+        guard case let .array(skills) = value, skills.count <= 128 else {
+            throw GatewayProtocolError.invalidField
+        }
+        var ids = Set<String>()
+        var bytes = 0
+        for value in skills {
+            guard case let .object(skill) = value,
+                  Set(skill.keys) == ["id", "name", "description", "markdown"],
+                  let id = skill["id"]?.stringValue,
+                  let name = skill["name"]?.stringValue,
+                  let description = skill["description"]?.stringValue,
+                  let markdown = skill["markdown"]?.stringValue,
+                  !id.isEmpty, id.utf8.count <= 96,
+                  id.unicodeScalars.allSatisfy({
+                      $0.isASCII && ($0.properties.isAlphabetic
+                          || (48...57).contains($0.value)
+                          || $0 == "-" || $0 == "_" || $0 == ".")
+                  }),
+                  ids.insert(id).inserted,
+                  !name.isEmpty, name.utf8.count <= 256,
+                  !description.isEmpty, description.utf8.count <= 1_024,
+                  markdown.utf8.count <= 64 * 1_024
+            else { throw GatewayProtocolError.invalidField }
+            bytes += id.utf8.count + name.utf8.count
+                + description.utf8.count + markdown.utf8.count
+            guard bytes <= 128 * 1_024 else {
+                throw GatewayProtocolError.invalidField
+            }
         }
     }
 

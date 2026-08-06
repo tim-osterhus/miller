@@ -22,6 +22,16 @@ public struct CodexTypedContextMessage: Equatable, Sendable {
     }
 }
 
+public struct CodexTypedSkillInput: Equatable, Sendable {
+    public let name: String
+    public let path: String
+
+    public init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
+}
+
 public enum CodexTypedTurnOutcome: String, Equatable, Sendable {
     case completed
     case interrupted
@@ -180,7 +190,8 @@ public struct CodexTypedProtocol: Sendable {
         threadID: String,
         cwd: String,
         context: [CodexTypedContextMessage],
-        userText: String
+        userText: String,
+        skills: [CodexTypedSkillInput] = []
     ) throws -> Data {
         try validateIdentifier(id)
         try validateIdentifier(threadID)
@@ -199,15 +210,40 @@ public struct CodexTypedProtocol: Sendable {
         guard prompt.utf8.count <= 256 * 1_024 else {
             throw CodexTypedProtocolError.textTooLarge
         }
+        guard skills.count <= 128 else { throw CodexTypedProtocolError.tooManyItems }
+        let skillInputs: [[String: Any]] = try skills.map { skill in
+            try validateText(skill.name)
+            try validateAbsolutePath(skill.path)
+            return ["type": "skill", "name": skill.name, "path": skill.path]
+        }
         return try encode([
             "method": "turn/start",
             "id": id,
             "params": [
                 "threadId": threadID,
-                "input": [["type": "text", "text": prompt]],
+                "input": [["type": "text", "text": prompt]] + skillInputs,
                 "cwd": cwd,
                 "approvalPolicy": "never",
             ],
+        ])
+    }
+
+    public func skillsExtraRootsSetRequest(id: String, roots: [String]) throws -> Data {
+        try validateIdentifier(id)
+        guard roots.count <= 8 else { throw CodexTypedProtocolError.tooManyItems }
+        try roots.forEach(validateAbsolutePath)
+        return try encode([
+            "method": "skills/extraRoots/set", "id": id,
+            "params": ["extraRoots": roots],
+        ])
+    }
+
+    public func skillsListRequest(id: String, cwd: String) throws -> Data {
+        try validateIdentifier(id)
+        try validateAbsolutePath(cwd)
+        return try encode([
+            "method": "skills/list", "id": id,
+            "params": ["cwds": [cwd], "forceReload": true],
         ])
     }
 
@@ -326,7 +362,8 @@ public struct CodexTypedProtocol: Sendable {
             )
         }
         if id.hasSuffix(":apps") || id.hasSuffix(":mcp")
-            || id.hasSuffix(":skills")
+            || id.hasSuffix(":skills") || id.hasSuffix(":skills-roots")
+            || id.hasSuffix(":skills-list")
         {
             return .featureResponse(id: id)
         }

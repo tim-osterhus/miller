@@ -393,6 +393,22 @@
             },
             "user_text": {"type": "string", "maxLength": 65536},
             "voice_history_attachment": {"type": "string", "maxLength": 32768},
+            "portable_skills": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "required": ["id", "name", "description", "markdown"],
+                "properties": {
+                  "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9._-]+$"},
+                  "name": {"type": "string", "minLength": 1, "maxLength": 256},
+                  "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+                  "markdown": {"type": "string", "maxLength": 65536}
+                },
+                "additionalProperties": false
+              }
+            },
+            "portable_skills_omitted": {"$ref": "#/$defs/generation"},
             "tools": {
               "type": "array",
               "items": {"$ref": "#/$defs/tool_definition"}

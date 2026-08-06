@@ -6,6 +6,38 @@ import Testing
 @Suite(.serialized)
 struct JSONLReasoningGatewayToolTests {
     @Test
+    func serializesPortableSkillsAndSurfacesBoundedOmission() async throws {
+        let fixture = try ToolHelperFixture(mode: "record-portable")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(configuration: fixture.configuration)
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor, selectedProvider: providerProfile
+        )
+        let attachment = try PortableSkillAttachment(
+            skills: [.init(
+                id: "weather", pluginID: nil, name: "Weather",
+                description: "Forecast guidance", markdown: "Use forecasts.",
+                sourceHash: String(repeating: "a", count: 64), enabled: true
+            )],
+            omittedCount: 2
+        )
+        let request = ReasoningRequest(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 1,
+            context: [], userText: "weather", portableSkillAttachment: attachment
+        )
+
+        let events = try await collect(try await gateway.start(request))
+
+        #expect(events == [
+            .accepted,
+            .status(.portableSkillsOmitted),
+            .textDelta(ordinal: 0, text: "portable"),
+            .completed,
+        ])
+        await supervisor.shutdown()
+    }
+
+    @Test
     func toolDefinitionsAndRecordsAreClosedAndBounded() throws {
         let sessionID = UUID().uuidString.lowercased()
         let requestID = UUID().uuidString.lowercased()
@@ -628,6 +660,16 @@ private struct ToolHelperFixture {
             const record = JSON.parse(pending.slice(0, newline)); pending = pending.slice(newline + 1);
             if (record.type === "reasoning.start") {
               operation = record; starts += 1; send(base("reasoning.accepted"));
+              if (mode === "record-portable") {
+                const skill = record.portable_skills?.[0];
+                if (skill?.id !== "weather" || skill?.name !== "Weather" ||
+                    skill?.description !== "Forecast guidance" ||
+                    skill?.markdown !== "Use forecasts." ||
+                    record.portable_skills_omitted !== 2) process.exit(60);
+                send({...base("reasoning.text_delta"),ordinal:0,text:"portable"});
+                send(base("reasoning.completed"));
+                continue;
+              }
               if (record.tools.length === 0) {
                 send({...base("reasoning.text_delta"),ordinal:0,text:"ordinary"});
                 send(base("reasoning.completed"));

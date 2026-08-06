@@ -111,6 +111,16 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         if let attachment = request.voiceHistoryAttachment {
             fields["voice_history_attachment"] = .string(attachment.text)
         }
+        if let attachment = request.portableSkillAttachment {
+            fields["portable_skills"] = .array(attachment.skills.map { skill in
+                .object([
+                    "id": .string(skill.id), "name": .string(skill.name),
+                    "description": .string(skill.description),
+                    "markdown": .string(skill.markdown),
+                ])
+            })
+            fields["portable_skills_omitted"] = .integer(attachment.omittedCount)
+        }
         let source = try await supervisor.openReasoning(
             requestID: requestID,
             turnID: request.turnID.description,
@@ -130,6 +140,7 @@ public actor JSONLReasoningGateway: ReasoningGateway {
                     requestID: requestID,
                     turnID: request.turnID,
                     generation: request.generation,
+                    portableSkillsOmitted: request.portableSkillAttachment?.omittedCount ?? 0,
                     continuation: continuation
                 )
             }
@@ -164,6 +175,7 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         requestID: String,
         turnID: TurnID,
         generation: Int,
+        portableSkillsOmitted: Int,
         continuation: AsyncThrowingStream<ReasoningEvent, Error>.Continuation
     ) async {
         do {
@@ -204,6 +216,9 @@ public actor JSONLReasoningGateway: ReasoningGateway {
                         }
                     }
                     continuation.yield(event)
+                    if event == .accepted, portableSkillsOmitted > 0 {
+                        continuation.yield(.status(.portableSkillsOmitted))
+                    }
                     if event.isTerminal {
                         finishRun(requestID: requestID, cancellingTools: true)
                         continuation.finish()

@@ -10,6 +10,120 @@ public enum CapabilityContractError: Error, Equatable, Sendable {
     case invalidEffectiveCapabilityPolicy
     case invalidCapabilityLifecycle
     case approvalNotRequired
+    case invalidPortableSkill
+    case portableSkillAttachmentTooLarge
+}
+
+public struct PortableSkillSnapshot: Codable, Equatable, Sendable {
+    public let id: String
+    public let pluginID: String?
+    public let name: String
+    public let description: String
+    public let markdown: String
+    public let sourceHash: String
+    public let enabled: Bool
+
+    public init(
+        id: String,
+        pluginID: String?,
+        name: String,
+        description: String,
+        markdown: String,
+        sourceHash: String,
+        enabled: Bool = false
+    ) {
+        self.id = id
+        self.pluginID = pluginID
+        self.name = name
+        self.description = description
+        self.markdown = markdown
+        self.sourceHash = sourceHash
+        self.enabled = enabled
+    }
+}
+
+public struct PortableSkillAttachment: Codable, Equatable, Sendable {
+    public static let maximumBytes = 128 * 1_024
+
+    public let skills: [PortableSkillSnapshot]
+    public let omittedCount: Int
+
+    public init(skills: [PortableSkillSnapshot], omittedCount: Int = 0) throws {
+        guard skills.count <= 128, omittedCount >= 0,
+              Set(skills.map(\.id)).count == skills.count,
+              skills.allSatisfy(Self.valid)
+        else {
+            throw CapabilityContractError.invalidPortableSkill
+        }
+        let data = try JSONEncoder().encode(skills)
+        guard data.count <= Self.maximumBytes else {
+            throw CapabilityContractError.portableSkillAttachmentTooLarge
+        }
+        self.skills = skills
+        self.omittedCount = omittedCount
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            skills: container.decode([PortableSkillSnapshot].self, forKey: .skills),
+            omittedCount: container.decode(Int.self, forKey: .omittedCount)
+        )
+    }
+
+    public var omissionNotice: String? {
+        omittedCount == 0
+            ? nil : "\(omittedCount) enabled skill(s) omitted to stay within the 128 KiB limit."
+    }
+
+    public var instructionText: String {
+        var sections = skills.map {
+            "Portable skill [\($0.id)] — \($0.name)\n\($0.description)\n\($0.markdown)"
+        }
+        if let omissionNotice { sections.append(omissionNotice) }
+        return sections.joined(separator: "\n\n")
+    }
+
+    public func instructionText(maximumBytes: Int) -> String {
+        guard maximumBytes > 0 else { return "" }
+        var admitted: [String] = []
+        for skill in skills {
+            let section = "Portable skill [\(skill.id)] — \(skill.name)\n"
+                + "\(skill.description)\n\(skill.markdown)"
+            let candidate = (admitted + [section]).joined(separator: "\n\n")
+            guard candidate.utf8.count <= maximumBytes else { break }
+            admitted.append(section)
+        }
+        var omitted = omittedCount + skills.count - admitted.count
+        while omitted > 0 {
+            let notice = "\(omitted) enabled skill(s) omitted to stay within the session limit."
+            let candidate = (admitted + [notice]).joined(separator: "\n\n")
+            if candidate.utf8.count <= maximumBytes { return candidate }
+            guard !admitted.isEmpty else {
+                return notice.utf8.count <= maximumBytes ? notice : ""
+            }
+            admitted.removeLast()
+            omitted += 1
+        }
+        return admitted.joined(separator: "\n\n")
+    }
+
+    private static func valid(_ skill: PortableSkillSnapshot) -> Bool {
+        func safeID(_ value: String) -> Bool {
+            !value.isEmpty && value.utf8.count <= 96 && value.unicodeScalars.allSatisfy {
+                $0.isASCII && ($0.properties.isAlphabetic
+                    || (48...57).contains($0.value) || $0 == "-" || $0 == "_" || $0 == ".")
+            }
+        }
+        return safeID(skill.id)
+            && skill.pluginID.map(safeID) != false
+            && !skill.name.isEmpty && skill.name.utf8.count <= 256
+            && !skill.description.isEmpty && skill.description.utf8.count <= 1_024
+            && skill.markdown.utf8.count <= 64 * 1_024
+            && skill.sourceHash.utf8.count <= 128
+            && !skill.name.contains("\0") && !skill.description.contains("\0")
+            && !skill.markdown.contains("\0")
+    }
 }
 
 public struct CapabilityID:

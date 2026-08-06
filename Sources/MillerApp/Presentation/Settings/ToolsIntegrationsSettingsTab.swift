@@ -1,6 +1,7 @@
 import MillerCore
 import MillerStorage
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ToolsIntegrationsSettingsTab: View {
     let section = SettingsSection.toolsIntegrations
@@ -8,6 +9,8 @@ struct ToolsIntegrationsSettingsTab: View {
     @State private var draft = MCPServerEditorDraft.newStdio
     @State private var showingEditor = false
     @State private var editingServerID: String?
+    @State private var importingSkill = false
+    @State private var importingPlugin = false
 
     init(editor: MCPServerEditorModel = .init()) {
         self.editor = editor
@@ -17,6 +20,7 @@ struct ToolsIntegrationsSettingsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SettingsLayout.contentSpacing) {
                 codexAppsSection
+                portableComponentsSection
                 millerServersSection
                 if showingEditor { serverEditor }
                 if !editor.status.isEmpty {
@@ -29,6 +33,88 @@ struct ToolsIntegrationsSettingsTab: View {
         .task { await editor.load() }
         .onChange(of: editor.resetEpoch) { _, _ in
             dismissEditor()
+        }
+        .fileImporter(
+            isPresented: $importingSkill,
+            allowedContentTypes: [.folder], allowsMultipleSelection: false
+        ) { result in handleImport(result, plugin: false) }
+        .fileImporter(
+            isPresented: $importingPlugin,
+            allowedContentTypes: [.folder], allowsMultipleSelection: false
+        ) { result in handleImport(result, plugin: true) }
+    }
+
+    private var portableComponentsSection: some View {
+        GroupBox("Portable skills and local plugin bundles") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Button("Import skill…") { importingSkill = true }
+                    Button("Import plugin bundle…") { importingPlugin = true }
+                }
+                .disabled(editor.isBusy)
+                Text("Imports are bounded SQLite snapshots. Miller never runs plugin hooks, copies executables, or retains authority over the source folder.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(editor.snapshot.plugins, id: \.id) { plugin in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(plugin.id).fontWeight(.medium)
+                            Text("Review required").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Remove", role: .destructive) {
+                                Task { await editor.deletePlugin(id: plugin.id) }
+                            }
+                        }
+                        Text(plugin.supportedComponentSummary)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(editor.snapshot.skills) { skill in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(skill.record.name).fontWeight(.medium)
+                            Text(skill.record.pluginID == nil ? "Portable skill" : "Plugin skill")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Remove", role: .destructive) {
+                                Task { await editor.deleteSkill(id: skill.id) }
+                            }
+                        }
+                        Text(skill.record.description)
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(editor.snapshot.providerNames.keys.sorted(by: {
+                            editor.snapshot.providerNames[$0, default: ""]
+                                < editor.snapshot.providerNames[$1, default: ""]
+                        }), id: \.self) { providerID in
+                            Toggle(
+                                "Enable for \(editor.snapshot.providerNames[providerID, default: "Provider"])",
+                                isOn: Binding(
+                                    get: { skill.enabledProviderProfileIDs.contains(providerID) },
+                                    set: { enabled in
+                                        Task { await editor.setSkillEnabled(
+                                            enabled, skillID: skill.id,
+                                            providerID: providerID
+                                        ) }
+                                    }
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func handleImport(
+        _ result: Result<[URL], any Error>, plugin: Bool
+    ) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        Task {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if plugin { await editor.importPlugin(at: url) }
+            else { await editor.importSkill(at: url) }
         }
     }
 

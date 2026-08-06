@@ -66,7 +66,7 @@ function handle(record) {
       "protocol", "version", "type", "session_id", "request_id",
       "conversation_id", "turn_id", "generation", "provider_profile",
       "context", "user_text", "tools",
-    ], ["voice_history_attachment"]);
+    ], ["voice_history_attachment", "portable_skills", "portable_skills_omitted"]);
     if (active) throw new Error("operation_active");
     active = {
       requestId: record.request_id,

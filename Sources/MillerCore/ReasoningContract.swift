@@ -21,6 +21,7 @@ public struct ReasoningRequest: Sendable, Equatable {
     public let userText: String
     public let capabilityCatalog: CapabilityCatalogSnapshot
     public let voiceHistoryAttachment: VoiceHistoryAttachment?
+    public let portableSkillAttachment: PortableSkillAttachment?
 
     public init(
         conversationID: ConversationID,
@@ -29,7 +30,8 @@ public struct ReasoningRequest: Sendable, Equatable {
         context: [ReasoningMessage],
         userText: String,
         capabilityCatalog: CapabilityCatalogSnapshot = .empty,
-        voiceHistoryAttachment: VoiceHistoryAttachment? = nil
+        voiceHistoryAttachment: VoiceHistoryAttachment? = nil,
+        portableSkillAttachment: PortableSkillAttachment? = nil
     ) {
         self.conversationID = conversationID
         self.turnID = turnID
@@ -38,11 +40,13 @@ public struct ReasoningRequest: Sendable, Equatable {
         self.userText = userText
         self.capabilityCatalog = capabilityCatalog
         self.voiceHistoryAttachment = voiceHistoryAttachment
+        self.portableSkillAttachment = portableSkillAttachment
     }
 }
 
 public enum ReasoningStatus: String, Sendable, Equatable, Codable {
     case toolsUnavailable = "tools_unavailable"
+    case portableSkillsOmitted = "portable_skills_omitted"
 }
 
 public enum ReasoningEvent: Sendable, Equatable {

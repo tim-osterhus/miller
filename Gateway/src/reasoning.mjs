@@ -82,6 +82,15 @@ export class ReasoningOperation {
         ],
         tools: this.record.tools,
       };
+      if (this.record.portable_skills?.length) {
+        context.messages.unshift({
+          role: "user",
+          content: portableSkillInstructions(
+            this.record.portable_skills,
+            this.record.portable_skills_omitted ?? 0,
+          ),
+        });
+      }
       let ordinal = 0;
       let usage;
       let toolsAvailable = context.tools.length > 0;
@@ -290,6 +299,18 @@ export class ReasoningOperation {
       this.terminal = true;
     }
   }
+}
+
+function portableSkillInstructions(skills, omitted) {
+  const sections = skills.map((skill) => [
+    `Portable skill [${skill.id}] — ${skill.name}`,
+    skill.description,
+    skill.markdown,
+  ].join("\n"));
+  if (omitted > 0) {
+    sections.push(`${omitted} enabled skill(s) omitted to stay within the 128 KiB limit.`);
+  }
+  return sections.join("\n\n");
 }
 
 function toolResultMessage(call, result) {

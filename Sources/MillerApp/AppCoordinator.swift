@@ -466,8 +466,11 @@ final class AppPresentationModel: ObservableObject {
         if voiceState.isActive || voiceState == .stopped || voiceState == .closed {
             return voiceStatusText
         }
-        if activeTurnID != nil, reasoningStatus == .toolsUnavailable {
-            return "Tools unavailable — continuing without them"
+        if activeTurnID != nil, let reasoningStatus {
+            return switch reasoningStatus {
+            case .toolsUnavailable: "Tools unavailable — continuing without them"
+            case .portableSkillsOmitted: "Some enabled skills were omitted to stay within limits"
+            }
         }
         return switch presentationState {
         case .idle: "Idle"
@@ -2435,6 +2438,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 bridgeConfiguration: {
                     try capabilityBridgeBox?.configuration()
                 },
+                portableSkillAttachment: { [capabilityController] providerProfileID in
+                    try await capabilityController.selectedSkillAttachment(
+                        providerProfileID: providerProfileID
+                    )
+                },
                 makePeer: { [livePeerHost] in
                     try await MainActor.run { try livePeerHost.makePeer() }
                 },
@@ -2614,6 +2622,23 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     return try await capabilityController.settingsSnapshot(
                         providerNames: try await providerNames()
                     )
+                },
+                importSkill: { [capabilityController] url in
+                    try await capabilityController.importPortableSkillFromSettings(at: url)
+                },
+                importPlugin: { [capabilityController] url in
+                    try await capabilityController.importPluginFromSettings(at: url)
+                },
+                setSkillEnabled: { [capabilityController] enabled, skillID, providerID in
+                    try await capabilityController.setPortableSkillEnabledFromSettings(
+                        enabled, skillID: skillID, providerProfileID: providerID
+                    )
+                },
+                deleteSkill: { [capabilityController] id in
+                    try await capabilityController.deletePortableSkillFromSettings(id: id)
+                },
+                deletePlugin: { [capabilityController] id in
+                    try await capabilityController.deletePluginFromSettings(id: id)
                 }
             )
         )

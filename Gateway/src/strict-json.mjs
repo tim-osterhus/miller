@@ -159,7 +159,7 @@ const protocolSchemas = {
   "auth.completed": { required: { operation_id: "uuid", generation: "nonnegative", credential_ref: "uuid" } },
   "auth.stopped": { required: { operation_id: "uuid", generation: "nonnegative" } },
   "auth.failed": { required: { operation_id: "uuid", generation: "nonnegative", error_code: "string" } },
-  "reasoning.start": { required: { conversation_id: "uuid", turn_id: "uuid", generation: "nonnegative", provider_profile: "profile", context: "context", user_text: "user-text", tools: "array" }, optional: { voice_history_attachment: "voice-history" } },
+  "reasoning.start": { required: { conversation_id: "uuid", turn_id: "uuid", generation: "nonnegative", provider_profile: "profile", context: "context", user_text: "user-text", tools: "array" }, optional: { voice_history_attachment: "voice-history", portable_skills: "portable-skills", portable_skills_omitted: "nonnegative" } },
   "reasoning.cancel": { required: { turn_id: "uuid", target_generation: "nonnegative" } },
   "reasoning.accepted": { required: { turn_id: "uuid", generation: "nonnegative" } },
   "reasoning.text_delta": { required: { turn_id: "uuid", generation: "nonnegative", ordinal: "nonnegative", text: "text" } },
@@ -294,11 +294,36 @@ function validateField(value, kind) {
     case "voice-history":
       if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 32 * 1024) throw new Error("invalid_field");
       return;
+    case "portable-skills":
+      validatePortableSkills(value);
+      return;
     case "text":
       if (typeof value !== "string" || Array.from(value).length > 8_192) throw new Error("invalid_field");
       return;
     default:
       throw new Error("unclassified_constraint");
+  }
+}
+
+function validatePortableSkills(value) {
+  if (!Array.isArray(value) || value.length > 128) throw new Error("invalid_field");
+  const ids = new Set();
+  let bytes = 0;
+  for (const skill of value) {
+    requireClosedObject(skill, ["id", "name", "description", "markdown"]);
+    if (typeof skill.id !== "string" || !skill.id || Buffer.byteLength(skill.id) > 96
+      || !/^[A-Za-z0-9._-]+$/.test(skill.id)
+      || ids.has(skill.id) || typeof skill.name !== "string" || !skill.name
+      || Buffer.byteLength(skill.name) > 256
+      || typeof skill.description !== "string" || !skill.description
+      || Buffer.byteLength(skill.description) > 1024
+      || typeof skill.markdown !== "string" || Buffer.byteLength(skill.markdown) > 64 * 1024) {
+      throw new Error("invalid_field");
+    }
+    ids.add(skill.id);
+    bytes += Buffer.byteLength(skill.id) + Buffer.byteLength(skill.name)
+      + Buffer.byteLength(skill.description) + Buffer.byteLength(skill.markdown);
+    if (bytes > 128 * 1024) throw new Error("invalid_field");
   }
 }
 

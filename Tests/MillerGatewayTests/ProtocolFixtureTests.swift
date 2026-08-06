@@ -437,7 +437,8 @@ struct ProtocolFixtureTests {
         into inventory: inout Set<String>
     ) throws {
         let known = Set([
-            "type", "const", "enum", "pattern", "minimum", "maxLength",
+            "type", "const", "enum", "pattern", "minimum", "minLength",
+            "maxLength", "maxItems",
             "properties", "required", "items", "contains", "additionalProperties",
             "unevaluatedProperties",
         ])
@@ -641,6 +642,25 @@ struct ProtocolFixtureTests {
         exercised: inout Set<String>
     ) throws {
         let path = field
+        if let maximum = constraint["maxItems"] as? NSNumber {
+            guard let item = (fixture[field] as? [Any])?.first as? [String: Any]
+            else {
+                throw GatewayProtocolError.invalidJSON
+            }
+            let oversized = (0...maximum.intValue).map { index in
+                var copy = item
+                if copy["id"] != nil {
+                    copy["id"] = "skill-\(index)"
+                }
+                return copy
+            }
+            expectDecodeFailure("\(recordType).\(field) honors maxItems", object: replacing(
+                field,
+                with: oversized,
+                in: fixture
+            ))
+            exercised.insert(occurrence(recordType, path, "maxItems"))
+        }
         if let rawContains = constraint["contains"] as? [String: Any] {
             let contains = try resolvedSchema(rawContains, definitions: definitions)
             let matching = try validValue(for: contains, definitions: definitions)
@@ -790,9 +810,15 @@ struct ProtocolFixtureTests {
             }
             if nestedConstraint["pattern"] != nil {
                 invalid = validObject
-                invalid[nestedField] = "not-a-uuid"
-                expectDecodeFailure("\(recordType).\(field).\(nestedField) UUID matches", object: replaceObject(invalid))
+                invalid[nestedField] = "invalid/value"
+                expectDecodeFailure("\(recordType).\(field).\(nestedField) pattern matches", object: replaceObject(invalid))
                 exercised.insert(occurrence(recordType, nestedPath, "pattern"))
+            }
+            if let minimum = nestedConstraint["minLength"] as? NSNumber {
+                invalid = validObject
+                invalid[nestedField] = String(repeating: "x", count: max(0, minimum.intValue - 1))
+                expectDecodeFailure("\(recordType).\(nestedPath) minLength matches", object: replaceObject(invalid))
+                exercised.insert(occurrence(recordType, nestedPath, "minLength"))
             }
             if let minimum = nestedConstraint["minimum"] as? NSNumber {
                 var candidate = validObject

@@ -340,18 +340,30 @@ struct CapabilitySettingsSnapshot: Equatable, Sendable {
     let codexApps: [CodexAccountAppSettings]
     let servers: [MCPServerSettingsSnapshot]
     let providerNames: [UUID: String]
+    let plugins: [PluginPackageRecord]
+    let skills: [PortableSkillSettingsSnapshot]
 
     init(
         codexApps: [CodexAccountAppSettings] = [],
         servers: [MCPServerSettingsSnapshot] = [],
-        providerNames: [UUID: String] = [:]
+        providerNames: [UUID: String] = [:],
+        plugins: [PluginPackageRecord] = [],
+        skills: [PortableSkillSettingsSnapshot] = []
     ) {
         self.codexApps = codexApps
         self.servers = servers
         self.providerNames = providerNames
+        self.plugins = plugins
+        self.skills = skills
     }
 
     static let empty = Self()
+}
+
+struct PortableSkillSettingsSnapshot: Identifiable, Equatable, Sendable {
+    let record: PortableSkillRecord
+    let enabledProviderProfileIDs: Set<UUID>
+    var id: String { record.id }
 }
 
 struct MCPServerEditorDependencies: Sendable {
@@ -363,6 +375,11 @@ struct MCPServerEditorDependencies: Sendable {
     let setServerPolicy: @Sendable (String, CapabilityPolicy) async throws -> Void
     let setToolPolicy: @Sendable (CapabilityID, CapabilityPolicy?) async throws -> Void
     let refresh: @Sendable () async throws -> CapabilitySettingsSnapshot
+    let importSkill: @Sendable (URL) async throws -> Void
+    let importPlugin: @Sendable (URL) async throws -> Void
+    let setSkillEnabled: @Sendable (Bool, String, UUID) async throws -> Void
+    let deleteSkill: @Sendable (String) async throws -> Void
+    let deletePlugin: @Sendable (String) async throws -> Void
 
     init(
         load: @escaping @Sendable () async throws -> CapabilitySettingsSnapshot,
@@ -372,7 +389,12 @@ struct MCPServerEditorDependencies: Sendable {
         setProviderEnabled: @escaping @Sendable (Bool, String, UUID) async throws -> Void,
         setServerPolicy: @escaping @Sendable (String, CapabilityPolicy) async throws -> Void,
         setToolPolicy: @escaping @Sendable (CapabilityID, CapabilityPolicy?) async throws -> Void,
-        refresh: @escaping @Sendable () async throws -> CapabilitySettingsSnapshot
+        refresh: @escaping @Sendable () async throws -> CapabilitySettingsSnapshot,
+        importSkill: @escaping @Sendable (URL) async throws -> Void = { _ in },
+        importPlugin: @escaping @Sendable (URL) async throws -> Void = { _ in },
+        setSkillEnabled: @escaping @Sendable (Bool, String, UUID) async throws -> Void = { _, _, _ in },
+        deleteSkill: @escaping @Sendable (String) async throws -> Void = { _ in },
+        deletePlugin: @escaping @Sendable (String) async throws -> Void = { _ in }
     ) {
         self.load = load
         self.save = save
@@ -382,13 +404,21 @@ struct MCPServerEditorDependencies: Sendable {
         self.setServerPolicy = setServerPolicy
         self.setToolPolicy = setToolPolicy
         self.refresh = refresh
+        self.importSkill = importSkill
+        self.importPlugin = importPlugin
+        self.setSkillEnabled = setSkillEnabled
+        self.deleteSkill = deleteSkill
+        self.deletePlugin = deletePlugin
     }
 
     static let unavailable = Self(
         load: { .empty }, save: { _ in }, remove: { _ in },
         testConnection: { _ in 0 },
         setProviderEnabled: { _, _, _ in }, setServerPolicy: { _, _ in },
-        setToolPolicy: { _, _ in }, refresh: { .empty }
+        setToolPolicy: { _, _ in }, refresh: { .empty },
+        importSkill: { _ in }, importPlugin: { _ in },
+        setSkillEnabled: { _, _, _ in }, deleteSkill: { _ in },
+        deletePlugin: { _ in }
     )
 }
 
@@ -505,6 +535,57 @@ final class MCPServerEditorModel: ObservableObject {
             let refreshed = try await dependencies.refresh()
             guard isCurrent(generation) else { return }
             snapshot = refreshed
+        }
+    }
+
+    func importSkill(at url: URL) async {
+        await perform("Skill could not be imported") { generation in
+            try await dependencies.importSkill(url)
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+            status = "Skill imported — review provider access before enabling"
+        }
+    }
+
+    func importPlugin(at url: URL) async {
+        await perform("Plugin bundle could not be imported") { generation in
+            try await dependencies.importPlugin(url)
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+            status = "Plugin imported — review every component before enabling"
+        }
+    }
+
+    func setSkillEnabled(
+        _ enabled: Bool, skillID: String, providerID: UUID
+    ) async {
+        await perform("Skill setting could not be saved") { generation in
+            try await dependencies.setSkillEnabled(enabled, skillID, providerID)
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+        }
+    }
+
+    func deleteSkill(id: String) async {
+        await perform("Skill could not be removed") { generation in
+            try await dependencies.deleteSkill(id)
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+            status = "Skill removed"
+        }
+    }
+
+    func deletePlugin(id: String) async {
+        await perform("Plugin could not be removed") { generation in
+            try await dependencies.deletePlugin(id)
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+            status = "Plugin removed"
         }
     }
 

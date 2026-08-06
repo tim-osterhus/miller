@@ -4,6 +4,31 @@ import Testing
 
 @Suite
 struct CodexTypedProtocolTests {
+    @Test
+    func registersPortableSkillRootAndAttachesSkillInput() throws {
+        let codec = CodexTypedProtocol()
+        let roots = try object(codec.skillsExtraRootsSetRequest(
+            id: "request:skills-roots", roots: ["/private/runtime"]
+        ))
+        #expect(roots["method"] as? String == "skills/extraRoots/set")
+        #expect((roots["params"] as? [String: Any])?["extraRoots"] as? [String]
+            == ["/private/runtime"])
+        let list = try object(codec.skillsListRequest(
+            id: "request:skills-list", cwd: "/private/runtime"
+        ))
+        #expect(list["method"] as? String == "skills/list")
+
+        let turn = try object(codec.turnStartRequest(
+            id: "request:turn-start", threadID: "thread", cwd: "/private/runtime",
+            context: [], userText: "hello",
+            skills: [.init(name: "Example", path: "/private/runtime/skills/example/SKILL.md")]
+        ))
+        let params = try #require(turn["params"] as? [String: Any])
+        let input = try #require(params["input"] as? [[String: Any]])
+        #expect(input.count == 2)
+        #expect(input[1]["type"] as? String == "skill")
+        #expect(input[1]["name"] as? String == "Example")
+    }
     private let codec = CodexTypedProtocol(
         maximumIdentifierBytes: 64,
         maximumTextBytes: 128,

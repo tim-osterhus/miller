@@ -102,6 +102,59 @@ test("reasoning failures are closed and empty tool schemas are valid objects", (
   });
 });
 
+test("portable skill records are closed, unique, and byte bounded", () => {
+  const start = {
+    protocol: "miller.gateway", version: 1, type: "reasoning.start",
+    session_id: crypto.randomUUID(), request_id: crypto.randomUUID(),
+    conversation_id: crypto.randomUUID(), turn_id: crypto.randomUUID(),
+    generation: 1,
+    provider_profile: {
+      kind: "fake", model: "fake", credential_ref: crypto.randomUUID(),
+    },
+    context: [], user_text: "fixture", tools: [],
+    portable_skills: [{
+      id: "weather", name: "Weather", description: "Forecast guidance",
+      markdown: "Use trusted forecasts.",
+    }],
+    portable_skills_omitted: 1,
+  };
+  validateGatewayRecord(start);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [{ ...start.portable_skills[0], source_path: "/private/source" }],
+  }), /unknown_field/);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [{ ...start.portable_skills[0], markdown: "x".repeat(64 * 1024 + 1) }],
+  }), /invalid_(?:record|field)/);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [start.portable_skills[0], start.portable_skills[0]],
+  }), /invalid_(?:record|field)/);
+});
+
+test("fake helper rejects unknown and oversized portable skill input", async () => {
+  const base = {
+    protocol: "miller.gateway", version: 1, type: "reasoning.start",
+    session_id: "__SESSION_ID__", request_id: crypto.randomUUID(),
+    conversation_id: crypto.randomUUID(), turn_id: crypto.randomUUID(),
+    generation: 1,
+    provider_profile: {
+      kind: "fake", model: "fake", credential_ref: crypto.randomUUID(),
+    },
+    context: [], user_text: "fixture", tools: [],
+  };
+  for (const portable_skills of [
+    [{ id: "one", name: "One", description: "One", markdown: "One", unknown: true }],
+    [{ id: "one", name: "One", description: "One", markdown: "x".repeat(64 * 1024 + 1) }],
+  ]) {
+    const result = await sendTemplate(`${JSON.stringify({ ...base, portable_skills })}\n`);
+    assert.equal(result.code, 70);
+    assert.deepEqual(result.records.map(({ type }) => type), ["gateway.ready"]);
+    assert.equal(result.stderr, "fake_input_invalid\n");
+  }
+});
+
 test("production frame decoder rejects incomplete EOF and oversized input", () => {
   const incomplete = new FrameDecoder();
   incomplete.push(Buffer.from('{"protocol":"miller.gateway"'));
@@ -453,7 +506,7 @@ function sendTemplate(template) {
   });
 }
 
-function exerciseQualificationHelper({ cancel }) {
+function exerciseQualificationHelper({ cancel, portableSkills = undefined }) {
   return new Promise((resolve, reject) => {
     const child = spawn(node, [helper, "qualification"], {
       cwd: fileURLToPath(gatewayRoot),
@@ -510,6 +563,10 @@ function exerciseQualificationHelper({ cancel }) {
             context: [],
             user_text: "qualification",
             tools: [],
+            ...(portableSkills ? {
+              portable_skills: portableSkills,
+              portable_skills_omitted: 0,
+            } : {}),
           })}\n`);
         } else if (
           cancel
@@ -540,6 +597,34 @@ function exerciseQualificationHelper({ cancel }) {
     });
   });
 }
+
+test("Pi reasoning receives only the supplied portable skill text", async () => {
+  const record = reasoningRecord({
+    portable_skills: [{
+      id: "weather", name: "Weather", description: "Forecast guidance",
+      markdown: "Treat /private/not-readable as plain instruction text.",
+    }],
+    portable_skills_omitted: 2,
+  });
+  const emitted = [];
+  let observed;
+  await new ReasoningOperation(
+    record,
+    { kind: "api_key", key: "synthetic" },
+    (event) => emitted.push(event),
+    () => assert.fail("unexpected diagnostic"),
+    (_profile, _credential, context) => {
+      observed = context;
+      return events([{ type: "done", message: { content: [] } }]);
+    },
+  ).run();
+
+  assert.equal(observed.messages[0].role, "user");
+  assert.match(observed.messages[0].content, /Portable skill \[weather\]/);
+  assert.match(observed.messages[0].content, /2 enabled skill\(s\) omitted/);
+  assert.match(observed.messages[0].content, /\/private\/not-readable/);
+  assert.equal(emitted.at(-1).type, "reasoning.completed");
+});
 
 test("tool records are closed, identity-bound, and bounded", () => {
   const identity = {

@@ -39,7 +39,7 @@ if (mode === "flood-output") {
 const lines = readline.createInterface({ input: process.stdin });
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const notify = (method, params) => send({ method, params, emittedAtMs: 1 });
-if (mode === "record-stdin") {
+if (mode === "record-stdin" || mode === "portable-skill-live") {
   lines.on("line", (line) => fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 }));
 }
 let threadId = "thread-1";
@@ -895,6 +895,12 @@ lines.on("line", (line) => {
       });
       return;
     }
+    if (request.method === "skills/extraRoots/set") {
+      if (!Array.isArray(request.params?.extraRoots) || request.params.extraRoots.length !== 1
+          || !request.params.extraRoots[0].startsWith("/")) process.exit(56);
+      send({ id: request.id, result: {} });
+      return;
+    }
     if (["app/list", "mcpServerStatus/list", "skills/list"].includes(request.method)) {
       if (mode === "typed-probe-missing" && request.method === "app/list") {
         send({ id: request.id, error: { code: -32601, message: "method not found" } });
@@ -964,6 +970,19 @@ lines.on("line", (line) => {
     if (mode !== "thread-response-before-login-notifications" &&
         mode !== "login-notifications-before-response" &&
         mode !== "wait-after-thread-created") emitAccountNotifications();
+    return;
+  }
+  if (request.method === "skills/extraRoots/set") {
+    const roots = request.params?.extraRoots;
+    if (!Array.isArray(roots) || roots.length !== 1 || !roots[0].startsWith("/") ||
+        !fs.existsSync(`${roots[0]}/skills/weather/SKILL.md`)) process.exit(57);
+    send({ id: request.id, result: {} });
+    return;
+  }
+  if (request.method === "skills/list") {
+    if (!Array.isArray(request.params?.cwds) || request.params.cwds.length !== 1 ||
+        request.params?.forceReload !== true) process.exit(58);
+    send({ id: request.id, result: { data: [], nextCursor: null } });
     return;
   }
   if (request.method === "thread/start") {

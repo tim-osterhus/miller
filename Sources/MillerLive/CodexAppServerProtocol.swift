@@ -21,7 +21,8 @@ public enum RealtimeConversationVersion: String, Equatable, Sendable {
 public enum CodexRealtimePrompt {
     public static func make(
         now: Date = Date(),
-        timeZone: TimeZone = .current
+        timeZone: TimeZone = .current,
+        additionalInstructions: String? = nil
     ) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -29,12 +30,16 @@ public enum CodexRealtimePrompt {
         formatter.timeZone = timeZone
         formatter.dateFormat = "EEEE, MMMM d, yyyy 'at' h:mm a zzz"
         let localDateTime = formatter.string(from: now)
-        return """
+        let base = """
         You are Miller, a local voice assistant. The current local date and time is \
         \(localDateTime) (\(timeZone.identifier)). Use this supplied date and time when \
         answering questions about the current date or time. Do not invent or substitute a \
         different current date or time. Respond naturally and concisely.
         """
+        guard let additionalInstructions, !additionalInstructions.isEmpty else {
+            return base
+        }
+        return base + "\n\nEnabled portable skills for this session:\n" + additionalInstructions
     }
 }
 

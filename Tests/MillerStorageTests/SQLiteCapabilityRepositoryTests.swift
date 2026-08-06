@@ -873,6 +873,43 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func pluginSnapshotCollisionRejectsWithoutPartialRows() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let now = Date(timeIntervalSince1970: 100)
+        let existing = PluginPackageRecord(
+            id: "plugin.example", version: "1.0.0",
+            sourceHash: String(repeating: "a", count: 64),
+            supportedComponentSummary: "Existing", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        try await repository.savePlugin(existing)
+        let importedSkill = PortableSkillRecord(
+            id: "skill-new", pluginID: existing.id, name: "New",
+            description: "New skill", markdownSnapshot: "# New",
+            sourceHash: String(repeating: "b", count: 64), enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let importedServer = CapabilityServerRecord(
+            id: "plugin-example-notes", displayName: "Notes",
+            transport: .stdio, command: "/usr/bin/true", endpoint: nil,
+            arguments: [], enabled: false, defaultPolicy: .askBeforeChanges,
+            staleState: .stale, createdAt: now, updatedAt: now
+        )
+
+        await #expect(throws: CapabilityStorageError.invalidRecord) {
+            try await repository.importPluginSnapshot(
+                plugin: existing, skills: [importedSkill],
+                disabledServers: [importedServer]
+            )
+        }
+
+        #expect(try await repository.plugins() == [existing])
+        #expect(try await repository.skills().isEmpty)
+        #expect(try await repository.servers().isEmpty)
+    }
+
+    @Test
     func injectedStorageFailureDoesNotPartiallyReconcile() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)

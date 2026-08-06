@@ -435,6 +435,37 @@ struct CapabilityModelsTests {
             )
         }
     }
+
+    @Test
+    func portableSkillInstructionsStayWholeAndReportAdditionalOmissions() throws {
+        let skills = [
+            PortableSkillSnapshot(
+                id: "one", pluginID: nil, name: "One", description: "First",
+                markdown: String(repeating: "a", count: 64), sourceHash: "one"
+            ),
+            PortableSkillSnapshot(
+                id: "two", pluginID: nil, name: "Two", description: "Second",
+                markdown: String(repeating: "b", count: 64), sourceHash: "two"
+            ),
+        ]
+        let attachment = try PortableSkillAttachment(skills: skills, omittedCount: 1)
+
+        let text = attachment.instructionText(maximumBytes: 180)
+
+        #expect(text.contains("Portable skill [one]"))
+        #expect(!text.contains("Portable skill [two]"))
+        #expect(text.contains("2 enabled skill(s) omitted"))
+        #expect(text.utf8.count <= 180)
+
+        #expect(throws: CapabilityContractError.invalidPortableSkill) {
+            _ = try PortableSkillAttachment(skills: [
+                PortableSkillSnapshot(
+                    id: "../escape", pluginID: nil, name: "Bad", description: "Bad",
+                    markdown: "Bad", sourceHash: "bad"
+                ),
+            ])
+        }
+    }
 }
 
 private func idForCodex() throws -> CapabilityID {

@@ -1231,6 +1231,10 @@ public actor SQLiteCapabilityRepository {
         guard skill.markdownSnapshot.utf8.count <= 64 * 1_024 else {
             throw CapabilityStorageError.skillMarkdownTooLarge
         }
+        let existing = try skills()
+        guard existing.contains(where: { $0.id == skill.id })
+                || existing.count < 128
+        else { throw CapabilityStorageError.invalidRecord }
         try preflightWrite()
         try database.transaction {
             try database.execute(
@@ -1257,6 +1261,92 @@ public actor SQLiteCapabilityRepository {
                     .text(Self.timestamp(skill.updatedAt)),
                 ]
             )
+        }
+    }
+
+    public func importPluginSnapshot(
+        plugin: PluginPackageRecord,
+        skills importedSkills: [PortableSkillRecord],
+        disabledServers: [CapabilityServerRecord]
+    ) throws {
+        guard plugin.id.utf8.count <= 96, !plugin.id.isEmpty,
+              plugin.sourceHash.utf8.count == 64,
+              plugin.supportedComponentSummary.utf8.count <= 4 * 1_024,
+              importedSkills.count <= 16, disabledServers.count <= 16,
+              Set(importedSkills.map(\.id)).count == importedSkills.count,
+              Set(disabledServers.map(\.id)).count == disabledServers.count,
+              importedSkills.allSatisfy({
+                  $0.pluginID == plugin.id && !$0.enabled
+                      && $0.markdownSnapshot.utf8.count <= 64 * 1_024
+                      && !$0.name.isEmpty && !$0.description.isEmpty
+                      && $0.sourceHash.utf8.count == 64
+              }),
+              disabledServers.allSatisfy({ !$0.enabled })
+        else { throw CapabilityStorageError.invalidRecord }
+        let existingIDs = Set(try skills().map(\.id))
+        let importedIDs = Set(importedSkills.map(\.id))
+        let existingServerIDs = Set(try servers().map(\.id))
+        let existingPluginIDs = Set(try plugins().map(\.id))
+        guard !existingPluginIDs.contains(plugin.id),
+              existingIDs.isDisjoint(with: importedIDs),
+              existingServerIDs.isDisjoint(with: disabledServers.map(\.id)),
+              existingIDs.count + importedIDs.count <= 128
+        else {
+            throw CapabilityStorageError.invalidRecord
+        }
+        let serverArguments = try disabledServers.map(Self.validate(server:))
+        try preflightWrite()
+        try database.transaction {
+            try database.execute(
+                """
+                INSERT INTO plugin_packages
+                    (id, version, source_hash, supported_component_summary,
+                     enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, ?, ?)
+                """,
+                bindings: [
+                    .text(plugin.id), Self.optional(plugin.version),
+                    .text(plugin.sourceHash), .text(plugin.supportedComponentSummary),
+                    .text(Self.timestamp(plugin.createdAt)),
+                    .text(Self.timestamp(plugin.updatedAt)),
+                ]
+            )
+            for skill in importedSkills {
+                try database.execute(
+                    """
+                    INSERT INTO portable_skills
+                        (id, plugin_id, name, description, markdown_snapshot,
+                         source_hash, enabled, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    bindings: [
+                        .text(skill.id), .text(plugin.id), .text(skill.name),
+                        .text(skill.description), .text(skill.markdownSnapshot),
+                        .text(skill.sourceHash), .text(Self.timestamp(skill.createdAt)),
+                        .text(Self.timestamp(skill.updatedAt)),
+                    ]
+                )
+            }
+            for (index, server) in disabledServers.enumerated() {
+                try database.execute(
+                    """
+                    INSERT INTO capability_servers
+                        (id, display_name, transport, command, endpoint,
+                         arguments_json, enabled, default_policy, stale_state,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    """,
+                    bindings: [
+                        .text(server.id), .text(server.displayName),
+                        .text(server.transport.rawValue), Self.optional(server.command),
+                        Self.optional(server.endpoint), .text(serverArguments[index]),
+                        .text(server.defaultPolicy.rawValue),
+                        .text(server.staleState.rawValue),
+                        .text(Self.timestamp(server.createdAt)),
+                        .text(Self.timestamp(server.updatedAt)),
+                    ]
+                )
+            }
         }
     }
 

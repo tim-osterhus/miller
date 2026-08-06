@@ -203,6 +203,18 @@ struct CodexAppServerProtocolTests {
     }
 
     @Test
+    func realtimePromptAppendsOnlyExplicitBoundedSkillInstructions() throws {
+        let prompt = CodexRealtimePrompt.make(
+            now: Date(timeIntervalSince1970: 0),
+            timeZone: TimeZone(secondsFromGMT: 0)!,
+            additionalInstructions: "Portable skill [weather] — Weather\nUse trusted forecasts."
+        )
+
+        #expect(prompt.contains("Portable skill [weather]"))
+        #expect(prompt.contains("Use trusted forecasts."))
+    }
+
+    @Test
     func rejectsWebRTCOffersMissingEssentialBrowserTransportShape() throws {
         let codec = CodexAppServerProtocol(
             maximumFrameBytes: 2_048,

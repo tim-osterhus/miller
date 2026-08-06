@@ -95,6 +95,53 @@ a=max-message-size:262144\r
 @Suite(.serialized)
 struct CodexAppServerClientTests {
     @Test
+    func liveSessionRegistersPortableSkillRootAndUsesBoundedInstructions() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/live-skills-\(UUID().uuidString.lowercased()).jsonl"
+        )
+        let root = repository.appendingPathComponent(
+            ".artifacts/live-skills-root-\(UUID().uuidString.lowercased())"
+        )
+        let skillFile = root.appendingPathComponent("skills/weather/SKILL.md")
+        try FileManager.default.createDirectory(
+            at: skillFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("---\nname: Weather\ndescription: Forecasts\n---\nUse forecasts.".utf8)
+            .write(to: skillFile)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+        }
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "portable-skill-live", extraArguments: [marker.path]
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            portableSkillRoot: root.path,
+            portableSkillInstructions: "Portable skill [weather] — Weather\nUse forecasts."
+        )
+
+        let events = try await client.runUntilClosed(
+            identity: identity, credential: credential, timeout: .seconds(2)
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+
+        #expect(events.last == .closed(
+            threadID: identity.threadID, reason: "synthetic-complete"
+        ))
+        let requests = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] }
+        #expect(requests.contains { $0["method"] as? String == "skills/extraRoots/set" })
+        #expect(requests.contains { $0["method"] as? String == "skills/list" })
+        let start = try #require(requests.first {
+            $0["method"] as? String == "thread/realtime/start"
+        })
+        let params = try #require(start["params"] as? [String: Any])
+        #expect((params["prompt"] as? String)?.contains("Portable skill [weather]") == true)
+    }
+
+    @Test
     func inventoriesPagedCodexAppsAndMCPWithoutDuplicatingTheMillerBridge() async throws {
         let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
         let existing = try CapabilityDescriptor(
