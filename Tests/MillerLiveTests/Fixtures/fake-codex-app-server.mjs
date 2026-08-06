@@ -101,7 +101,23 @@ function typedThreadStartResult(id, cwd) {
 
 const answerSDP = "v=0\r\ns=-\r\n";
 
-function connectorApprovalParams(approvalThread, approvalTurn, itemId) {
+function connectorApprovalParams(approvalThread, approvalTurn, itemId, variant = 2) {
+  const options = [
+    { description: "Run the tool and continue.", label: "Allow" },
+  ];
+  if (variant >= 3) {
+    options.push({
+      description: "Remember for this session.",
+      label: "Allow for this session",
+    });
+  }
+  if (variant >= 4) {
+    options.push({
+      description: "Remember permanently.",
+      label: "Allow and don't ask me again",
+    });
+  }
+  options.push({ description: "Cancel this tool call.", label: "Cancel" });
   return {
     itemId,
     questions: [{
@@ -109,12 +125,7 @@ function connectorApprovalParams(approvalThread, approvalTurn, itemId) {
       id: `mcp_tool_call_approval_${itemId}`,
       isOther: false,
       isSecret: false,
-      options: [
-        { description: "Run the tool and continue.", label: "Approve Once" },
-        { description: "Remember for this session.", label: "Approve this Session" },
-        { description: "Decline and continue.", label: "Deny" },
-        { description: "Cancel this tool call.", label: "Cancel" },
-      ],
+      options,
       question: "The connector wants to modify data. Allow this action?",
     }],
     threadId: approvalThread,
@@ -183,7 +194,12 @@ function emitLifecycle() {
       id: "realtime-approval-1",
       method: "item/tool/requestUserInput",
       params: connectorApprovalParams(
-        emittedThread, "turn-approval-1", "connector-call-1"
+        emittedThread,
+        "turn-approval-1",
+        "connector-call-1",
+        mode === "realtime-provider-approval" ? 4
+          : mode === "realtime-provider-approval-decline" ? 3
+            : 2
       ),
     });
     return;
@@ -298,8 +314,8 @@ lines.on("line", (line) => {
        mode === "realtime-provider-approval-replay") &&
       request.id === "realtime-approval-1") {
     const expected = mode === "realtime-provider-approval-decline"
-      ? "Deny"
-      : "Approve Once";
+      ? "__codex_mcp_decline__"
+      : "Allow";
     if (request.result?.answers?.["mcp_tool_call_approval_connector-call-1"]
         ?.answers?.[0] !== expected) process.exit(51);
     connectorApprovalResponses += 1;
@@ -309,7 +325,7 @@ lines.on("line", (line) => {
         id: "realtime-approval-1",
         method: "item/tool/requestUserInput",
         params: connectorApprovalParams(
-          threadId, "turn-approval-1", "connector-call-1"
+          threadId, "turn-approval-1", "connector-call-1", 2
         ),
       });
       return;
@@ -558,7 +574,10 @@ lines.on("line", (line) => {
               ? "thread-other"
               : threadId,
             typedTurnId,
-            "connector-call-1"
+            "connector-call-1",
+            mode === "typed-provider-approval-decline" ? 3
+              : mode === "typed-provider-approval-replay" ? 4
+                : 2
           ),
         });
         return;
@@ -703,8 +722,8 @@ lines.on("line", (line) => {
          mode === "typed-provider-approval-replay") &&
         request.id === "tool-approval-request-1") {
       const expected = mode === "typed-provider-approval-decline"
-        ? "Deny"
-        : "Approve Once";
+        ? "__codex_mcp_decline__"
+        : "Allow";
       if (request.result?.answers?.["mcp_tool_call_approval_connector-call-1"]
           ?.answers?.[0] !== expected) process.exit(47);
       connectorApprovalResponses += 1;
@@ -714,7 +733,7 @@ lines.on("line", (line) => {
           id: "tool-approval-request-1",
           method: "item/tool/requestUserInput",
           params: connectorApprovalParams(
-            threadId, typedTurnId, "connector-call-1"
+            threadId, typedTurnId, "connector-call-1", 4
           ),
         });
         return;

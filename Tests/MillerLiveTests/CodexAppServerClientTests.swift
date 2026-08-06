@@ -223,7 +223,7 @@ struct CodexAppServerClientTests {
     }
 
     @Test
-    func connectorApprovalDeclineUsesDenyWithoutSessionTrust() async throws {
+    func connectorApprovalDeclineUsesInternalDeclineWithoutSessionTrust() async throws {
         for (mode, realtime) in [
             ("typed-provider-approval-decline", false),
             ("realtime-provider-approval-decline", true),

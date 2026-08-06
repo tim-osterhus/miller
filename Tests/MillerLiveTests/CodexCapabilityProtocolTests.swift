@@ -531,60 +531,68 @@ struct CodexCapabilityProtocolTests {
     func connectorToolApprovalUsesRealBoundedAnswersShape() throws {
         let codec = CodexCapabilityProtocol()
         let questionID = "mcp_tool_call_approval_call-717"
-        let decoded = try codec.decodeActivity(frame([
-            "id": 110,
-            "method": "item/tool/requestUserInput",
-            "params": [
-                "itemId": "call-717",
-                "questions": [[
-                    "header": "Approve app tool call?",
-                    "id": questionID,
-                    "isOther": false,
-                    "isSecret": false,
-                    "options": [
-                        ["description": "Run the tool and continue.", "label": "Approve Once"],
-                        ["description": "Remember for this session.", "label": "Approve this Session"],
-                        ["description": "Decline and continue.", "label": "Deny"],
-                        ["description": "Cancel this tool call.", "label": "Cancel"],
-                    ],
-                    "question": "The connector wants to modify data. Allow this action?",
-                ] as [String: Any]],
-                "threadId": "thread-717",
-                "turnId": "turn-717",
-            ] as [String: Any],
-        ]))
-        guard case .approval(let approval) = decoded else {
-            Issue.record("Expected connector approval")
-            return
-        }
-        #expect(approval.kind == .toolUserInput)
-        #expect(approval.request.policy.requiresApproval)
-        #expect(approval.request.summary.text == "Codex connector requires approval")
+        let variants = [
+            ["Allow", "Cancel"],
+            ["Allow", "Allow for this session", "Cancel"],
+            [
+                "Allow", "Allow for this session",
+                "Allow and don't ask me again", "Cancel",
+            ],
+        ]
+        for labels in variants {
+            let options = labels.map {
+                ["description": "Codex option", "label": $0]
+            }
+            let decoded = try codec.decodeActivity(frame([
+                "id": 110,
+                "method": "item/tool/requestUserInput",
+                "params": [
+                    "itemId": "call-717",
+                    "questions": [[
+                        "header": "Approve app tool call?",
+                        "id": questionID,
+                        "isOther": false,
+                        "isSecret": false,
+                        "options": options,
+                        "question": "The connector wants to modify data. Allow this action?",
+                    ] as [String: Any]],
+                    "threadId": "thread-717",
+                    "turnId": "turn-717",
+                ] as [String: Any],
+            ]))
+            guard case .approval(let approval) = decoded else {
+                Issue.record("Expected connector approval")
+                return
+            }
+            #expect(approval.kind == .toolUserInput)
+            #expect(approval.request.policy.requiresApproval)
+            #expect(approval.request.summary.text == "Codex connector requires approval")
 
-        for (decision, expected) in [
-            (CapabilityApprovalDecision.allowOnce, "Approve Once"),
-            (.decline, "Deny"),
-        ] {
-            let response = try object(codec.approvalResponse(
-                approval, decision: decision
-            ))
-            #expect(response["id"] as? Int == 110)
-            let answers = try #require(
-                (response["result"] as? [String: Any])?["answers"]
+            for (decision, expected) in [
+                (CapabilityApprovalDecision.allowOnce, "Allow"),
+                (.decline, "__codex_mcp_decline__"),
+            ] {
+                let response = try object(codec.approvalResponse(
+                    approval, decision: decision
+                ))
+                #expect(response["id"] as? Int == 110)
+                let answers = try #require(
+                    (response["result"] as? [String: Any])?["answers"]
+                        as? [String: Any]
+                )
+                let answer = try #require(answers[questionID] as? [String: Any])
+                #expect(answer["answers"] as? [String] == [expected])
+            }
+            let cancelled = try object(codec.cancelApprovalResponse(approval))
+            let cancelAnswers = try #require(
+                (cancelled["result"] as? [String: Any])?["answers"]
                     as? [String: Any]
             )
-            let answer = try #require(answers[questionID] as? [String: Any])
-            #expect(answer["answers"] as? [String] == [expected])
+            #expect(
+                (cancelAnswers[questionID] as? [String: Any])?["answers"]
+                    as? [String] == ["Cancel"]
+            )
         }
-        let cancelled = try object(codec.cancelApprovalResponse(approval))
-        let cancelAnswers = try #require(
-            (cancelled["result"] as? [String: Any])?["answers"]
-                as? [String: Any]
-        )
-        #expect(
-            (cancelAnswers[questionID] as? [String: Any])?["answers"]
-                as? [String] == ["Cancel"]
-        )
     }
 
     @Test
@@ -620,9 +628,7 @@ struct CodexCapabilityProtocolTests {
                 "header": "Approve", "id": "mcp_tool_call_approval_call-1",
                 "isOther": false, "isSecret": false,
                 "options": [
-                    ["description": "Approve", "label": "Approve Once"],
-                    ["description": "Session", "label": "Approve this Session"],
-                    ["description": "Deny", "label": "Deny"],
+                    ["description": "Approve", "label": "Allow"],
                     ["description": "Cancel", "label": "Cancel"],
                 ],
                 "question": "Allow this action?",
@@ -646,8 +652,30 @@ struct CodexCapabilityProtocolTests {
                 var params = baseParams
                 var questions = params["questions"] as! [[String: Any]]
                 questions[0]["options"] = [[
-                    "description": "Approve", "label": "Approve Once",
+                    "description": "Approve", "label": "Allow",
                 ]]
+                params["questions"] = questions
+                return params
+            }(),
+            { () -> [String: Any] in
+                var params = baseParams
+                var questions = params["questions"] as! [[String: Any]]
+                questions[0]["options"] = [
+                    ["description": "Approve", "label": "Allow"],
+                    ["description": "Duplicate", "label": "Allow"],
+                    ["description": "Cancel", "label": "Cancel"],
+                ]
+                params["questions"] = questions
+                return params
+            }(),
+            { () -> [String: Any] in
+                var params = baseParams
+                var questions = params["questions"] as! [[String: Any]]
+                questions[0]["options"] = [
+                    ["description": "Approve", "label": "Allow"],
+                    ["description": "Unknown", "label": "Always allow"],
+                    ["description": "Cancel", "label": "Cancel"],
+                ]
                 params["questions"] = questions
                 return params
             }(),

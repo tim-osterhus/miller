@@ -98,9 +98,9 @@ struct CodexAppServerProtocolTests {
                         "isOther": false,
                         "isSecret": false,
                         "options": [
-                            ["description": "Approve", "label": "Approve Once"],
-                            ["description": "Session", "label": "Approve this Session"],
-                            ["description": "Deny", "label": "Deny"],
+                            ["description": "Approve", "label": "Allow"],
+                            ["description": "Session", "label": "Allow for this session"],
+                            ["description": "Persistent", "label": "Allow and don't ask me again"],
                             ["description": "Cancel", "label": "Cancel"],
                         ],
                         "question": "Allow the connector action?",

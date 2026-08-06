@@ -662,13 +662,19 @@ public struct CodexCapabilityProtocol: Sendable {
 
         guard let approvalQuestion else { return nil }
         let expectedQuestionID = "mcp_tool_call_approval_\(itemID)"
-        let expectedLabels: Set<String> = [
-            "Approve Once", "Approve this Session", "Deny", "Cancel",
+        let recognizedLabels: Set<String> = [
+            "Allow", "Allow for this session",
+            "Allow and don't ask me again", "Cancel",
         ]
+        let labels = approvalQuestion.labels
+        let labelSet = Set(labels)
         guard questions.count == 1,
               approvalQuestion.id == expectedQuestionID,
-              approvalQuestion.labels.count == expectedLabels.count,
-              Set(approvalQuestion.labels) == expectedLabels,
+              (2 ... 4).contains(labels.count),
+              labelSet.count == labels.count,
+              labelSet.isSubset(of: recognizedLabels),
+              labelSet.contains("Allow"),
+              labelSet.contains("Cancel"),
               try boolean(questions[0], "isOther", default: false) == false,
               try boolean(questions[0], "isSecret", default: false) == false
         else { throw CodexCapabilityProtocolError.invalidField }
@@ -714,8 +720,8 @@ public struct CodexCapabilityProtocol: Sendable {
             try validateIdentifier(questionID)
             let answer: String
             switch decision {
-            case "accept": answer = "Approve Once"
-            case "decline": answer = "Deny"
+            case "accept": answer = "Allow"
+            case "decline": answer = "__codex_mcp_decline__"
             case "cancel": answer = "Cancel"
             default: throw CodexCapabilityProtocolError.invalidField
             }
