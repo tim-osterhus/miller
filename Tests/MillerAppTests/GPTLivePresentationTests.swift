@@ -1978,14 +1978,21 @@ struct GPTLivePresentationTests {
 
         let session = Task { await model.startLiveVoice() }
         try await waitUntil { await voice.sessionCount == 1 }
-        await voice.emit(.sessionAdmitted(id: UUID()), from: 0)
+        let sessionID = UUID()
+        await voice.emit(.sessionAdmitted(id: sessionID), from: 0)
         await voice.emit(.state(.listening), from: 0)
+        await voice.emit(
+            .transcriptDone(role: .user, text: "delete this transcript"),
+            from: 0
+        )
         await voice.emit(.state(.closed), from: 0)
         await voice.finish(session: 0)
         await session.value
+        #expect(model.liveTranscriptTurns.map(\.text) == ["delete this transcript"])
 
         await model.deleteAllVoiceHistory()
         let deletedVoiceState = model.voiceState
+        #expect(model.liveTranscriptTurns.isEmpty)
         await voice.emit(
             .transcriptDone(role: .assistant, text: "deleted transcript"),
             from: 0
@@ -1995,6 +2002,33 @@ struct GPTLivePresentationTests {
         #expect(model.liveTranscriptTurns.isEmpty)
         #expect(model.liveVoiceFailureCode == nil)
         #expect(model.voiceState == deletedVoiceState)
+    }
+
+    @Test
+    func voiceHistoryDeletionRejectsAnEventAlreadyAwaitingPersistence() async {
+        let persistence = SuspendedTranscriptWriteProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await persistence.persistence()
+        )
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: .unavailable,
+            liveTranscriptRecorder: recorder
+        )
+        await model.applyLiveEvent(.sessionAdmitted(id: UUID()))
+
+        let event = Task {
+            await model.applyLiveEvent(
+                .transcriptDone(role: .assistant, text: "stale in-flight text")
+            )
+        }
+        #expect(await persistence.waitUntilWriteRequested())
+
+        await model.deleteAllVoiceHistory()
+        await persistence.resumeWrite()
+        await event.value
+
+        #expect(model.liveTranscriptTurns.isEmpty)
     }
 
     @Test
@@ -4297,6 +4331,53 @@ private actor SpontaneousTerminalProbe {
         }
         terminalWasPresented = true
         await withCheckedContinuation { cleanupContinuation = $0 }
+    }
+}
+
+private actor SuspendedTranscriptWriteProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var writeRequested = false
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { _, _, _, _ in },
+            appendEntry: { [self] _, _, _, _, _, _ in
+                await suspendWrite()
+            },
+            completeEntry: { _, _ in },
+            finalizeSession: { _, _ in },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func waitUntilWriteRequested() async -> Bool {
+        if !writeRequested {
+            await withCheckedContinuation { waiter in
+                if writeRequested {
+                    waiter.resume()
+                } else {
+                    requestWaiters.append(waiter)
+                }
+            }
+        }
+        return true
+    }
+
+    func resumeWrite() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func suspendWrite() async {
+        writeRequested = true
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation = $0 }
     }
 }
 

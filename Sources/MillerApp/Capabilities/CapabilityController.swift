@@ -1217,6 +1217,12 @@ final class CapabilityController: ObservableObject {
     }
 
     func saveServerSettings(_ draft: MCPServerValidatedDraft) async throws {
+        var succeeded = false
+        defer {
+            if !succeeded {
+                sanitizedLastFailure = "capability_settings_failed"
+            }
+        }
         let repository = try settingsRepositoryOrThrow()
         try beginSettingsMutation()
         defer { finishSettingsMutation() }
@@ -1290,35 +1296,63 @@ final class CapabilityController: ObservableObject {
             }
             throw CapabilitySettingsMutationError.secretMutationFailed
         }
+        var committed = false
         do {
             try await repository.replaceServerConfiguration(
                 server: authoritativeServer,
                 secretBindings: draft.secrets,
                 enabledProviderProfileIDs: authoritativeProviderIDs
             )
+            committed = true
             try await reloadRuntimeAuthority()
         } catch {
-            do {
-                if let oldServer {
-                    try await repository.replaceServerConfiguration(
-                        server: oldServer,
-                        secretBindings: oldBindings,
-                        enabledProviderProfileIDs: oldProviderIDs
-                    )
-                } else if try await repository.server(id: draft.server.id) != nil {
-                    try await repository.deleteServer(id: draft.server.id)
+            let originalError = error
+            var recoveryFailed = false
+            if committed {
+                do {
+                    if let oldServer {
+                        try await repository.replaceServerConfiguration(
+                            server: oldServer,
+                            secretBindings: oldBindings,
+                            enabledProviderProfileIDs: oldProviderIDs
+                        )
+                    } else {
+                        try await repository.deleteServer(id: draft.server.id)
+                    }
+                } catch {
+                    recoveryFailed = true
                 }
+            }
+            do {
                 try await restoreSecrets(oldSecrets)
-                try await reloadRuntimeAuthority()
             } catch {
+                recoveryFailed = true
+            }
+            if recoveryFailed {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
-            throw error
+            if committed {
+                do {
+                    try await reloadRuntimeAuthority()
+                } catch {
+                    await leaveRuntimeUnavailable()
+                    throw CapabilitySettingsMutationError.recoveryFailed
+                }
+            }
+            sanitizedLastFailure = "capability_settings_failed"
+            throw originalError
         }
+        succeeded = true
     }
 
     func removeServerFromSettings(serverID: String) async throws {
+        var succeeded = false
+        defer {
+            if !succeeded {
+                sanitizedLastFailure = "capability_settings_failed"
+            }
+        }
         let repository = try settingsRepositoryOrThrow()
         try beginSettingsMutation()
         defer { finishSettingsMutation() }
@@ -1331,28 +1365,50 @@ final class CapabilityController: ObservableObject {
         ))
         let catalog = try await repository.catalog(serverID: serverID)
         let secrets = try await secretSnapshot(Set(bindings.map(\.credentialReference)))
+        var committed = false
         do {
             for reference in secrets.keys {
                 try await settingsSecrets.delete(reference)
             }
             try await repository.deleteServer(id: serverID)
+            committed = true
             try await reloadRuntimeAuthority()
         } catch {
+            let originalError = error
+            var recoveryFailed = false
+            if committed {
+                do {
+                    try await repository.restoreServerConfiguration(
+                        server: server,
+                        secretBindings: bindings,
+                        enabledProviderProfileIDs: providerIDs,
+                        catalog: catalog
+                    )
+                } catch {
+                    recoveryFailed = true
+                }
+            }
             do {
-                try await repository.restoreServerConfiguration(
-                    server: server,
-                    secretBindings: bindings,
-                    enabledProviderProfileIDs: providerIDs,
-                    catalog: catalog
-                )
                 try await restoreSecrets(secrets)
-                try await reloadRuntimeAuthority()
             } catch {
+                recoveryFailed = true
+            }
+            if recoveryFailed {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
-            throw error
+            if committed {
+                do {
+                    try await reloadRuntimeAuthority()
+                } catch {
+                    await leaveRuntimeUnavailable()
+                    throw CapabilitySettingsMutationError.recoveryFailed
+                }
+            }
+            sanitizedLastFailure = "capability_settings_failed"
+            throw originalError
         }
+        succeeded = true
     }
 
     func setProviderEnabledFromSettings(
@@ -1541,33 +1597,47 @@ final class CapabilityController: ObservableObject {
             bindings: bindings,
             providerProfileIDs: compatibleProviderProfileIDs
         )
-        let session = try await makeSession(configuration)
+        let session: any MCPClientSessionProtocol
+        do {
+            session = try await makeSession(configuration)
+        } catch {
+            sanitizedLastFailure = "capability_connection_failed"
+            throw error
+        }
         let tools: [MCPDiscoveredTool]
         do {
             tools = try await session.listTools()
             await session.disconnect()
         } catch {
             await session.disconnect()
+            sanitizedLastFailure = "capability_discovery_failed"
             throw error
         }
-        let descriptors = try tools.map { tool in
-            try CapabilityDescriptor(
-                id: CapabilityID(
+        let descriptors: [CapabilityDescriptor]
+        do {
+            descriptors = try tools.map { tool in
+                try CapabilityDescriptor(
+                    id: CapabilityID(
+                        source: .millerMCP,
+                        serverID: serverID,
+                        toolName: tool.name
+                    ),
                     source: .millerMCP,
                     serverID: serverID,
-                    toolName: tool.name
-                ),
-                source: .millerMCP,
-                serverID: serverID,
-                toolName: tool.name,
-                displayName: tool.displayName,
-                summary: tool.summary,
-                inputSchemaJSON: tool.inputSchemaJSON,
-                readOnlyHint: tool.readOnlyHint,
-                providerProfileIDs: compatibleProviderProfileIDs,
-                isAvailable: true
-            )
+                    toolName: tool.name,
+                    displayName: tool.displayName,
+                    summary: tool.summary,
+                    inputSchemaJSON: tool.inputSchemaJSON,
+                    readOnlyHint: tool.readOnlyHint,
+                    providerProfileIDs: compatibleProviderProfileIDs,
+                    isAvailable: true
+                )
+            }
+        } catch {
+            sanitizedLastFailure = "capability_catalog_failed"
+            throw error
         }
+        var committed = false
         do {
             try await repository.activateServer(
                 server: enabled,
@@ -1575,9 +1645,14 @@ final class CapabilityController: ObservableObject {
                 enabledProviderProfileIDs: compatibleProviderProfileIDs,
                 descriptors: descriptors
             )
+            committed = true
             try await reloadRuntimeAuthority()
             return tools.count
         } catch {
+            guard committed else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw error
+            }
             do {
                 try await repository.restoreServerConfiguration(
                     server: previous,
@@ -1590,6 +1665,7 @@ final class CapabilityController: ObservableObject {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
+            sanitizedLastFailure = "capability_settings_failed"
             throw error
         }
     }

@@ -336,6 +336,7 @@ final class AppPresentationModel: ObservableObject {
     private var shortcutRegistration: ((GlobalShortcut) -> Bool)?
     private var liveVoiceStartPending = false
     private var liveTranscriptProjection = LiveTranscriptProjection()
+    private var liveTranscriptSessionID: UUID?
     private var liveVoiceCleanupPending = false
     private var liveVoiceCleanupRetryPending = false
     private var pendingLiveTranscriptCleanup: PendingLiveTranscriptCleanup?
@@ -1083,6 +1084,7 @@ final class AppPresentationModel: ObservableObject {
         do {
             try await voiceHistory.deleteSession(id)
             clearPendingVoiceHistory(ifItContains: [id])
+            clearLiveTranscriptProjection(ifItContains: [id])
             voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
@@ -1100,6 +1102,7 @@ final class AppPresentationModel: ObservableObject {
             let deleted = try await voiceHistory.sessions(start, end).map(\.id)
             try await voiceHistory.deleteRange(start, end)
             clearPendingVoiceHistory(ifItContains: deleted)
+            clearLiveTranscriptProjection(ifItContains: deleted)
             voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
@@ -1116,6 +1119,7 @@ final class AppPresentationModel: ObservableObject {
         do {
             try await voiceHistory.deleteAll()
             pendingVoiceHistoryAttachment = nil
+            clearLiveTranscriptProjection()
             voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
@@ -1130,6 +1134,7 @@ final class AppPresentationModel: ObservableObject {
         defer { voiceHistoryDeletionPending = false }
         try await voiceHistory.deleteAll()
         pendingVoiceHistoryAttachment = nil
+        clearLiveTranscriptProjection()
         voiceHistoryDeletionPending = false
         await refreshVoiceHistory()
     }
@@ -1211,6 +1216,14 @@ final class AppPresentationModel: ObservableObject {
               !Set(pendingVoiceHistoryAttachment.sessionIDs).isDisjoint(with: ids)
         else { return }
         self.pendingVoiceHistoryAttachment = nil
+    }
+
+    private func clearLiveTranscriptProjection(ifItContains ids: [UUID]? = nil) {
+        if let ids {
+            guard let liveTranscriptSessionID, ids.contains(liveTranscriptSessionID)
+            else { return }
+        }
+        resetLiveTranscripts()
     }
 
     func startLiveVoice(
@@ -1400,18 +1413,24 @@ final class AppPresentationModel: ObservableObject {
                     activationSource: pendingVoiceActivationSource
                 )
             } catch {
+                guard generation == liveVoiceEventGeneration else { return }
                 presentTranscriptPersistenceFailure()
             }
+            guard generation == liveVoiceEventGeneration else { return }
+            liveTranscriptSessionID = id
         case let .state(state):
             voiceState = state
         case .transcriptDelta, .transcriptDone:
-            liveTranscriptProjection.record(event)
-            liveTranscriptTurns = liveTranscriptProjection.turns
+            var persistenceFailed = false
             do {
                 try await liveTranscriptRecorder.record(event)
             } catch {
-                presentTranscriptPersistenceFailure()
+                persistenceFailed = true
             }
+            guard generation == liveVoiceEventGeneration else { return }
+            if persistenceFailed { presentTranscriptPersistenceFailure() }
+            liveTranscriptProjection.record(event)
+            liveTranscriptTurns = liveTranscriptProjection.turns
         case let .failed(code):
             liveVoiceFailureCode = Self.sanitizedLiveCode(code)
             voiceState = .failed
@@ -1712,6 +1731,7 @@ final class AppPresentationModel: ObservableObject {
     private func resetLiveTranscripts() {
         liveTranscriptProjection.reset()
         liveTranscriptTurns = liveTranscriptProjection.turns
+        liveTranscriptSessionID = nil
     }
 
     private static func liveFailureCode(_ error: Error) -> String {

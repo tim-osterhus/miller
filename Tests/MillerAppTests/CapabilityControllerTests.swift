@@ -242,6 +242,109 @@ struct CapabilityControllerTests {
             .sanitizedLastFailure == "capability_startup_failed")
     }
 
+    @Test(arguments: MCPSettingsFailurePhase.allCases)
+    func connectionTestFailureReplacesOlderDiagnosticAndRecoveryClearsIt(
+        phase: MCPSettingsFailurePhase
+    ) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-connection-diagnostics-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(
+            policy: .askBeforeChanges, enabled: false
+        )
+        try await repository.saveServer(server)
+        let loader = FailFirstCapabilityConfigurationLoad()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            sessionFactory: { _ in
+                switch phase {
+                case .makeSession:
+                    throw MCPClientSessionError.connectionClosed
+                case .listTools:
+                    return FailingCapabilitySessionProbe(serverID: server.id)
+                case .descriptorValidation:
+                    return CapabilitySessionProbe(
+                        serverID: server.id,
+                        tool: .init(
+                            name: "Invalid Tool", displayName: "Invalid",
+                            summary: "Invalid", inputSchemaJSON: Data("{}".utf8),
+                            readOnlyHint: true
+                        )
+                    )
+                }
+            },
+            settingsRepository: repository
+        )
+        await controller.start()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_startup_failed")
+
+        do {
+            _ = try await controller.testAndEnableServer(
+                serverID: server.id,
+                compatibleProviderProfileIDs: [UUID()]
+            )
+            Issue.record("Connection test unexpectedly succeeded")
+        } catch {}
+
+        let failed = await controller.diagnosticsSnapshot()
+        #expect(failed.sanitizedLastFailure == phase.expectedDiagnosticCode)
+        #expect(failed.sanitizedLastFailure?.utf8.count ?? 0 <= 64)
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+    }
+
+    @Test
+    func saveAndRemovePreflightFailuresReplaceOlderDiagnosticAndRecover() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-preflight-diagnostics-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let loader = FailFirstCapabilityConfigurationLoad()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            settingsRepository: repository
+        )
+        await controller.start()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_startup_failed")
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = server.id
+        draft.displayName = server.displayName
+        draft.executable = "/usr/bin/true"
+        draft.createdAt = server.createdAt
+
+        await #expect(throws: CapabilityControllerError.serverIdentityMismatch) {
+            try await controller.saveServerSettings(try draft.validated(
+                mode: .edit(originalID: "different-server")
+            ))
+        }
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_settings_failed")
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+
+        await #expect(throws: CapabilityStorageError.serverNotFound) {
+            try await controller.removeServerFromSettings(serverID: "missing")
+        }
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_settings_failed")
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+    }
+
     @Test
     func beginAuditFailurePreventsToolExecution() async throws {
         let audit = CapabilityAuditProbe(beginFailures: 1)
@@ -2928,6 +3031,214 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func uncommittedSaveWriteRestoresSecretsAndPreservesHealthyRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-save-uncommitted-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let seed = try SQLiteCapabilityRepository(path: path)
+        await seed.close()
+        let failing = try SQLiteCapabilityRepository(
+            path: path, simulatedWriteFailure: .storageFull
+        )
+        let secrets = CapabilitySettingsSecretProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: failing,
+            settingsSecrets: secrets.dependencies
+        )
+        await controller.start()
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = "new-server"
+        draft.displayName = "New Server"
+        draft.executable = "/usr/bin/true"
+        draft.secrets = [
+            .init(kind: .environment, name: "TOKEN", value: "new-secret"),
+        ]
+        let validated = try draft.validated(mode: .create)
+        let reference = try #require(validated.secrets.first?.credentialReference)
+
+        await #expect(throws: SQLiteError.storageFull) {
+            try await controller.saveServerSettings(validated)
+        }
+
+        #expect(await secrets.attemptedDelete(reference))
+        #expect(await secrets.value(reference) == nil)
+        let diagnostics = await controller.diagnosticsSnapshot()
+        #expect(diagnostics.controllerState == "Ready")
+        #expect(diagnostics.sanitizedLastFailure == "capability_settings_failed")
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+    }
+
+    @Test
+    func uncommittedRemovalRestoresEverySecretAndPreservesHealthyRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-remove-uncommitted-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let seed = try SQLiteCapabilityRepository(path: path)
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await seed.saveServer(server)
+        let firstReference = UUID()
+        let secondReference = UUID()
+        try await seed.saveSecretBinding(.init(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "FIRST_TOKEN", credentialReference: firstReference
+        ))
+        try await seed.saveSecretBinding(.init(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "SECOND_TOKEN", credentialReference: secondReference
+        ))
+        await seed.close()
+        let failing = try SQLiteCapabilityRepository(
+            path: path, simulatedWriteFailure: .storageFull
+        )
+        let secrets = CapabilitySettingsSecretProbe(values: [
+            firstReference: "old-first", secondReference: "old-second",
+        ])
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: failing,
+            settingsSecrets: secrets.dependencies
+        )
+        await controller.start()
+
+        await #expect(throws: SQLiteError.storageFull) {
+            try await controller.removeServerFromSettings(serverID: server.id)
+        }
+
+        #expect(await secrets.attemptedStore(firstReference, value: "old-first"))
+        #expect(await secrets.attemptedStore(secondReference, value: "old-second"))
+        #expect(await secrets.value(firstReference) == "old-first")
+        #expect(await secrets.value(secondReference) == "old-second")
+        let diagnostics = await controller.diagnosticsSnapshot()
+        #expect(diagnostics.controllerState == "Ready")
+        #expect(diagnostics.sanitizedLastFailure == "capability_settings_failed")
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+    }
+
+    @Test
+    func uncommittedActivationFailurePreservesOriginalErrorAndHealthyRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-activation-uncommitted-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let seed = try SQLiteCapabilityRepository(path: path)
+        let server = settingsControllerServer(
+            policy: .askBeforeChanges, enabled: false
+        )
+        try await seed.saveServer(server)
+        await seed.close()
+        let failing = try SQLiteCapabilityRepository(
+            path: path, simulatedWriteFailure: .storageFull
+        )
+        let session = CapabilitySessionProbe(
+            serverID: server.id,
+            tool: .init(
+                name: "lookup", displayName: "Lookup", summary: "Lookup",
+                inputSchemaJSON: Data("{}".utf8), readOnlyHint: true
+            )
+        )
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            sessionFactory: { _ in session }, settingsRepository: failing
+        )
+        await controller.start()
+
+        await #expect(throws: SQLiteError.storageFull) {
+            try await controller.testAndEnableServer(
+                serverID: server.id,
+                compatibleProviderProfileIDs: [UUID()]
+            )
+        }
+
+        let diagnostics = await controller.diagnosticsSnapshot()
+        #expect(diagnostics.controllerState == "Ready")
+        #expect(diagnostics.sanitizedLastFailure == "capability_settings_failed")
+        try await controller.reloadLocalConfiguration()
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure == nil)
+    }
+
+    @Test
+    func databaseCompensationFailureStillRestoresEveryCapturedSecret() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-independent-secret-recovery-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let firstReference = UUID()
+        let secondReference = UUID()
+        let firstBinding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "FIRST_TOKEN", credentialReference: firstReference
+        )
+        let secondBinding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "SECOND_TOKEN", credentialReference: secondReference
+        )
+        try await repository.saveSecretBinding(firstBinding)
+        try await repository.saveSecretBinding(secondBinding)
+        let secrets = CapabilitySettingsSecretProbe(values: [
+            firstReference: "old-first", secondReference: "old-second",
+        ])
+        let loader = CloseRepositoryThenFailConfigurationLoad(repository: repository)
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            settingsRepository: repository,
+            settingsSecrets: secrets.dependencies
+        )
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = server.id
+        draft.displayName = server.displayName
+        draft.executable = "/usr/bin/true"
+        draft.createdAt = server.createdAt
+        draft.secrets = [
+            .init(
+                id: firstBinding.id, kind: .environment,
+                name: firstBinding.name, value: "new-first",
+                existingReference: firstReference
+            ),
+            .init(
+                id: secondBinding.id, kind: .environment,
+                name: secondBinding.name, value: "new-second",
+                existingReference: secondReference
+            ),
+            .init(kind: .environment, name: "THIRD_TOKEN", value: "new-third"),
+        ]
+        let validated = try draft.validated(mode: .edit(originalID: server.id))
+        let thirdReference = try #require(
+            validated.secrets.first(where: { $0.name == "THIRD_TOKEN" })?
+                .credentialReference
+        )
+
+        await #expect(throws: CapabilitySettingsMutationError.recoveryFailed) {
+            try await controller.saveServerSettings(validated)
+        }
+
+        #expect(await secrets.attemptedStore(firstReference, value: "old-first"))
+        #expect(await secrets.attemptedStore(secondReference, value: "old-second"))
+        #expect(await secrets.attemptedDelete(thirdReference))
+        #expect(await secrets.value(firstReference) == "old-first")
+        #expect(await secrets.value(secondReference) == "old-second")
+        #expect(await secrets.value(thirdReference) == nil)
+    }
+
+    @Test
     func connectionActivationRejectsEmptyCompatibleProviderSetAndKeepsServerDisabled() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "miller-settings-empty-providers-\(UUID().uuidString)", isDirectory: true
@@ -3570,6 +3881,20 @@ enum StartupCandidateOutcome: CaseIterable, Sendable {
     case failure
 }
 
+enum MCPSettingsFailurePhase: CaseIterable, Sendable {
+    case makeSession
+    case listTools
+    case descriptorValidation
+
+    var expectedDiagnosticCode: String {
+        switch self {
+        case .makeSession: "capability_connection_failed"
+        case .listTools: "capability_discovery_failed"
+        case .descriptorValidation: "capability_catalog_failed"
+        }
+    }
+}
+
 private actor SuspendedStartupSessionProbe: MCPClientSessionProtocol {
     nonisolated let serverID: String
     private var continuation: CheckedContinuation<
@@ -3642,6 +3967,19 @@ private actor FailFirstCapabilityConfigurationLoad {
         calls += 1
         if calls == 1 { throw CapabilityControllerError.unavailable }
         return .init(servers: [], toolPolicies: [:])
+    }
+}
+
+private actor CloseRepositoryThenFailConfigurationLoad {
+    private let repository: SQLiteCapabilityRepository
+
+    init(repository: SQLiteCapabilityRepository) {
+        self.repository = repository
+    }
+
+    func load() async throws -> CapabilityRuntimeConfiguration {
+        await repository.close()
+        throw CapabilityControllerError.unavailable
     }
 }
 
