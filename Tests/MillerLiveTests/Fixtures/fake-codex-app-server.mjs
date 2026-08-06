@@ -39,7 +39,7 @@ if (mode === "flood-output") {
 const lines = readline.createInterface({ input: process.stdin });
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const notify = (method, params) => send({ method, params, emittedAtMs: 1 });
-if (mode === "record-stdin" || mode === "portable-skill-live") {
+if (mode === "record-stdin" || mode.startsWith("portable-skill-live")) {
   lines.on("line", (line) => fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 }));
 }
 let threadId = "thread-1";
@@ -432,6 +432,7 @@ lines.on("line", (line) => {
   }
   if (mode.startsWith("typed-")) {
     if ((mode === "typed-record" || mode === "typed-probe-record" ||
+         mode === "typed-portable-skill-routing-proof" ||
          mode.startsWith("typed-authority-")) && pidPath) {
       fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 });
     }
@@ -519,9 +520,19 @@ lines.on("line", (line) => {
       return;
     }
     if (request.method === "turn/start") {
+      const input = request.params?.input;
+      const portableSkillInputIsValid = mode !== "typed-portable-skill-routing-proof"
+        ? input?.length === 1
+        : input?.length === 1 || (
+          input?.length === 2 && input[1]?.type === "skill"
+          && input[1]?.name === "Weather"
+          && typeof input[1]?.path === "string"
+          && fs.existsSync(input[1].path)
+          && (fs.statSync(input[1].path).mode & 0o777) === 0o600
+        );
       if (!helperThreadCreated || request.params?.threadId !== threadId ||
-          !Array.isArray(request.params?.input) || request.params.input.length !== 1 ||
-          request.params.input[0]?.type !== "text" || request.params?.approvalPolicy !== "never" ||
+          !Array.isArray(input) || !portableSkillInputIsValid ||
+          input[0]?.type !== "text" || request.params?.approvalPolicy !== "never" ||
           request.params?.permissions !== undefined ||
           request.params?.runtimeWorkspaceRoots !== undefined ||
           request.params?.sandboxPolicy !== undefined) {
@@ -898,6 +909,17 @@ lines.on("line", (line) => {
     if (request.method === "skills/extraRoots/set") {
       if (!Array.isArray(request.params?.extraRoots) || request.params.extraRoots.length !== 1
           || !request.params.extraRoots[0].startsWith("/")) process.exit(56);
+      if (mode === "typed-portable-skill-routing-proof") {
+        const root = request.params.extraRoots[0];
+        const skillDirectories = fs.readdirSync(`${root}/skills`);
+        if (skillDirectories.length !== 1) process.exit(56);
+        const file = `${root}/skills/${skillDirectories[0]}/SKILL.md`;
+        const contents = fs.readFileSync(file, "utf8");
+        if ((fs.statSync(file).mode & 0o777) !== 0o600
+            || !contents.includes("name: Weather")
+            || !contents.includes("description: Forecast guidance")
+            || !contents.includes("Use forecasts.")) process.exit(56);
+      }
       send({ id: request.id, result: {} });
       return;
     }
@@ -974,8 +996,21 @@ lines.on("line", (line) => {
   }
   if (request.method === "skills/extraRoots/set") {
     const roots = request.params?.extraRoots;
-    if (!Array.isArray(roots) || roots.length !== 1 || !roots[0].startsWith("/") ||
-        !fs.existsSync(`${roots[0]}/skills/weather/SKILL.md`)) process.exit(57);
+    if (!Array.isArray(roots) || roots.length !== 1 || !roots[0].startsWith("/")) {
+      process.exit(57);
+    }
+    if (mode === "portable-skill-live-routing-proof") {
+      const skillDirectories = fs.readdirSync(`${roots[0]}/skills`);
+      if (skillDirectories.length !== 1) process.exit(57);
+      const file = `${roots[0]}/skills/${skillDirectories[0]}/SKILL.md`;
+      const contents = fs.readFileSync(file, "utf8");
+      if ((fs.statSync(file).mode & 0o777) !== 0o600
+          || !contents.includes("name: Weather")
+          || !contents.includes("description: Forecast guidance")
+          || !contents.includes("Use forecasts.")) process.exit(57);
+    } else if (!fs.existsSync(`${roots[0]}/skills/weather/SKILL.md`)) {
+      process.exit(57);
+    }
     send({ id: request.id, result: {} });
     return;
   }
@@ -1153,7 +1188,7 @@ lines.on("line", (line) => {
     const waitsForStop =
       (mode === "reuse-second-wait-stop" || mode === "reuse-second-wait-stop-no-output") &&
       invocation > 1;
-    if (!waitsForStop && !["wait-stop", "wait-stop-close-first", "stop-close-no-ack", "delay-stop", "hold-terminal-cleanup", "wait-stream-close", "wait-append", "hold-append", "wait-output", "wait-output-failed-stop", "output-failed-during-interrupt", "wait-provider-failure-trigger", "stop-on-sdp"].includes(mode)) {
+    if (!waitsForStop && !["wait-stop", "wait-stop-close-first", "stop-close-no-ack", "delay-stop", "hold-terminal-cleanup", "wait-stream-close", "wait-append", "hold-append", "wait-output", "wait-output-failed-stop", "output-failed-during-interrupt", "wait-provider-failure-trigger", "stop-on-sdp", "portable-skill-live-routing-proof"].includes(mode)) {
       emitLifecycle();
     } else {
       emitRealtimeStarted();

@@ -97,6 +97,33 @@ function handle(record) {
       turn_id: record.turn_id,
       generation: record.generation,
     });
+    if (mode === "portable-skill-routing-proof") {
+      const skills = record.portable_skills ?? [];
+      const omitted = record.portable_skills_omitted ?? 0;
+      if (!Array.isArray(skills) || !Number.isInteger(omitted)) fail();
+      if (skills.length > 0) {
+        if (skills.length !== 1 || omitted !== 0) fail();
+        const skill = skills[0];
+        if (Object.keys(skill).sort().join(",") !== "description,id,markdown,name"
+            || skill.name !== "Weather"
+            || skill.description !== "Forecast guidance"
+            || !skill.markdown.includes("Use forecasts.")) fail();
+      }
+      write({
+        ...base("reasoning.text_delta", record.request_id),
+        turn_id: record.turn_id,
+        generation: record.generation,
+        ordinal: 0,
+        text: skills.length === 1 ? "portable" : "ordinary",
+      });
+      write({
+        ...base("reasoning.completed", record.request_id),
+        turn_id: record.turn_id,
+        generation: record.generation,
+      });
+      active = null;
+      return;
+    }
     if (mode === "markdown-qualification") {
       write({
         ...base("reasoning.text_delta", record.request_id),
