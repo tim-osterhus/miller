@@ -439,6 +439,8 @@ struct ProtocolFixtureTests {
         let known = Set([
             "type", "const", "enum", "pattern", "minimum", "minLength",
             "maxLength", "maxItems",
+            "x-miller-maxUtf8Bytes", "x-miller-uniqueBy",
+            "x-miller-aggregateUtf8Bytes",
             "properties", "required", "items", "contains", "additionalProperties",
             "unevaluatedProperties",
         ])
@@ -661,6 +663,40 @@ struct ProtocolFixtureTests {
             ))
             exercised.insert(occurrence(recordType, path, "maxItems"))
         }
+        if let uniqueField = constraint["x-miller-uniqueBy"] as? String,
+           let item = (fixture[field] as? [Any])?.first as? [String: Any]
+        {
+            var distinct = item
+            distinct["name"] = "Different content"
+            expectDecodeFailure(
+                "\(recordType).\(field) honors unique IDs",
+                object: replacing(field, with: [item, distinct], in: fixture)
+            )
+            #expect(uniqueField == "id")
+            exercised.insert(occurrence(recordType, path, "x-miller-uniqueBy"))
+        }
+        if let aggregate = constraint["x-miller-aggregateUtf8Bytes"]
+            as? [String: Any],
+           let maximum = aggregate["maximum"] as? NSNumber,
+           let properties = aggregate["properties"] as? [String]
+        {
+            #expect(properties == ["id", "name", "description", "markdown"])
+            let half = maximum.intValue / 2
+            let oversized = (0..<2).map { index in
+                [
+                    "id": "aggregate-\(index)", "name": "Skill",
+                    "description": "Description",
+                    "markdown": String(repeating: "x", count: half),
+                ]
+            }
+            expectDecodeFailure(
+                "\(recordType).\(field) honors aggregate UTF-8 bytes",
+                object: replacing(field, with: oversized, in: fixture)
+            )
+            exercised.insert(occurrence(
+                recordType, path, "x-miller-aggregateUtf8Bytes"
+            ))
+        }
         if let rawContains = constraint["contains"] as? [String: Any] {
             let contains = try resolvedSchema(rawContains, definitions: definitions)
             let matching = try validValue(for: contains, definitions: definitions)
@@ -835,6 +871,23 @@ struct ProtocolFixtureTests {
                 candidate[nestedField] = String(repeating: "x", count: maximum + 1)
                 expectDecodeFailure("\(recordType).\(nestedPath) maxLength matches", object: replaceObject(candidate))
                 exercised.insert(occurrence(recordType, nestedPath, "maxLength"))
+            }
+            if let maximum = nestedConstraint["x-miller-maxUtf8Bytes"] as? Int {
+                var candidate = validObject
+                let scalar = nestedConstraint["pattern"] == nil ? "é" : "x"
+                let validCount = scalar == "é" ? maximum / 2 : maximum
+                candidate[nestedField] = String(repeating: scalar, count: validCount)
+                _ = try decode(replaceObject(candidate))
+                candidate[nestedField] = String(
+                    repeating: scalar, count: validCount + 1
+                )
+                expectDecodeFailure(
+                    "\(recordType).\(nestedPath) UTF-8 byte bound matches",
+                    object: replaceObject(candidate)
+                )
+                exercised.insert(occurrence(
+                    recordType, nestedPath, "x-miller-maxUtf8Bytes"
+                ))
             }
             if try schemaTypes(nestedConstraint).contains("null") {
                 var candidate = validObject

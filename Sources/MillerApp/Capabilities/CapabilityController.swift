@@ -1204,6 +1204,8 @@ final class CapabilityController: ObservableObject {
             servers: serverSnapshots,
             providerNames: providerNames,
             plugins: try await repository.plugins(),
+            pluginMCPComponents: try await repository.pluginMCPComponents(),
+            pluginApps: try await repository.pluginApps(),
             skills: skillSnapshots
         )
     }
@@ -1242,28 +1244,27 @@ final class CapabilityController: ObservableObject {
                 enabled: false, createdAt: now, updatedAt: now
             )
         }
-        let servers: [CapabilityServerRecord] = snapshot.mcpDrafts.compactMap { draft in
-            let transport: CapabilityServerTransport
-            let command: String?
-            let endpoint: String?
-            if let absolute = draft.command, absolute.hasPrefix("/") {
-                transport = .stdio; command = absolute; endpoint = nil
-            } else if let remote = draft.endpoint {
-                transport = .streamableHTTP; command = nil; endpoint = remote
-            } else {
-                return nil
-            }
-            return CapabilityServerRecord(
-                id: "plugin-\(snapshot.plugin.id)-\(draft.id)",
-                displayName: "\(snapshot.plugin.id) · \(draft.id)",
-                transport: transport, command: command, endpoint: endpoint,
-                arguments: draft.arguments, enabled: false,
-                defaultPolicy: .askBeforeChanges, staleState: .stale,
-                createdAt: now, updatedAt: now
+        let components = snapshot.mcpDrafts.map { draft in
+            PluginMCPComponentRecord(
+                pluginID: snapshot.plugin.id, componentID: draft.id,
+                projectedServerID: PluginBundleImporter.projectedServerID(
+                    pluginID: snapshot.plugin.id, componentID: draft.id
+                ),
+                transport: draft.endpoint == nil ? .stdio : .streamableHTTP,
+                absoluteCommand: draft.command, endpoint: draft.endpoint,
+                arguments: draft.arguments,
+                relativeExecutablePath: draft.relativeExecutablePath,
+                unresolvedSecretNames: draft.unresolvedSecrets,
+                reviewState: .pending, createdAt: now, updatedAt: now
+            )
+        }
+        let apps = snapshot.apps.map {
+            PluginAppMetadataRecord(
+                pluginID: snapshot.plugin.id, appID: $0.id, name: $0.name
             )
         }
         try await repository.importPluginSnapshot(
-            plugin: plugin, skills: skills, disabledServers: servers
+            plugin: plugin, skills: skills, mcpComponents: components, apps: apps
         )
     }
 
@@ -1280,7 +1281,48 @@ final class CapabilityController: ObservableObject {
     }
 
     func deletePluginFromSettings(id: String) async throws {
-        try await settingsRepositoryOrThrow().deletePlugin(id: id)
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { finishSettingsMutation() }
+        let ownedServers = try await repository.servers().filter {
+            $0.pluginID == id
+        }
+        var references = Set<UUID>()
+        for server in ownedServers {
+            references.formUnion(
+                try await repository.secretBindings(serverID: server.id)
+                    .map(\.credentialReference)
+            )
+        }
+        let secrets = try await secretSnapshot(references)
+        do {
+            for reference in references {
+                try await settingsSecrets.delete(reference)
+            }
+        } catch {
+            do { try await restoreSecrets(secrets) }
+            catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw CapabilitySettingsMutationError.secretMutationFailed
+        }
+        do {
+            try await repository.deletePlugin(id: id)
+        } catch {
+            do { try await restoreSecrets(secrets) }
+            catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+        do {
+            try await reloadRuntimeAuthority()
+        } catch {
+            await leaveRuntimeUnavailable()
+            throw CapabilitySettingsMutationError.recoveryFailed
+        }
     }
 
     private static func pluginReviewSummary(
@@ -1343,6 +1385,11 @@ final class CapabilityController: ObservableObject {
         defer { finishSettingsMutation() }
 
         let oldServer = try await repository.server(id: draft.server.id)
+        let pendingPluginComponent = try await repository.pluginMCPComponents()
+            .first(where: {
+                $0.projectedServerID == draft.server.id
+                    && $0.reviewState == .pending
+            })
         switch draft.mutationMode {
         case .create:
             guard oldServer == nil else {
@@ -1382,7 +1429,7 @@ final class CapabilityController: ObservableObject {
             defaultPolicy: draft.server.defaultPolicy,
             staleState: remainsEnabled ? (oldServer?.staleState ?? .stale) : .stale,
             createdAt: oldServer?.createdAt ?? draft.server.createdAt,
-            updatedAt: Date()
+            updatedAt: Date(), pluginID: oldServer?.pluginID ?? draft.server.pluginID
         )
         let authoritativeProviderIDs = remainsEnabled
             ? draft.providerProfileIDs : []
@@ -1413,11 +1460,19 @@ final class CapabilityController: ObservableObject {
         }
         var committed = false
         do {
-            try await repository.replaceServerConfiguration(
-                server: authoritativeServer,
-                secretBindings: draft.secrets,
-                enabledProviderProfileIDs: authoritativeProviderIDs
-            )
+            if authoritativeServer.pluginID != nil,
+               try await !repository.isPluginServerApproved(authoritativeServer.id)
+            {
+                try await repository.approvePluginMCPComponent(
+                    server: authoritativeServer, secretBindings: draft.secrets
+                )
+            } else {
+                try await repository.replaceServerConfiguration(
+                    server: authoritativeServer,
+                    secretBindings: draft.secrets,
+                    enabledProviderProfileIDs: authoritativeProviderIDs
+                )
+            }
             committed = true
             try await reloadRuntimeAuthority()
         } catch {
@@ -1431,8 +1486,14 @@ final class CapabilityController: ObservableObject {
                             secretBindings: oldBindings,
                             enabledProviderProfileIDs: oldProviderIDs
                         )
-                    } else {
+                    } else if pendingPluginComponent == nil {
                         try await repository.deleteServer(id: draft.server.id)
+                    }
+                    if let pendingPluginComponent {
+                        try await repository.restorePluginMCPComponentToPending(
+                            pendingPluginComponent,
+                            removeProjectedServer: oldServer == nil
+                        )
                     }
                 } catch {
                     recoveryFailed = true
@@ -1473,6 +1534,9 @@ final class CapabilityController: ObservableObject {
         defer { finishSettingsMutation() }
         guard let server = try await repository.server(id: serverID) else {
             throw CapabilityStorageError.serverNotFound
+        }
+        guard server.pluginID == nil else {
+            throw CapabilityStorageError.pluginOwnedServer
         }
         let bindings = try await repository.secretBindings(serverID: serverID)
         let providerIDs = Set(try await repository.enabledProviderProfileIDs(
@@ -1539,6 +1603,10 @@ final class CapabilityController: ObservableObject {
             throw CapabilityStorageError.serverNotFound
         }
         if enabled {
+            guard try await repository.isPluginServerApproved(serverID) else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw CapabilityStorageError.pluginReviewRequired
+            }
             guard server.enabled, server.staleState == .current else {
                 sanitizedLastFailure = "capability_settings_failed"
                 throw CapabilityControllerError.serverQualificationRequired
@@ -1600,7 +1668,7 @@ final class CapabilityController: ObservableObject {
             defaultPolicy: policy,
             staleState: previous.staleState,
             createdAt: previous.createdAt,
-            updatedAt: Date()
+            updatedAt: Date(), pluginID: previous.pluginID
         )
         var committed = false
         do {
@@ -1689,6 +1757,10 @@ final class CapabilityController: ObservableObject {
             sanitizedLastFailure = "capability_settings_failed"
             throw CapabilityStorageError.serverNotFound
         }
+        guard try await repository.isPluginServerApproved(serverID) else {
+            sanitizedLastFailure = "capability_settings_failed"
+            throw CapabilityStorageError.pluginReviewRequired
+        }
         let bindings = try await repository.secretBindings(serverID: serverID)
         let oldProviderIDs = Set(try await repository.enabledProviderProfileIDs(
             serverID: serverID
@@ -1705,7 +1777,7 @@ final class CapabilityController: ObservableObject {
             defaultPolicy: previous.defaultPolicy,
             staleState: .current,
             createdAt: previous.createdAt,
-            updatedAt: Date()
+            updatedAt: Date(), pluginID: previous.pluginID
         )
         let configuration = try Self.configuration(
             server: enabled,

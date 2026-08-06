@@ -13,10 +13,12 @@ struct MCPServerEditorModelTests {
         draft.displayName = "Notes"
         draft.executable = "/usr/bin/env"
         draft.argumentsJSON = #"["node","server.mjs","--safe"]"#
+        draft.pluginID = "portable.example"
 
         let validated = try draft.validated(mode: .create)
         #expect(validated.server.command == "/usr/bin/env")
         #expect(validated.server.arguments == ["node", "server.mjs", "--safe"])
+        #expect(validated.server.pluginID == "portable.example")
 
         draft.executable = "node"
         #expect(throws: MCPServerEditorError.executableMustBeAbsolute) {

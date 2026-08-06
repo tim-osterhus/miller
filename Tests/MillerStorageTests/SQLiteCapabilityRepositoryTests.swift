@@ -910,6 +910,186 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func pluginImportPersistsStructuredPendingComponentsAcrossReopen() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let now = Date(timeIntervalSince1970: 100)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let plugin = PluginPackageRecord(
+            id: "portable.example", version: "1", sourceHash: String(repeating: "a", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let components = [
+            PluginMCPComponentRecord(
+                pluginID: plugin.id, componentID: "relative",
+                projectedServerID: "plugin-portable-example-relative",
+                transport: .stdio, absoluteCommand: nil, endpoint: nil,
+                arguments: ["--stdio"], relativeExecutablePath: "bin/server",
+                unresolvedSecretNames: ["TOKEN"], reviewState: .pending,
+                createdAt: now, updatedAt: now
+            ),
+            PluginMCPComponentRecord(
+                pluginID: plugin.id, componentID: "remote",
+                projectedServerID: "plugin-portable-example-remote",
+                transport: .streamableHTTP, absoluteCommand: nil,
+                endpoint: "https://example.test/mcp", arguments: [],
+                relativeExecutablePath: nil, unresolvedSecretNames: [],
+                reviewState: .pending, createdAt: now, updatedAt: now
+            ),
+        ]
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: components,
+            apps: [PluginAppMetadataRecord(
+                pluginID: plugin.id, appID: "mail", name: "Mail"
+            )]
+        )
+
+        let reopened = try SQLiteCapabilityRepository(path: fixture.path)
+        #expect(try await reopened.pluginMCPComponents(pluginID: plugin.id) == components)
+        #expect(try await reopened.pluginApps(pluginID: plugin.id).map(\.appID) == ["mail"])
+        #expect(try await reopened.server(id: components[0].projectedServerID) == nil)
+        let remote = try #require(await reopened.server(id: components[1].projectedServerID))
+        #expect(remote.pluginID == plugin.id)
+        #expect(remote.enabled == false)
+        #expect(try await reopened.isPluginServerApproved(remote.id) == false)
+    }
+
+    @Test
+    func pluginImportRejectsRuntimeInvalidProjectedIdentityAtomically() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let now = Date(timeIntervalSince1970: 100)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let plugin = PluginPackageRecord(
+            id: "invalid.example", version: nil,
+            sourceHash: String(repeating: "f", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "remote",
+            projectedServerID: "plugin-invalid.example-remote",
+            transport: .streamableHTTP, absoluteCommand: nil,
+            endpoint: "https://example.test/mcp", arguments: [],
+            relativeExecutablePath: nil, unresolvedSecretNames: [],
+            reviewState: .pending, createdAt: now, updatedAt: now
+        )
+
+        await #expect(throws: CapabilityStorageError.invalidRecord) {
+            try await repository.importPluginSnapshot(
+                plugin: plugin, skills: [], mcpComponents: [component], apps: []
+            )
+        }
+        #expect(try await repository.plugins().isEmpty)
+        #expect(try await repository.pluginMCPComponents().isEmpty)
+        #expect(try await repository.servers().isEmpty)
+    }
+
+    @Test
+    func pluginReviewAndDeletionUseExactDurableOwnership() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let now = Date(timeIntervalSince1970: 100)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let plugin = PluginPackageRecord(
+            id: "portable.example", version: nil, sourceHash: String(repeating: "b", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "notes",
+            projectedServerID: "plugin-portable-example-notes",
+            transport: .stdio, absoluteCommand: "/usr/bin/true", endpoint: nil,
+            arguments: [], relativeExecutablePath: nil,
+            unresolvedSecretNames: ["TOKEN"], reviewState: .pending,
+            createdAt: now, updatedAt: now
+        )
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: [component], apps: []
+        )
+        let server = try #require(await repository.server(id: component.projectedServerID))
+        await #expect(throws: CapabilityStorageError.pluginComponentUnresolved) {
+            try await repository.approvePluginMCPComponent(
+                server: server, secretBindings: []
+            )
+        }
+        let binding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "TOKEN", credentialReference: UUID()
+        )
+        try await repository.approvePluginMCPComponent(
+            server: CapabilityServerRecord(
+                id: server.id, displayName: server.displayName,
+                transport: server.transport, command: server.command,
+                endpoint: server.endpoint, arguments: server.arguments,
+                enabled: false, defaultPolicy: .readOnlyAutomatic,
+                staleState: .stale, createdAt: server.createdAt,
+                updatedAt: now, pluginID: plugin.id
+            ),
+            secretBindings: [binding]
+        )
+        #expect(try await repository.isPluginServerApproved(server.id))
+
+        let unrelated = CapabilityServerRecord(
+            id: "plugin-portable.example-owner", displayName: "Owner",
+            transport: .stdio, command: "/usr/bin/true", endpoint: nil,
+            arguments: [], enabled: false, defaultPolicy: .askBeforeChanges,
+            staleState: .stale, createdAt: now, updatedAt: now
+        )
+        try await repository.saveServer(unrelated)
+        try await repository.deletePlugin(id: plugin.id)
+        #expect(try await repository.server(id: server.id) == nil)
+        #expect(try await repository.server(id: unrelated.id) == unrelated)
+        #expect(try await repository.pluginMCPComponents(pluginID: plugin.id).isEmpty)
+        #expect(try await repository.pluginApps(pluginID: plugin.id).isEmpty)
+        await #expect(throws: CapabilityStorageError.pluginNotFound) {
+            try await repository.deletePlugin(id: plugin.id)
+        }
+    }
+
+    @Test
+    func relativePluginComponentCanBeResolvedAndApprovedWithoutExecutingSourcePath() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let now = Date(timeIntervalSince1970: 100)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let plugin = PluginPackageRecord(
+            id: "relative.example", version: nil,
+            sourceHash: String(repeating: "c", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "worker",
+            projectedServerID: "plugin-relative-example-worker",
+            transport: .stdio, absoluteCommand: nil, endpoint: nil,
+            arguments: ["--stdio"], relativeExecutablePath: "bin/worker",
+            unresolvedSecretNames: [], reviewState: .pending,
+            createdAt: now, updatedAt: now
+        )
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: [component], apps: []
+        )
+        #expect(try await repository.server(id: component.projectedServerID) == nil)
+
+        let resolved = CapabilityServerRecord(
+            id: component.projectedServerID, displayName: "Worker",
+            transport: .stdio, command: "/usr/bin/true", endpoint: nil,
+            arguments: component.arguments, enabled: false,
+            defaultPolicy: .readOnlyAutomatic, staleState: .stale,
+            createdAt: now, updatedAt: now, pluginID: plugin.id
+        )
+        try await repository.approvePluginMCPComponent(
+            server: resolved, secretBindings: []
+        )
+
+        #expect(try await repository.server(id: resolved.id) == resolved)
+        let reviewed = try #require(
+            await repository.pluginMCPComponents(pluginID: plugin.id).first
+        )
+        #expect(reviewed.reviewState == .approved)
+        #expect(reviewed.relativeExecutablePath == nil)
+        #expect(reviewed.absoluteCommand == "/usr/bin/true")
+    }
+
+    @Test
     func injectedStorageFailureDoesNotPartiallyReconcile() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)

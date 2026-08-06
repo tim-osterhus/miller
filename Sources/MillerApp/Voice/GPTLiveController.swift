@@ -33,6 +33,7 @@ enum LiveVoiceEvent: Equatable, Sendable {
     case state(LiveVoiceState)
     case transcriptDelta(role: LiveTranscriptRole, text: String)
     case transcriptDone(role: LiveTranscriptRole, text: String)
+    case status(ReasoningStatus)
     case failed(code: String)
 }
 
@@ -294,15 +295,19 @@ actor GPTLiveController {
         var projectedSkillRoot: URL?
         var projectedSkillInstructions: String?
         if makeDirectSession == nil,
-           let attachment = try await portableSkillAttachment(confirmedProfile.id),
-           !attachment.skills.isEmpty
+           let attachment = try await portableSkillAttachment(confirmedProfile.id)
         {
-            projectedSkillRoot = try projector.materialize(
-                attachment, under: temporaryParentURL, sessionID: sessionID
-            )
-            projectedSkillInstructions = attachment.instructionText(
-                maximumBytes: 48 * 1_024
-            )
+            if attachment.omittedCount > 0 {
+                await receive(.status(.portableSkillsOmitted))
+            }
+            if !attachment.skills.isEmpty {
+                projectedSkillRoot = try projector.materialize(
+                    attachment, under: temporaryParentURL, sessionID: sessionID
+                )
+                projectedSkillInstructions = attachment.instructionText(
+                    maximumBytes: 48 * 1_024
+                )
+            }
         }
         defer {
             if let projectedSkillRoot {

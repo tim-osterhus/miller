@@ -211,7 +211,7 @@ struct MillerStorageTests {
     func testSchemaAllowsExactlyOneSelectedProviderProfile() throws {
         let fixture = try TestDatabase(named: #function)
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 5)
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
@@ -235,6 +235,26 @@ struct MillerStorageTests {
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
             ),
             1
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
+            ),
+            1
+        )
+        let serverForeignKeys = try database.query(
+            "PRAGMA foreign_key_list(capability_servers)"
+        )
+        XCTAssertEqual(serverForeignKeys.contains { row in
+            row.contains(.text("plugin_packages"))
+                && row.contains(.text("plugin_id"))
+                && row.contains(.text("CASCADE"))
+        }, true)
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('plugin_mcp_components', 'plugin_app_metadata')"
+            ),
+            2
         )
         let capabilityColumns = try database.query(
             "PRAGMA table_info(capability_tools)"
@@ -333,7 +353,7 @@ struct MillerStorageTests {
             try database.execute("PRAGMA user_version = 99")
         }
         XCTAssertThrowsError(try SQLiteConversationRepository(path: newer.path)) {
-            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 4))
+            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 5))
         }
     }
 
@@ -382,10 +402,10 @@ struct MillerStorageTests {
         XCTAssertEqual(process.terminationStatus, 0)
 
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 5)
         XCTAssertEqual(
             try database.scalarInt("SELECT MAX(version) FROM schema_migrations"),
-            4
+            5
         )
         XCTAssertEqual(try database.scalarInt("PRAGMA foreign_keys"), 1)
         XCTAssertEqual(try database.scalarText("PRAGMA quick_check"), "ok")
@@ -482,7 +502,7 @@ struct MillerStorageTests {
             for _ in 0..<2 {
                 group.addTask {
                     let database = try SQLiteDatabase(path: fixture.path)
-                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
+                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 5)
                 }
             }
             try await group.waitForAll()
@@ -541,7 +561,7 @@ struct MillerStorageTests {
         XCTAssertEqual(process.terminationStatus, 0)
 
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 5)
         XCTAssertEqual(
             try database.query(
                 """

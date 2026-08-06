@@ -46,8 +46,25 @@ public struct PluginBundleImporter: Sendable {
     public static let maximumSkills = 16
     public static let maximumMCPServers = 16
     public static let maximumInspectedBytes = 4 * 1_024 * 1_024
+    public static let maximumIgnoredComponents = 256
+    public static let maximumIgnoredLabelBytes = 4 * 1_024
 
     public init() {}
+
+    public static func projectedServerID(
+        pluginID: String,
+        componentID: String
+    ) -> String {
+        let identity = "\(pluginID):\(componentID)"
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let stem = "plugin-\(pluginID)-\(componentID)"
+            .lowercased()
+            .replacingOccurrences(of: ".", with: "-")
+        return "\(String(stem.prefix(79)))-\(digest)"
+    }
 
     public func importBundle(at directory: URL) throws -> PluginBundleSnapshot {
         let root = directory.standardizedFileURL
@@ -79,11 +96,24 @@ public struct PluginBundleImporter: Sendable {
         let skillRoot = root.appending(path: "skills")
         var skills: [PortableSkillSnapshot] = []
         if inspected.directories.contains(skillRoot.standardizedFileURL.path) {
-            let children = try FileManager.default.contentsOfDirectory(
+            let entries = try FileManager.default.contentsOfDirectory(
                 at: skillRoot,
                 includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
                 options: []
             ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+            let children = try entries.filter { entry in
+                let values = try entry.resourceValues(forKeys: [
+                    .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
+                ])
+                guard values.isSymbolicLink != true else {
+                    throw PluginBundleImportError.unsafeSource
+                }
+                if values.isDirectory == true { return true }
+                guard values.isRegularFile == true else {
+                    throw PluginBundleImportError.unsafeSource
+                }
+                return false
+            }
             guard children.count <= Self.maximumSkills else {
                 throw PluginBundleImportError.componentLimitExceeded
             }
@@ -110,17 +140,30 @@ public struct PluginBundleImporter: Sendable {
         let apps = inspected.files.contains(appURL.standardizedFileURL.path)
             ? try parseApps(try object(at: appURL)) : []
 
-        var ignored = Set<String>()
-        for child in try FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil
-        ) {
-            let name = child.lastPathComponent
-            if ![".codex-plugin", "skills", ".mcp.json", ".app.json"].contains(name) {
-                ignored.insert(name.hasPrefix("hooks") ? "hooks" : "assets: \(name)")
+        var consumed = Set([
+            manifestURL.standardizedFileURL.path,
+            mcpURL.standardizedFileURL.path,
+            appURL.standardizedFileURL.path,
+        ])
+        if inspected.directories.contains(skillRoot.standardizedFileURL.path) {
+            for child in try FileManager.default.contentsOfDirectory(
+                at: skillRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            ) where (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                consumed.insert(child.appending(path: "SKILL.md").standardizedFileURL.path)
             }
         }
+        var ignored = Set(inspected.files.subtracting(consumed).map { path in
+            String(path.dropFirst(root.path.count + 1))
+        })
         if manifest["hooks"] != nil { ignored.insert("hooks") }
         if manifest["assets"] != nil { ignored.insert("assets") }
+        if inspected.directories.contains(root.appending(path: "hooks").standardizedFileURL.path) {
+            ignored.insert("hooks")
+        }
+        guard ignored.count <= Self.maximumIgnoredComponents,
+              ignored.sorted().joined(separator: "\n").utf8.count
+                <= Self.maximumIgnoredLabelBytes
+        else { throw PluginBundleImportError.componentLimitExceeded }
 
         let digestSource = try inspected.files.sorted().reduce(into: Data()) { result, path in
             result.append(Data(path.replacingOccurrences(of: root.path, with: "").utf8))
@@ -135,10 +178,14 @@ public struct PluginBundleImporter: Sendable {
     }
 
     private func inspectTree(_ root: URL) throws -> (files: Set<String>, directories: Set<String>, bytes: Int) {
+        var enumerationFailed = false
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey],
-            options: [], errorHandler: { _, _ in false }
+            options: [], errorHandler: { _, _ in
+                enumerationFailed = true
+                return false
+            }
         ) else { throw PluginBundleImportError.invalidBundle }
         var files = Set<String>(), directories = Set<String>(), bytes = 0
         while let url = enumerator.nextObject() as? URL {
@@ -163,6 +210,9 @@ public struct PluginBundleImporter: Sendable {
             } else {
                 throw PluginBundleImportError.unsafeSource
             }
+        }
+        guard !enumerationFailed else {
+            throw PluginBundleImportError.invalidBundle
         }
         return (files, directories, bytes)
     }

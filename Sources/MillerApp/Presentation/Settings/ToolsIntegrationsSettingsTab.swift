@@ -9,6 +9,7 @@ struct ToolsIntegrationsSettingsTab: View {
     @State private var draft = MCPServerEditorDraft.newStdio
     @State private var showingEditor = false
     @State private var editingServerID: String?
+    @State private var reviewingComponentID: String?
     @State private var importingSkill = false
     @State private var importingPlugin = false
 
@@ -55,18 +56,7 @@ struct ToolsIntegrationsSettingsTab: View {
                 Text("Imports are bounded SQLite snapshots. Miller never runs plugin hooks, copies executables, or retains authority over the source folder.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(editor.snapshot.plugins, id: \.id) { plugin in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(plugin.id).fontWeight(.medium)
-                            Text("Review required").font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Remove", role: .destructive) {
-                                Task { await editor.deletePlugin(id: plugin.id) }
-                            }
-                        }
-                        Text(plugin.supportedComponentSummary)
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    pluginRow(plugin)
                 }
                 ForEach(editor.snapshot.skills) { skill in
                     VStack(alignment: .leading, spacing: 4) {
@@ -104,6 +94,67 @@ struct ToolsIntegrationsSettingsTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
         }
+    }
+
+    @ViewBuilder
+    private func pluginRow(_ plugin: PluginPackageRecord) -> some View {
+        let components = editor.snapshot.pluginMCPComponents.filter {
+            $0.pluginID == plugin.id
+        }
+        let apps = editor.snapshot.pluginApps.filter { $0.pluginID == plugin.id }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(plugin.id).fontWeight(.medium)
+                Text("Review required").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Remove", role: .destructive) {
+                    Task { await editor.deletePlugin(id: plugin.id) }
+                }
+            }
+            Text(plugin.supportedComponentSummary)
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(components, id: \.componentID) { component in
+                HStack {
+                    Text(Self.componentReviewLabel(component))
+                        .font(.caption)
+                        .foregroundStyle(
+                            component.reviewState == .approved
+                                ? Color.secondary : Color.orange
+                        )
+                    Spacer()
+                    if component.reviewState == .pending {
+                        Button("Review…") { review(component) }
+                    }
+                }
+            }
+            ForEach(apps, id: \.appID) { app in
+                Text("\(app.name) — Codex only")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func componentReviewLabel(
+        _ component: PluginMCPComponentRecord
+    ) -> String {
+        var details = [
+            "MCP \(component.componentID)",
+            component.reviewState == .approved ? "Approved" : "Review required",
+        ]
+        if let path = component.relativeExecutablePath {
+            details.append("choose an absolute executable for \(path)")
+        }
+        if !component.unresolvedSecretNames.isEmpty {
+            details.append(
+                "bind secrets: \(component.unresolvedSecretNames.joined(separator: ", "))"
+            )
+        }
+        if component.reviewState == .pending,
+           component.relativeExecutablePath == nil
+        {
+            details.append("edit the disabled server and explicitly save a policy")
+        }
+        return details.joined(separator: " — ")
     }
 
     private func handleImport(
@@ -279,10 +330,13 @@ struct ToolsIntegrationsSettingsTab: View {
     }
 
     private var serverEditor: some View {
-        GroupBox(editingServerID == nil ? "New MCP server" : "Edit MCP server") {
+        GroupBox(
+            reviewingComponentID != nil ? "Review plugin MCP server"
+                : (editingServerID == nil ? "New MCP server" : "Edit MCP server")
+        ) {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Stable server ID", text: $draft.id)
-                    .disabled(editingServerID != nil)
+                    .disabled(editingServerID != nil || reviewingComponentID != nil)
                 TextField("Display name", text: $draft.displayName)
                 Picker("Transport", selection: $draft.transport) {
                     Text("stdio").tag(CapabilityServerTransport.stdio)
@@ -392,9 +446,44 @@ struct ToolsIntegrationsSettingsTab: View {
         showingEditor = true
     }
 
+    private func review(_ component: PluginMCPComponentRecord) {
+        if let snapshot = editor.snapshot.servers.first(where: {
+            $0.server.id == component.projectedServerID
+        }) {
+            edit(snapshot)
+            return
+        }
+        reviewingComponentID = component.componentID
+        editingServerID = nil
+        editor.clearConnectionStatus(serverID: component.projectedServerID)
+        draft = MCPServerEditorDraft(
+            id: component.projectedServerID,
+            displayName: String(
+                "\(component.pluginID) - \(component.componentID)".prefix(128)
+            ),
+            transport: component.transport,
+            executable: component.absoluteCommand ?? "",
+            argumentsJSON: (try? String(
+                data: JSONSerialization.data(withJSONObject: component.arguments),
+                encoding: .utf8
+            )) ?? "[]",
+            endpoint: component.endpoint ?? "",
+            enabled: false,
+            defaultPolicy: .askBeforeChanges,
+            providerProfileIDs: [],
+            secrets: component.unresolvedSecretNames.map {
+                MCPServerSecretDraft(kind: .environment, name: $0, value: "")
+            },
+            createdAt: component.createdAt,
+            pluginID: component.pluginID
+        )
+        showingEditor = true
+    }
+
     private func dismissEditor() {
         draft = .newStdio
         editingServerID = nil
+        reviewingComponentID = nil
         showingEditor = false
     }
 }

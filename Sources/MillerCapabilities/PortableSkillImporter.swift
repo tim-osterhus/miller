@@ -68,32 +68,113 @@ public struct PortableSkillImporter: Sendable {
     private static func frontmatter(_ markdown: String) throws
         -> (name: String, description: String)
     {
-        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        let normalized = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
         guard lines.first == "---",
               let end = lines.dropFirst().firstIndex(of: "---"), end > 1
         else { throw PortableSkillImportError.invalidFrontmatter }
         var values: [String: String] = [:]
-        for line in lines[1..<end] {
-            guard let separator = line.firstIndex(of: ":") else { continue }
+        var index = 1
+        while index < end {
+            let line = lines[index]
+            guard !line.isEmpty, line.first?.isWhitespace != true,
+                  let separator = line.firstIndex(of: ":")
+            else { throw PortableSkillImportError.invalidFrontmatter }
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
-            var value = line[line.index(after: separator)...]
+            let raw = line[line.index(after: separator)...]
                 .trimmingCharacters(in: .whitespaces)
-            if value.count >= 2,
-               (value.first == "\"" && value.last == "\""
-                || value.first == "'" && value.last == "'")
-            {
-                value.removeFirst(); value.removeLast()
-            }
-            guard !values.keys.contains(key) else {
+            guard !key.isEmpty, !values.keys.contains(key) else {
                 throw PortableSkillImportError.invalidFrontmatter
             }
-            values[key] = value
+            let value: String
+            if raw == "|" || raw == ">" {
+                var block: [String] = []
+                index += 1
+                while index < end, lines[index].first?.isWhitespace == true {
+                    let blockLine = lines[index]
+                    guard blockLine.hasPrefix("  ") else {
+                        throw PortableSkillImportError.invalidFrontmatter
+                    }
+                    block.append(String(blockLine.dropFirst(2)))
+                    index += 1
+                }
+                guard !block.isEmpty else {
+                    throw PortableSkillImportError.invalidFrontmatter
+                }
+                value = raw == "|" ? block.joined(separator: "\n")
+                    : foldBlock(block)
+                index -= 1
+            } else {
+                value = try parseScalar(String(raw))
+            }
+            guard !value.isEmpty, !value.contains("\0") else {
+                throw PortableSkillImportError.invalidFrontmatter
+            }
+            values[String(key)] = value
+            index += 1
         }
         guard let name = values["name"], let description = values["description"],
-              !name.isEmpty, !description.isEmpty,
               name.utf8.count <= 256, description.utf8.count <= 1_024,
-              !name.contains("\0"), !description.contains("\0")
+              !name.contains("\n")
         else { throw PortableSkillImportError.invalidFrontmatter }
         return (name, description)
+    }
+
+    private static func parseScalar(_ raw: String) throws -> String {
+        guard !raw.isEmpty else { throw PortableSkillImportError.invalidFrontmatter }
+        if raw.first == "\"" {
+            guard raw.last == "\"",
+                  let data = "[\(raw)]".data(using: .utf8),
+                  let decoded = try? JSONSerialization.jsonObject(with: data) as? [String],
+                  decoded.count == 1
+            else { throw PortableSkillImportError.invalidFrontmatter }
+            return decoded[0]
+        }
+        if raw.first == "'" {
+            guard raw.count >= 2, raw.last == "'" else {
+                throw PortableSkillImportError.invalidFrontmatter
+            }
+            let inner = raw.dropFirst().dropLast()
+            var result = "", cursor = inner.startIndex
+            while cursor < inner.endIndex {
+                if inner[cursor] == "'" {
+                    let next = inner.index(after: cursor)
+                    guard next < inner.endIndex, inner[next] == "'" else {
+                        throw PortableSkillImportError.invalidFrontmatter
+                    }
+                    result.append("'")
+                    cursor = inner.index(after: next)
+                } else {
+                    result.append(inner[cursor])
+                    cursor = inner.index(after: cursor)
+                }
+            }
+            return result
+        }
+        let primitive = raw.lowercased()
+        guard raw.first != "[", raw.first != "{", raw.first != "&",
+              raw.first != "*", raw.first != "!", raw.first != "|",
+              raw.first != ">", raw.first != "%", raw.first != "@",
+              raw.first != "`", !raw.hasPrefix("- "), !raw.hasPrefix("? "),
+              !["true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf"]
+                .contains(primitive),
+              Double(raw) == nil
+        else { throw PortableSkillImportError.invalidFrontmatter }
+        return raw
+    }
+
+    private static func foldBlock(_ lines: [String]) -> String {
+        var result = ""
+        for line in lines {
+            if line.isEmpty {
+                if !result.hasSuffix("\n") { result.append("\n") }
+            } else {
+                if !result.isEmpty, !result.hasSuffix("\n") { result.append(" ") }
+                result.append(line)
+            }
+        }
+        return result
     }
 }

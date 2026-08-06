@@ -158,6 +158,20 @@ struct GPTLivePresentationTests {
         #expect(model.voiceStatusText == "Transcript could not be saved")
     }
 
+    @Test
+    func portableSkillOmissionIsVisibleDuringLiveVoice() async {
+        let model = AppPresentationModel(
+            dependencies: dependencies(), liveVoice: .unavailable
+        )
+
+        await model.applyLiveEvent(.state(.listening))
+        await model.applyLiveEvent(.status(.portableSkillsOmitted))
+
+        #expect(model.voiceState == .listening)
+        #expect(model.voiceStatusText
+            == "Listening — some enabled skills were omitted to stay within limits")
+    }
+
     @Test(arguments: TranscriptPersistenceFailureStage.allCases)
     func transcriptWriteFailuresRemainTruthfulAndMediaSafe(
         stage: TranscriptPersistenceFailureStage
@@ -1396,6 +1410,9 @@ struct GPTLivePresentationTests {
             credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
             refreshCredential: {},
             microphonePermission: { .authorized },
+            portableSkillAttachment: { _ in
+                try PortableSkillAttachment(skills: [], omittedCount: 2)
+            },
             makePeer: { await lifecycle.makePeer() },
             releasePeer: { await lifecycle.releasePeer() },
             helperVerifier: acceptingLiveHelperVerifier,
@@ -1416,6 +1433,8 @@ struct GPTLivePresentationTests {
 
         let run = Task { await model.startLiveVoice() }
         try await waitUntil { await MainActor.run { model.voiceState == .listening } }
+        #expect(model.voiceStatusText
+            == "Listening — some enabled skills were omitted to stay within limits")
         await model.endLiveVoice()
         await run.value
 

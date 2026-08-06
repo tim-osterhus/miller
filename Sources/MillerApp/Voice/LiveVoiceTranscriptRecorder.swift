@@ -60,7 +60,7 @@ struct LiveTranscriptProjection {
             }
             lastCompletedRole = role
             lastCompletedText = text
-        case .sessionAdmitted, .state, .failed:
+        case .sessionAdmitted, .state, .status, .failed:
             break
         }
     }
@@ -287,7 +287,7 @@ actor LiveVoiceTranscriptRecorder {
             committed.lastCompletedRole = role
             committed.lastCompletedText = text
             activeSession = committed
-        case .sessionAdmitted, .state, .failed:
+        case .sessionAdmitted, .state, .status, .failed:
             break
         }
     }

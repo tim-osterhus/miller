@@ -396,14 +396,19 @@
             "portable_skills": {
               "type": "array",
               "maxItems": 128,
+              "x-miller-uniqueBy": "id",
+              "x-miller-aggregateUtf8Bytes": {
+                "maximum": 131072,
+                "properties": ["id", "name", "description", "markdown"]
+              },
               "items": {
                 "type": "object",
                 "required": ["id", "name", "description", "markdown"],
                 "properties": {
-                  "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9._-]+$"},
-                  "name": {"type": "string", "minLength": 1, "maxLength": 256},
-                  "description": {"type": "string", "minLength": 1, "maxLength": 1024},
-                  "markdown": {"type": "string", "maxLength": 65536}
+                  "id": {"type": "string", "minLength": 1, "x-miller-maxUtf8Bytes": 96, "pattern": "^[A-Za-z0-9._-]+$"},
+                  "name": {"type": "string", "minLength": 1, "x-miller-maxUtf8Bytes": 256},
+                  "description": {"type": "string", "minLength": 1, "x-miller-maxUtf8Bytes": 1024},
+                  "markdown": {"type": "string", "x-miller-maxUtf8Bytes": 65536}
                 },
                 "additionalProperties": false
               }

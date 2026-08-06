@@ -315,6 +315,7 @@ final class AppPresentationModel: ObservableObject {
     @Published private(set) var liveVoiceMuted = false
     @Published private(set) var liveVoiceFailureCode: String?
     @Published private(set) var liveTranscriptPersistenceMessage: String?
+    @Published private(set) var liveVoiceReasoningStatus: ReasoningStatus?
     @Published private(set) var voiceHistorySessions: [VoiceHistorySession] = []
     @Published private(set) var pendingVoiceHistoryAttachment:
         PreparedVoiceHistoryAttachment?
@@ -445,7 +446,7 @@ final class AppPresentationModel: ObservableObject {
         if let liveTranscriptPersistenceMessage {
             return liveTranscriptPersistenceMessage
         }
-        return switch voiceState {
+        let state = switch voiceState {
         case .available: "Available"
         case .connecting: "Connecting"
         case .listening: "Listening"
@@ -456,6 +457,12 @@ final class AppPresentationModel: ObservableObject {
         case .unavailable: "Unavailable"
         case .failed: liveVoiceFailureCode.map { "Failed (\($0))" } ?? "Failed"
         }
+        if liveVoiceReasoningStatus == .portableSkillsOmitted,
+           voiceState.isActive
+        {
+            return "\(state) — some enabled skills were omitted to stay within limits"
+        }
+        return state
     }
 
     var menuState: MenuState {
@@ -1255,6 +1262,7 @@ final class AppPresentationModel: ObservableObject {
         let eventGeneration = nextLiveVoiceEventGeneration()
         voiceState = .connecting
         liveVoiceFailureCode = nil
+        liveVoiceReasoningStatus = nil
         liveTranscriptPersistenceMessage = nil
         resetLiveTranscripts()
         liveVoiceMuted = false
@@ -1434,6 +1442,8 @@ final class AppPresentationModel: ObservableObject {
             if persistenceFailed { presentTranscriptPersistenceFailure() }
             liveTranscriptProjection.record(event)
             liveTranscriptTurns = liveTranscriptProjection.turns
+        case let .status(status):
+            liveVoiceReasoningStatus = status
         case let .failed(code):
             liveVoiceFailureCode = Self.sanitizedLiveCode(code)
             voiceState = .failed

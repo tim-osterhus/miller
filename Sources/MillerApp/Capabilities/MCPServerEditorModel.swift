@@ -51,6 +51,7 @@ struct MCPServerEditorDraft: Equatable, Sendable {
     var providerProfileIDs = Set<UUID>()
     var secrets: [MCPServerSecretDraft] = []
     var createdAt = Date()
+    var pluginID: String?
 
     static var newStdio: Self { .init() }
 
@@ -139,7 +140,8 @@ struct MCPServerEditorDraft: Equatable, Sendable {
                 defaultPolicy: defaultPolicy,
                 staleState: .stale,
                 createdAt: createdAt,
-                updatedAt: now
+                updatedAt: now,
+                pluginID: pluginID
             ),
             providerProfileIDs: providerProfileIDs,
             secrets: bindings,
@@ -341,6 +343,8 @@ struct CapabilitySettingsSnapshot: Equatable, Sendable {
     let servers: [MCPServerSettingsSnapshot]
     let providerNames: [UUID: String]
     let plugins: [PluginPackageRecord]
+    let pluginMCPComponents: [PluginMCPComponentRecord]
+    let pluginApps: [PluginAppMetadataRecord]
     let skills: [PortableSkillSettingsSnapshot]
 
     init(
@@ -348,12 +352,16 @@ struct CapabilitySettingsSnapshot: Equatable, Sendable {
         servers: [MCPServerSettingsSnapshot] = [],
         providerNames: [UUID: String] = [:],
         plugins: [PluginPackageRecord] = [],
+        pluginMCPComponents: [PluginMCPComponentRecord] = [],
+        pluginApps: [PluginAppMetadataRecord] = [],
         skills: [PortableSkillSettingsSnapshot] = []
     ) {
         self.codexApps = codexApps
         self.servers = servers
         self.providerNames = providerNames
         self.plugins = plugins
+        self.pluginMCPComponents = pluginMCPComponents
+        self.pluginApps = pluginApps
         self.skills = skills
     }
 

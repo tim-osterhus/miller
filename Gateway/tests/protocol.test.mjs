@@ -131,6 +131,24 @@ test("portable skill records are closed, unique, and byte bounded", () => {
     ...start,
     portable_skills: [start.portable_skills[0], start.portable_skills[0]],
   }), /invalid_(?:record|field)/);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [{ ...start.portable_skills[0], name: "é".repeat(129) }],
+  }), /invalid_(?:record|field)/);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [
+      { ...start.portable_skills[0], id: "same" },
+      { ...start.portable_skills[0], id: "same", name: "Different" },
+    ],
+  }), /invalid_(?:record|field)/);
+  assert.throws(() => validateGatewayRecord({
+    ...start,
+    portable_skills: [
+      { id: "one", name: "One", description: "One", markdown: "x".repeat(65536) },
+      { id: "two", name: "Two", description: "Two", markdown: "x".repeat(65536) },
+    ],
+  }), /invalid_(?:record|field)/);
 });
 
 test("fake helper rejects unknown and oversized portable skill input", async () => {

@@ -33,6 +33,7 @@ public struct CapabilityServerRecord: Codable, Equatable, Sendable {
     public let staleState: CapabilityCatalogStaleState
     public let createdAt: Date
     public let updatedAt: Date
+    public let pluginID: String?
 
     public init(
         id: String,
@@ -45,7 +46,8 @@ public struct CapabilityServerRecord: Codable, Equatable, Sendable {
         defaultPolicy: CapabilityPolicy,
         staleState: CapabilityCatalogStaleState,
         createdAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        pluginID: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -58,6 +60,60 @@ public struct CapabilityServerRecord: Codable, Equatable, Sendable {
         self.staleState = staleState
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.pluginID = pluginID
+    }
+}
+
+public enum PluginMCPReviewState: String, Codable, Equatable, Sendable {
+    case pending
+    case approved
+}
+
+public struct PluginMCPComponentRecord: Codable, Equatable, Sendable {
+    public let pluginID: String
+    public let componentID: String
+    public let projectedServerID: String
+    public let transport: CapabilityServerTransport
+    public let absoluteCommand: String?
+    public let endpoint: String?
+    public let arguments: [String]
+    public let relativeExecutablePath: String?
+    public let unresolvedSecretNames: [String]
+    public let reviewState: PluginMCPReviewState
+    public let createdAt: Date
+    public let updatedAt: Date
+
+    public init(
+        pluginID: String, componentID: String, projectedServerID: String,
+        transport: CapabilityServerTransport, absoluteCommand: String?,
+        endpoint: String?, arguments: [String], relativeExecutablePath: String?,
+        unresolvedSecretNames: [String], reviewState: PluginMCPReviewState,
+        createdAt: Date, updatedAt: Date
+    ) {
+        self.pluginID = pluginID
+        self.componentID = componentID
+        self.projectedServerID = projectedServerID
+        self.transport = transport
+        self.absoluteCommand = absoluteCommand
+        self.endpoint = endpoint
+        self.arguments = arguments
+        self.relativeExecutablePath = relativeExecutablePath
+        self.unresolvedSecretNames = unresolvedSecretNames
+        self.reviewState = reviewState
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct PluginAppMetadataRecord: Codable, Equatable, Sendable {
+    public let pluginID: String
+    public let appID: String
+    public let name: String
+
+    public init(pluginID: String, appID: String, name: String) {
+        self.pluginID = pluginID
+        self.appID = appID
+        self.name = name
     }
 }
 
@@ -301,6 +357,10 @@ public enum CapabilityStorageError: Error, Equatable, Sendable {
     case pluginSummaryTooLarge
     case skillMarkdownTooLarge
     case invalidRecord
+    case pluginNotFound
+    case pluginReviewRequired
+    case pluginComponentUnresolved
+    case pluginOwnedServer
 }
 
 public actor SQLiteCapabilityRepository {
@@ -747,6 +807,11 @@ public actor SQLiteCapabilityRepository {
     public func deleteServer(id: String) throws {
         try preflightWrite()
         try database.transaction {
+            let owned = try database.scalarInt(
+                "SELECT COUNT(*) FROM capability_servers WHERE id = ? AND plugin_id IS NOT NULL",
+                bindings: [.text(id)]
+            )
+            guard owned == 0 else { throw CapabilityStorageError.pluginOwnedServer }
             try database.execute(
                 "DELETE FROM capability_servers WHERE id = ?",
                 bindings: [.text(id)]
@@ -1224,6 +1289,9 @@ public actor SQLiteCapabilityRepository {
                 "DELETE FROM plugin_packages WHERE id = ?",
                 bindings: [.text(id)]
             )
+            guard database.changes == 1 else {
+                throw CapabilityStorageError.pluginNotFound
+            }
         }
     }
 
@@ -1269,19 +1337,56 @@ public actor SQLiteCapabilityRepository {
         skills importedSkills: [PortableSkillRecord],
         disabledServers: [CapabilityServerRecord]
     ) throws {
+        let components = disabledServers.map { server in
+            PluginMCPComponentRecord(
+                pluginID: plugin.id, componentID: server.id,
+                projectedServerID: server.id, transport: server.transport,
+                absoluteCommand: server.command, endpoint: server.endpoint,
+                arguments: server.arguments, relativeExecutablePath: nil,
+                unresolvedSecretNames: [], reviewState: .pending,
+                createdAt: server.createdAt, updatedAt: server.updatedAt
+            )
+        }
+        try importPluginSnapshot(
+            plugin: plugin, skills: importedSkills,
+            mcpComponents: components, apps: []
+        )
+    }
+
+    public func importPluginSnapshot(
+        plugin: PluginPackageRecord,
+        skills importedSkills: [PortableSkillRecord],
+        mcpComponents: [PluginMCPComponentRecord],
+        apps: [PluginAppMetadataRecord]
+    ) throws {
         guard plugin.id.utf8.count <= 96, !plugin.id.isEmpty,
               plugin.sourceHash.utf8.count == 64,
               plugin.supportedComponentSummary.utf8.count <= 4 * 1_024,
-              importedSkills.count <= 16, disabledServers.count <= 16,
+              importedSkills.count <= 16, mcpComponents.count <= 16,
+              apps.count <= 128,
               Set(importedSkills.map(\.id)).count == importedSkills.count,
-              Set(disabledServers.map(\.id)).count == disabledServers.count,
+              Set(mcpComponents.map(\.componentID)).count == mcpComponents.count,
+              Set(mcpComponents.map(\.projectedServerID)).count == mcpComponents.count,
+              Set(apps.map(\.appID)).count == apps.count,
               importedSkills.allSatisfy({
                   $0.pluginID == plugin.id && !$0.enabled
                       && $0.markdownSnapshot.utf8.count <= 64 * 1_024
                       && !$0.name.isEmpty && !$0.description.isEmpty
                       && $0.sourceHash.utf8.count == 64
               }),
-              disabledServers.allSatisfy({ !$0.enabled })
+              mcpComponents.allSatisfy({
+                  $0.pluginID == plugin.id && $0.reviewState == .pending
+                      && Self.validPluginIdentifier($0.componentID)
+                      && Self.validRuntimeIdentifier($0.projectedServerID)
+                      && $0.unresolvedSecretNames.count <= 128
+                      && Set($0.unresolvedSecretNames).count
+                        == $0.unresolvedSecretNames.count
+              }),
+              apps.allSatisfy({
+                  $0.pluginID == plugin.id && !$0.appID.isEmpty
+                      && $0.appID.utf8.count <= 96 && !$0.name.isEmpty
+                      && $0.name.utf8.count <= 256
+              })
         else { throw CapabilityStorageError.invalidRecord }
         let existingIDs = Set(try skills().map(\.id))
         let importedIDs = Set(importedSkills.map(\.id))
@@ -1289,12 +1394,35 @@ public actor SQLiteCapabilityRepository {
         let existingPluginIDs = Set(try plugins().map(\.id))
         guard !existingPluginIDs.contains(plugin.id),
               existingIDs.isDisjoint(with: importedIDs),
-              existingServerIDs.isDisjoint(with: disabledServers.map(\.id)),
+              existingServerIDs.isDisjoint(with: mcpComponents.map(\.projectedServerID)),
               existingIDs.count + importedIDs.count <= 128
         else {
             throw CapabilityStorageError.invalidRecord
         }
-        let serverArguments = try disabledServers.map(Self.validate(server:))
+        let componentJSON = try mcpComponents.map { component in
+            let arguments = try JSONEncoder().encode(component.arguments)
+            let secrets = try JSONEncoder().encode(component.unresolvedSecretNames)
+            guard arguments.count <= 64 * 1_024, secrets.count <= 64 * 1_024,
+                  let argumentsJSON = String(data: arguments, encoding: .utf8),
+                  let secretsJSON = String(data: secrets, encoding: .utf8)
+            else { throw CapabilityStorageError.invalidRecord }
+            switch component.transport {
+            case .stdio:
+                guard component.endpoint == nil,
+                      (component.absoluteCommand != nil)
+                        != (component.relativeExecutablePath != nil),
+                      component.absoluteCommand?.hasPrefix("/") ?? true
+                else { throw CapabilityStorageError.invalidRecord }
+            case .streamableHTTP:
+                guard component.absoluteCommand == nil,
+                      component.relativeExecutablePath == nil,
+                      let endpoint = component.endpoint,
+                      let url = URL(string: endpoint), url.scheme == "https",
+                      url.host != nil
+                else { throw CapabilityStorageError.invalidRecord }
+            }
+            return (argumentsJSON, secretsJSON)
+        }
         try preflightWrite()
         try database.transaction {
             try database.execute(
@@ -1327,23 +1455,257 @@ public actor SQLiteCapabilityRepository {
                     ]
                 )
             }
-            for (index, server) in disabledServers.enumerated() {
+            for (index, component) in mcpComponents.enumerated() {
+                try database.execute(
+                    """
+                    INSERT INTO plugin_mcp_components
+                        (plugin_id, component_id, projected_server_id, transport,
+                         absolute_command, endpoint, arguments_json,
+                         relative_executable_path, unresolved_secret_names_json,
+                         review_state, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    """,
+                    bindings: [
+                        .text(component.pluginID), .text(component.componentID),
+                        .text(component.projectedServerID),
+                        .text(component.transport.rawValue),
+                        Self.optional(component.absoluteCommand),
+                        Self.optional(component.endpoint),
+                        .text(componentJSON[index].0),
+                        Self.optional(component.relativeExecutablePath),
+                        .text(componentJSON[index].1),
+                        .text(Self.timestamp(component.createdAt)),
+                        .text(Self.timestamp(component.updatedAt)),
+                    ]
+                )
+                guard component.absoluteCommand != nil || component.endpoint != nil
+                else { continue }
                 try database.execute(
                     """
                     INSERT INTO capability_servers
                         (id, display_name, transport, command, endpoint,
                          arguments_json, enabled, default_policy, stale_state,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                         created_at, updated_at, plugin_id)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'stale', ?, ?, ?)
                     """,
                     bindings: [
-                        .text(server.id), .text(server.displayName),
-                        .text(server.transport.rawValue), Self.optional(server.command),
-                        Self.optional(server.endpoint), .text(serverArguments[index]),
-                        .text(server.defaultPolicy.rawValue),
-                        .text(server.staleState.rawValue),
-                        .text(Self.timestamp(server.createdAt)),
-                        .text(Self.timestamp(server.updatedAt)),
+                        .text(component.projectedServerID),
+                        .text(String(
+                            "\(plugin.id) - \(component.componentID)".prefix(128)
+                        )),
+                        .text(component.transport.rawValue),
+                        Self.optional(component.absoluteCommand),
+                        Self.optional(component.endpoint),
+                        .text(componentJSON[index].0),
+                        .text(CapabilityPolicy.askBeforeChanges.rawValue),
+                        .text(Self.timestamp(component.createdAt)),
+                        .text(Self.timestamp(component.updatedAt)), .text(plugin.id),
+                    ]
+                )
+            }
+            for app in apps {
+                try database.execute(
+                    """
+                    INSERT INTO plugin_app_metadata (plugin_id, app_id, name)
+                    VALUES (?, ?, ?)
+                    """,
+                    bindings: [.text(app.pluginID), .text(app.appID), .text(app.name)]
+                )
+            }
+        }
+    }
+
+    public func pluginMCPComponents(
+        pluginID: String? = nil
+    ) throws -> [PluginMCPComponentRecord] {
+        let suffix = pluginID == nil ? "" : " WHERE plugin_id = ?"
+        let bindings = pluginID.map { [SQLiteValue.text($0)] } ?? []
+        return try database.query(
+            """
+            SELECT plugin_id, component_id, projected_server_id, transport,
+                   absolute_command, endpoint, arguments_json,
+                   relative_executable_path, unresolved_secret_names_json,
+                   review_state, created_at, updated_at
+            FROM plugin_mcp_components\(suffix)
+            ORDER BY plugin_id ASC, component_id ASC
+            """,
+            bindings: bindings
+        ).map(Self.decodePluginMCPComponent)
+    }
+
+    public func pluginApps(pluginID: String? = nil) throws
+        -> [PluginAppMetadataRecord]
+    {
+        let suffix = pluginID == nil ? "" : " WHERE plugin_id = ?"
+        let bindings = pluginID.map { [SQLiteValue.text($0)] } ?? []
+        return try database.query(
+            """
+            SELECT plugin_id, app_id, name FROM plugin_app_metadata\(suffix)
+            ORDER BY plugin_id ASC, app_id ASC
+            """,
+            bindings: bindings
+        ).map { row in
+            guard row.count == 3, let pluginID = Self.string(row[0]),
+                  let appID = Self.string(row[1]), let name = Self.string(row[2])
+            else { throw CapabilityStorageError.invalidRecord }
+            return PluginAppMetadataRecord(
+                pluginID: pluginID, appID: appID, name: name
+            )
+        }
+    }
+
+    public func isPluginServerApproved(_ serverID: String) throws -> Bool {
+        let rows = try database.query(
+            """
+            SELECT review_state FROM plugin_mcp_components
+            WHERE projected_server_id = ?
+            """,
+            bindings: [.text(serverID)]
+        )
+        guard let row = rows.first else { return true }
+        return Self.string(row[0]) == PluginMCPReviewState.approved.rawValue
+    }
+
+    public func approvePluginMCPComponent(
+        server: CapabilityServerRecord,
+        secretBindings: [CapabilitySecretBinding]
+    ) throws {
+        guard let pluginID = server.pluginID,
+              !server.enabled, server.staleState == .stale,
+              let component = try pluginMCPComponents().first(where: {
+                  $0.projectedServerID == server.id && $0.pluginID == pluginID
+              }), component.reviewState == .pending,
+              component.transport == server.transport,
+              (server.command?.hasPrefix("/") ?? (server.transport != .stdio)),
+              Set(component.unresolvedSecretNames).isSubset(of: Set(
+                  secretBindings.filter {
+                      $0.serverID == server.id && $0.kind == .environment
+                  }.map(\.name)
+              )),
+              secretBindings.allSatisfy({
+                  $0.serverID == server.id && !$0.name.isEmpty
+              }),
+              Set(secretBindings.map(\.id)).count == secretBindings.count,
+              Set(secretBindings.map(\.credentialReference)).count
+                == secretBindings.count
+        else { throw CapabilityStorageError.pluginComponentUnresolved }
+        let argumentsJSON = try Self.validate(server: server)
+        try preflightWrite()
+        try database.transaction {
+            try database.execute(
+                """
+                INSERT INTO capability_servers
+                    (id, display_name, transport, command, endpoint,
+                     arguments_json, enabled, default_policy, stale_state,
+                     created_at, updated_at, plugin_id)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'stale', ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    transport = excluded.transport,
+                    command = excluded.command,
+                    endpoint = excluded.endpoint,
+                    arguments_json = excluded.arguments_json,
+                    enabled = 0,
+                    default_policy = excluded.default_policy,
+                    stale_state = 'stale',
+                    updated_at = excluded.updated_at
+                WHERE capability_servers.plugin_id = excluded.plugin_id
+                """,
+                bindings: [
+                    .text(server.id), .text(server.displayName),
+                    .text(server.transport.rawValue),
+                    Self.optional(server.command), Self.optional(server.endpoint),
+                    .text(argumentsJSON), .text(server.defaultPolicy.rawValue),
+                    .text(Self.timestamp(server.createdAt)),
+                    .text(Self.timestamp(server.updatedAt)),
+                    .text(pluginID),
+                ]
+            )
+            guard database.changes == 1 else {
+                throw CapabilityStorageError.pluginComponentUnresolved
+            }
+            try database.execute(
+                "DELETE FROM capability_secret_bindings WHERE server_id = ?",
+                bindings: [.text(server.id)]
+            )
+            for binding in secretBindings {
+                try database.execute(
+                    """
+                    INSERT INTO capability_secret_bindings
+                        (id, server_id, binding_kind, binding_name, credential_ref)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    bindings: [
+                        .text(Self.id(binding.id)), .text(server.id),
+                        .text(binding.kind.rawValue), .text(binding.name),
+                        .text(Self.id(binding.credentialReference)),
+                    ]
+                )
+            }
+            try database.execute(
+                """
+                UPDATE plugin_mcp_components
+                SET review_state = 'approved', absolute_command = ?, endpoint = ?,
+                    relative_executable_path = NULL, updated_at = ?
+                WHERE plugin_id = ? AND projected_server_id = ?
+                """,
+                bindings: [
+                    Self.optional(server.command), Self.optional(server.endpoint),
+                    .text(Self.timestamp(server.updatedAt)), .text(pluginID),
+                    .text(server.id),
+                ]
+            )
+        }
+    }
+
+    public func restorePluginMCPComponentToPending(
+        _ component: PluginMCPComponentRecord,
+        removeProjectedServer: Bool
+    ) throws {
+        guard component.reviewState == .pending else {
+            throw CapabilityStorageError.invalidRecord
+        }
+        let arguments = try JSONEncoder().encode(component.arguments)
+        let secrets = try JSONEncoder().encode(component.unresolvedSecretNames)
+        guard arguments.count <= 64 * 1_024, secrets.count <= 64 * 1_024,
+              let argumentsJSON = String(data: arguments, encoding: .utf8),
+              let secretsJSON = String(data: secrets, encoding: .utf8)
+        else { throw CapabilityStorageError.invalidRecord }
+        try preflightWrite()
+        try database.transaction {
+            try database.execute(
+                """
+                UPDATE plugin_mcp_components
+                SET transport = ?, absolute_command = ?, endpoint = ?,
+                    arguments_json = ?, relative_executable_path = ?,
+                    unresolved_secret_names_json = ?, review_state = 'pending',
+                    created_at = ?, updated_at = ?
+                WHERE plugin_id = ? AND component_id = ?
+                  AND projected_server_id = ?
+                """,
+                bindings: [
+                    .text(component.transport.rawValue),
+                    Self.optional(component.absoluteCommand),
+                    Self.optional(component.endpoint), .text(argumentsJSON),
+                    Self.optional(component.relativeExecutablePath),
+                    .text(secretsJSON),
+                    .text(Self.timestamp(component.createdAt)),
+                    .text(Self.timestamp(component.updatedAt)),
+                    .text(component.pluginID), .text(component.componentID),
+                    .text(component.projectedServerID),
+                ]
+            )
+            guard database.changes == 1 else {
+                throw CapabilityStorageError.pluginComponentUnresolved
+            }
+            if removeProjectedServer {
+                try database.execute(
+                    """
+                    DELETE FROM capability_servers
+                    WHERE id = ? AND plugin_id = ?
+                    """,
+                    bindings: [
+                        .text(component.projectedServerID), .text(component.pluginID),
                     ]
                 )
             }
@@ -1513,6 +1875,24 @@ public actor SQLiteCapabilityRepository {
         return json
     }
 
+    private static func validPluginIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 96
+            && value.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII && ((97...122).contains(scalar.value)
+                    || (48...57).contains(scalar.value)
+                    || scalar == "-" || scalar == "_" || scalar == ".")
+            }
+    }
+
+    private static func validRuntimeIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 96
+            && value.unicodeScalars.allSatisfy { scalar in
+                scalar.isASCII && ((97...122).contains(scalar.value)
+                    || (48...57).contains(scalar.value)
+                    || scalar == "-" || scalar == "_")
+            }
+    }
+
     private static func validateCatalog(
         _ descriptors: [CapabilityDescriptor],
         serverID: String
@@ -1541,7 +1921,7 @@ public actor SQLiteCapabilityRepository {
     private static func decodeServer(
         _ row: [SQLiteValue]
     ) throws -> CapabilityServerRecord {
-        guard row.count == 11,
+        guard row.count == 12,
               let id = string(row[0]), let displayName = string(row[1]),
               let transportValue = string(row[2]),
               let transport = CapabilityServerTransport(rawValue: transportValue),
@@ -1560,7 +1940,41 @@ public actor SQLiteCapabilityRepository {
             id: id, displayName: displayName, transport: transport,
             command: string(row[3]), endpoint: string(row[4]),
             arguments: arguments, enabled: enabled, defaultPolicy: policy,
-            staleState: stale, createdAt: createdAt, updatedAt: updatedAt
+            staleState: stale, createdAt: createdAt, updatedAt: updatedAt,
+            pluginID: string(row[11])
+        )
+    }
+
+    private static func decodePluginMCPComponent(
+        _ row: [SQLiteValue]
+    ) throws -> PluginMCPComponentRecord {
+        guard row.count == 12, let pluginID = string(row[0]),
+              let componentID = string(row[1]),
+              let projectedServerID = string(row[2]),
+              let transportValue = string(row[3]),
+              let transport = CapabilityServerTransport(rawValue: transportValue),
+              let argumentsJSON = string(row[6]),
+              let argumentsData = argumentsJSON.data(using: .utf8),
+              let arguments = try? JSONDecoder().decode(
+                  [String].self, from: argumentsData
+              ),
+              let secretsJSON = string(row[8]),
+              let secretsData = secretsJSON.data(using: .utf8),
+              let secrets = try? JSONDecoder().decode(
+                  [String].self, from: secretsData
+              ),
+              let reviewValue = string(row[9]),
+              let review = PluginMCPReviewState(rawValue: reviewValue),
+              let createdValue = string(row[10]), let createdAt = date(createdValue),
+              let updatedValue = string(row[11]), let updatedAt = date(updatedValue)
+        else { throw CapabilityStorageError.invalidRecord }
+        return PluginMCPComponentRecord(
+            pluginID: pluginID, componentID: componentID,
+            projectedServerID: projectedServerID, transport: transport,
+            absoluteCommand: string(row[4]), endpoint: string(row[5]),
+            arguments: arguments, relativeExecutablePath: string(row[7]),
+            unresolvedSecretNames: secrets, reviewState: review,
+            createdAt: createdAt, updatedAt: updatedAt
         )
     }
 
@@ -1741,7 +2155,8 @@ public actor SQLiteCapabilityRepository {
 
     private static let serverSelect = """
         SELECT id, display_name, transport, command, endpoint, arguments_json,
-               enabled, default_policy, stale_state, created_at, updated_at
+               enabled, default_policy, stale_state, created_at, updated_at,
+               plugin_id
         FROM capability_servers
         """
 

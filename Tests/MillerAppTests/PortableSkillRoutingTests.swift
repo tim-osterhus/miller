@@ -28,24 +28,25 @@ struct PortableSkillRoutingTests {
     }
 
     @Test
-    func attachesOnlyEnabledProviderSkillsAndDeletionAffectsOnlyFutureRequests() async throws {
+    func productionRoutingProjectsOneSkillPerProviderAndDeletionIsProspective() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "miller-portable-routing-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let repository = try SQLiteCapabilityRepository(path: root.appending(path: "db.sqlite3").path)
-        let provider = UUID(), other = UUID()
+        let codex = try ProviderProfile(
+            kind: .codexOAuth, label: "Codex", baseURL: nil,
+            model: "gpt-5.6-terra"
+        )
+        let deepSeek = try ProviderProfile(
+            kind: .openAICompatible, label: "DeepSeek",
+            baseURL: "https://api.deepseek.com", model: "deepseek-chat"
+        )
         let profileRepository = try SQLiteConversationRepository(
             path: root.appending(path: "db.sqlite3").path
         )
-        try await profileRepository.saveProviderProfile(try ProviderProfile(
-            id: provider, kind: .openAICompatible, label: "Selected",
-            baseURL: "https://example.invalid", model: "fixture"
-        ))
-        try await profileRepository.saveProviderProfile(try ProviderProfile(
-            id: other, kind: .openAICompatible, label: "Other",
-            baseURL: "https://other.example.invalid", model: "fixture"
-        ))
+        try await profileRepository.saveProviderProfile(codex)
+        try await profileRepository.saveProviderProfile(deepSeek)
         let now = Date()
         let skill = PortableSkillRecord(
             id: "skill-example", pluginID: nil, name: "Example",
@@ -54,42 +55,82 @@ struct PortableSkillRoutingTests {
             createdAt: now, updatedAt: now
         )
         try await repository.saveSkill(skill)
-        try await repository.setSkillEnabled(true, skillID: skill.id, providerProfileID: provider)
+        try await repository.setSkillEnabled(
+            true, skillID: skill.id, providerProfileID: codex.id
+        )
         let controller = CapabilityController(
             loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
             settingsRepository: repository
         )
         await controller.start()
-        let original = ReasoningRequest(
-            conversationID: ConversationID(), turnID: TurnID(), generation: 1,
-            context: [], userText: "hello"
+        let selection = PortableSkillProfileSelection(codex)
+        let codexProbe = PortableSkillGatewayProbe()
+        let piProbe = PortableSkillGatewayProbe()
+        let router = ProviderRoutingGateway(
+            selectedKind: { await selection.profile.kind },
+            codex: codexProbe, openAICompatible: piProbe
         )
+        let gateway = CapabilityReasoningGateway(
+            base: router, selectedProfile: { await selection.profile },
+            controller: controller
+        )
+        func run(_ generation: Int) async throws {
+            let stream = try await gateway.start(.init(
+                conversationID: ConversationID(), turnID: TurnID(),
+                generation: generation, context: [], userText: "hello"
+            ))
+            for try await _ in stream {}
+        }
 
-        let selected = try await controller.prepareRequest(
-            original, providerProfileID: provider, kind: .openAICompatible
-        )
-        #expect(selected.portableSkillAttachment?.skills.map(\.id) == [skill.id])
-        await controller.finishTypedAssociation(turnID: original.turnID, generation: 1)
+        try await run(1)
+        let firstCodex = try #require(await codexProbe.requests.first)
+        #expect(firstCodex.portableSkillAttachment?.skills.map(\.id) == [skill.id])
+        #expect(await piProbe.requests.isEmpty)
 
-        let different = ReasoningRequest(
-            conversationID: original.conversationID, turnID: TurnID(), generation: 2,
-            context: [], userText: "hello again"
+        await selection.set(deepSeek)
+        try await run(2)
+        #expect(try #require(await piProbe.requests.last).portableSkillAttachment == nil)
+
+        try await repository.setSkillEnabled(
+            true, skillID: skill.id, providerProfileID: deepSeek.id
         )
-        let excluded = try await controller.prepareRequest(
-            different, providerProfileID: other, kind: .openAICompatible
+        try await run(3)
+        #expect(try #require(await piProbe.requests.last)
+            .portableSkillAttachment?.skills.map(\.id) == [skill.id])
+
+        try await repository.setSkillEnabled(
+            false, skillID: skill.id, providerProfileID: deepSeek.id
         )
-        #expect(excluded.portableSkillAttachment == nil)
-        await controller.finishTypedAssociation(turnID: different.turnID, generation: 2)
+        try await run(4)
+        #expect(try #require(await piProbe.requests.last).portableSkillAttachment == nil)
 
         try await repository.deleteSkill(id: skill.id)
-        let afterDelete = ReasoningRequest(
-            conversationID: original.conversationID, turnID: TurnID(), generation: 3,
-            context: [], userText: "third"
-        )
-        let absent = try await controller.prepareRequest(
-            afterDelete, providerProfileID: provider, kind: .openAICompatible
-        )
-        #expect(absent.portableSkillAttachment == nil)
-        #expect(selected.portableSkillAttachment?.skills.map(\.id) == [skill.id])
+        await selection.set(codex)
+        try await run(5)
+        #expect(try #require(await codexProbe.requests.last).portableSkillAttachment == nil)
+        #expect(firstCodex.portableSkillAttachment?.skills.map(\.id) == [skill.id])
     }
+}
+
+private actor PortableSkillProfileSelection {
+    private(set) var profile: ProviderProfile
+    init(_ profile: ProviderProfile) { self.profile = profile }
+    func set(_ profile: ProviderProfile) { self.profile = profile }
+}
+
+private actor PortableSkillGatewayProbe: ReasoningGateway {
+    private(set) var requests: [ReasoningRequest] = []
+
+    func start(
+        _ request: ReasoningRequest
+    ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
+        requests.append(request)
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.accepted)
+            continuation.yield(.completed)
+            continuation.finish()
+        }
+    }
+
+    func cancel(_ cancellation: ReasoningCancellation) async { _ = cancellation }
 }

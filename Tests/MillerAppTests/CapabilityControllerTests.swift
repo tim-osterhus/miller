@@ -2959,6 +2959,310 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func pendingPluginServerCannotConnectOrEnableAProvider() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-plugin-review-fence-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let profiles = try SQLiteConversationRepository(path: path)
+        let profile = try ProviderProfile(
+            kind: .openAICompatible, label: "Compatible",
+            baseURL: "https://example.com", model: "model"
+        )
+        try await profiles.saveProviderProfile(profile)
+        let repository = try SQLiteCapabilityRepository(path: path)
+        let now = Date(timeIntervalSince1970: 100)
+        let plugin = PluginPackageRecord(
+            id: "review.example", version: nil,
+            sourceHash: String(repeating: "a", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "remote",
+            projectedServerID: "plugin-review-example-remote",
+            transport: .streamableHTTP, absoluteCommand: nil,
+            endpoint: "https://example.test/mcp", arguments: [],
+            relativeExecutablePath: nil, unresolvedSecretNames: [],
+            reviewState: .pending, createdAt: now, updatedAt: now
+        )
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: [component], apps: []
+        )
+        let factory = CapabilitySessionFactoryInvocationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            sessionFactory: { _ in
+                await factory.record()
+                return CapabilitySessionProbe(
+                    serverID: component.projectedServerID,
+                    tool: .init(
+                        name: "lookup", displayName: "Lookup", summary: "Lookup",
+                        inputSchemaJSON: Data("{}".utf8), readOnlyHint: true
+                    )
+                )
+            },
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+
+        await #expect(throws: CapabilityStorageError.pluginReviewRequired) {
+            try await controller.testAndEnableServer(
+                serverID: component.projectedServerID,
+                compatibleProviderProfileIDs: [profile.id]
+            )
+        }
+        await #expect(throws: CapabilityStorageError.pluginReviewRequired) {
+            try await controller.setProviderEnabledFromSettings(
+                true, serverID: component.projectedServerID,
+                providerProfileID: profile.id
+            )
+        }
+        #expect(await factory.count == 0)
+        let snapshot = try await controller.settingsSnapshot(providerNames: [:])
+        #expect(snapshot.pluginMCPComponents == [component])
+    }
+
+    @Test
+    func pluginDeletionRemovesOnlyOwnedAggregateAndKeychainReferences() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-plugin-delete-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let now = Date(timeIntervalSince1970: 100)
+        let plugin = PluginPackageRecord(
+            id: "delete.example", version: nil,
+            sourceHash: String(repeating: "a", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "owned",
+            projectedServerID: "plugin-delete-example-owned",
+            transport: .stdio, absoluteCommand: "/usr/bin/true", endpoint: nil,
+            arguments: [], relativeExecutablePath: nil,
+            unresolvedSecretNames: ["TOKEN"], reviewState: .pending,
+            createdAt: now, updatedAt: now
+        )
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: [component], apps: [
+                .init(pluginID: plugin.id, appID: "mail", name: "Mail"),
+            ]
+        )
+        let owned = try #require(
+            await repository.server(id: component.projectedServerID)
+        )
+        let reference = UUID()
+        try await repository.approvePluginMCPComponent(
+            server: owned,
+            secretBindings: [.init(
+                id: UUID(), serverID: owned.id, kind: .environment,
+                name: "TOKEN", credentialReference: reference
+            )]
+        )
+        let unrelated = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(unrelated)
+        let secrets = CapabilitySettingsSecretProbe(values: [reference: "secret"])
+        let controller = CapabilityController(
+            loadConfiguration: {
+                try await settingsRuntimeConfiguration(repository: repository)
+            },
+            settingsRepository: repository,
+            settingsSecrets: secrets.dependencies
+        )
+
+        try await controller.deletePluginFromSettings(id: plugin.id)
+
+        #expect(await secrets.value(reference) == nil)
+        #expect(try await repository.plugins().isEmpty)
+        #expect(try await repository.server(id: owned.id) == nil)
+        #expect(try await repository.server(id: unrelated.id) != nil)
+        #expect(try await repository.pluginApps(pluginID: plugin.id).isEmpty)
+    }
+
+    @Test
+    func pluginDeletionRestoreFailureLeavesRuntimeUnavailableAndAggregateIntact() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-plugin-delete-recovery-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let now = Date(timeIntervalSince1970: 100)
+        let plugin = PluginPackageRecord(
+            id: "delete-recovery", version: nil,
+            sourceHash: String(repeating: "d", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let components = ["one", "two"].map { id in
+            PluginMCPComponentRecord(
+                pluginID: plugin.id, componentID: id,
+                projectedServerID: "plugin-delete-recovery-\(id)",
+                transport: .stdio, absoluteCommand: "/usr/bin/true", endpoint: nil,
+                arguments: [], relativeExecutablePath: nil,
+                unresolvedSecretNames: ["TOKEN_\(id.uppercased())"],
+                reviewState: .pending, createdAt: now, updatedAt: now
+            )
+        }
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: components, apps: []
+        )
+        var references: [UUID] = []
+        for component in components {
+            let server = try #require(
+                await repository.server(id: component.projectedServerID)
+            )
+            let reference = UUID()
+            references.append(reference)
+            try await repository.approvePluginMCPComponent(
+                server: server,
+                secretBindings: [.init(
+                    id: UUID(), serverID: server.id, kind: .environment,
+                    name: component.unresolvedSecretNames[0],
+                    credentialReference: reference
+                )]
+            )
+        }
+        let secrets = CapabilitySettingsSecretProbe(
+            values: Dictionary(uniqueKeysWithValues: references.enumerated().map {
+                ($0.element, "old-\($0.offset)")
+            }),
+            failFirstOldStore: true
+        )
+        await secrets.failNextDelete()
+        let controller = CapabilityController(
+            loadConfiguration: {
+                try await settingsRuntimeConfiguration(repository: repository)
+            },
+            settingsRepository: repository,
+            settingsSecrets: secrets.dependencies
+        )
+
+        await #expect(throws: CapabilitySettingsMutationError.recoveryFailed) {
+            try await controller.deletePluginFromSettings(id: plugin.id)
+        }
+
+        #expect(try await repository.plugins() == [plugin])
+        for (index, reference) in references.enumerated() {
+            #expect(await secrets.attemptedStore(reference, value: "old-\(index)"))
+        }
+        #expect(await controller.diagnosticsSnapshot().controllerState == "Unavailable")
+    }
+
+    @Test
+    func failedRuntimeReloadRestoresPendingPluginReviewAndSecretFence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-plugin-review-recovery-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let now = Date(timeIntervalSince1970: 100)
+        let plugin = PluginPackageRecord(
+            id: "review-recovery", version: nil,
+            sourceHash: String(repeating: "e", count: 64),
+            supportedComponentSummary: "Review required", enabled: false,
+            createdAt: now, updatedAt: now
+        )
+        let component = PluginMCPComponentRecord(
+            pluginID: plugin.id, componentID: "worker",
+            projectedServerID: "plugin-review-recovery-worker",
+            transport: .stdio, absoluteCommand: "/usr/bin/true", endpoint: nil,
+            arguments: [], relativeExecutablePath: nil,
+            unresolvedSecretNames: ["TOKEN"], reviewState: .pending,
+            createdAt: now, updatedAt: now
+        )
+        try await repository.importPluginSnapshot(
+            plugin: plugin, skills: [], mcpComponents: [component], apps: []
+        )
+        let oldServer = try #require(
+            await repository.server(id: component.projectedServerID)
+        )
+        let loader = FailFirstCapabilityConfigurationLoad()
+        let secrets = CapabilitySettingsSecretProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            settingsRepository: repository,
+            settingsSecrets: secrets.dependencies
+        )
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = oldServer.id
+        draft.displayName = oldServer.displayName
+        draft.executable = "/usr/bin/true"
+        draft.createdAt = oldServer.createdAt
+        draft.secrets = [.init(
+            kind: .environment, name: "TOKEN", value: "new-secret"
+        )]
+        let validated = try draft.validated(
+            mode: .edit(originalID: oldServer.id)
+        )
+        let reference = try #require(validated.secrets.first?.credentialReference)
+
+        await #expect(throws: CapabilityControllerError.unavailable) {
+            try await controller.saveServerSettings(validated)
+        }
+
+        #expect(try await repository.server(id: oldServer.id) == oldServer)
+        #expect(try await repository.secretBindings(serverID: oldServer.id).isEmpty)
+        #expect(try await repository.isPluginServerApproved(oldServer.id) == false)
+        #expect(await secrets.value(reference) == nil)
+    }
+
+    @Test
+    func longValidPluginIdentitiesImportWithoutPoisoningRuntimeConfiguration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-plugin-long-identity-\(UUID().uuidString)", isDirectory: true
+        )
+        let bundle = root.appendingPathComponent("bundle", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: bundle.appendingPathComponent(".codex-plugin"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pluginID = String(repeating: "p.", count: 48)
+        let componentID = String(repeating: "c.", count: 48)
+        try JSONSerialization.data(
+            withJSONObject: ["id": pluginID], options: [.sortedKeys]
+        ).write(to: bundle.appendingPathComponent(".codex-plugin/plugin.json"))
+        try JSONSerialization.data(withJSONObject: [
+            "mcpServers": [
+                componentID: ["command": "/usr/bin/true"],
+            ],
+        ], options: [.sortedKeys]).write(to: bundle.appendingPathComponent(".mcp.json"))
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let controller = CapabilityController(
+            loadConfiguration: {
+                try await settingsRuntimeConfiguration(repository: repository)
+            },
+            settingsRepository: repository
+        )
+
+        try await controller.importPluginFromSettings(at: bundle)
+        let snapshot = try await controller.settingsSnapshot(providerNames: [:])
+        let server = try #require(snapshot.servers.first?.server)
+        #expect(server.id.utf8.count <= 96)
+        #expect(!server.id.contains("."))
+        #expect(server.displayName.utf8.count <= 128)
+
+        await controller.start()
+        #expect(await controller.diagnosticsSnapshot().controllerState == "Ready")
+        await controller.shutdown()
+    }
+
+    @Test
     func missingServerAndToolWritesFailBeforeRollbackAndKeepRuntimeHealthy() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "miller-settings-preflight-\(UUID().uuidString)", isDirectory: true
@@ -4229,6 +4533,12 @@ private func waitForSessionCalls(
 }
 
 private enum CapabilityControllerTestError: Error { case missingApproval }
+
+private actor CapabilitySessionFactoryInvocationProbe {
+    private(set) var count = 0
+
+    func record() { count += 1 }
+}
 
 private final class CapabilityAnnouncementProbe: @unchecked Sendable {
     private let lock = NSLock()

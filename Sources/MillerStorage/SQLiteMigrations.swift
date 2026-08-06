@@ -399,6 +399,63 @@ enum SQLiteMigrations {
             WHERE source = 'codex_account';
             """
         ),
+        SQLiteMigration(
+            version: 5,
+            sql: """
+            ALTER TABLE capability_servers
+            ADD COLUMN plugin_id TEXT
+                REFERENCES plugin_packages(id) ON DELETE CASCADE;
+
+            CREATE INDEX capability_servers_plugin_id
+                ON capability_servers(plugin_id);
+
+            CREATE TABLE plugin_mcp_components (
+                plugin_id TEXT NOT NULL
+                    REFERENCES plugin_packages(id) ON DELETE CASCADE,
+                component_id TEXT NOT NULL,
+                projected_server_id TEXT NOT NULL UNIQUE,
+                transport TEXT NOT NULL CHECK (
+                    transport IN ('stdio', 'streamable_http')
+                ),
+                absolute_command TEXT,
+                endpoint TEXT,
+                arguments_json TEXT NOT NULL CHECK (
+                    json_valid(arguments_json)
+                    AND json_type(arguments_json) = 'array'
+                    AND length(CAST(arguments_json AS BLOB)) <= 65536
+                ),
+                relative_executable_path TEXT,
+                unresolved_secret_names_json TEXT NOT NULL CHECK (
+                    json_valid(unresolved_secret_names_json)
+                    AND json_type(unresolved_secret_names_json) = 'array'
+                    AND length(CAST(unresolved_secret_names_json AS BLOB)) <= 65536
+                ),
+                review_state TEXT NOT NULL CHECK (
+                    review_state IN ('pending', 'approved')
+                ),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (plugin_id, component_id),
+                CHECK (
+                    (transport = 'stdio' AND endpoint IS NULL
+                        AND ((absolute_command IS NOT NULL)
+                            != (relative_executable_path IS NOT NULL)))
+                    OR (transport = 'streamable_http'
+                        AND absolute_command IS NULL
+                        AND relative_executable_path IS NULL
+                        AND endpoint LIKE 'https://%')
+                )
+            );
+
+            CREATE TABLE plugin_app_metadata (
+                plugin_id TEXT NOT NULL
+                    REFERENCES plugin_packages(id) ON DELETE CASCADE,
+                app_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                PRIMARY KEY (plugin_id, app_id)
+            );
+            """
+        ),
     ]
 
     static let latestVersion = all.last?.version ?? 0

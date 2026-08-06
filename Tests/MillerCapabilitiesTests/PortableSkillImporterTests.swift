@@ -86,6 +86,49 @@ struct PortableSkillImporterTests {
     }
 
     @Test
+    func parsesBoundedYAMLStringsIncludingCRLFAndBlockScalars() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cases: [(String, String, String)] = [
+            (
+                "---\r\nname: \"Quoted: skill\"\r\ndescription: 'Owner''s helper'\r\n---\r\nBody\r\n",
+                "Quoted: skill", "Owner's helper"
+            ),
+            (
+                "---\nname: >\n  Multi\n  line\ndescription: |\n  First line\n  Second line\n---\nBody\n",
+                "Multi line", "First line\nSecond line"
+            ),
+        ]
+        for (markdown, name, description) in cases {
+            try Data(markdown.utf8).write(to: root.appending(path: "SKILL.md"))
+            let imported = try PortableSkillImporter().importSkill(at: root)
+            #expect(imported.name == name)
+            #expect(imported.description == description)
+        }
+    }
+
+    @Test
+    func rejectsNonStringEmptyMalformedAndDuplicateYAMLMetadata() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for markdown in [
+            "---\nname: [not, a, string]\ndescription: valid\n---\n",
+            "---\nname: \"\"\ndescription: valid\n---\n",
+            "---\nname: \"unterminated\ndescription: valid\n---\n",
+            "---\nname: one\nname: two\ndescription: valid\n---\n",
+            "---\nname: valid\ndescription:\n---\n",
+            "---\nname: true\ndescription: valid\n---\n",
+            "---\nname: valid\ndescription: 42\n---\n",
+            "---\nname: valid\ndescription: FALSE\n---\n",
+        ] {
+            try Data(markdown.utf8).write(to: root.appending(path: "SKILL.md"))
+            #expect(throws: PortableSkillImportError.invalidFrontmatter) {
+                _ = try PortableSkillImporter().importSkill(at: root)
+            }
+        }
+    }
+
+    @Test
     func projectorBoundsProviderSpecificAttachmentsAndUsesPrivateRoots() throws {
         let provider = UUID()
         let other = UUID()
