@@ -41,8 +41,13 @@ public struct ReasoningRequest: Sendable, Equatable {
     }
 }
 
+public enum ReasoningStatus: String, Sendable, Equatable, Codable {
+    case toolsUnavailable = "tools_unavailable"
+}
+
 public enum ReasoningEvent: Sendable, Equatable {
     case accepted
+    case status(ReasoningStatus)
     case textDelta(ordinal: Int, text: String)
     case usage(inputTokens: Int?, outputTokens: Int?)
     case completed

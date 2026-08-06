@@ -29,6 +29,7 @@ export class ReasoningOperation {
     this.toolTimeoutMilliseconds = toolTimeoutMilliseconds;
     this.pendingTools = new Map();
     this.toolCalls = 0;
+    this.providerCallIDs = new Set();
   }
 
   cancel(requestId, turnId, generation) {
@@ -177,17 +178,24 @@ export class ReasoningOperation {
 
   admitToolCall(toolCall) {
     if (++this.toolCalls > MAXIMUM_TOOL_CALLS) throw new Error("response_limit");
-    const definition = this.record.tools.find((tool) => tool.name === toolCall?.name);
-    if (!definition || !toolCall?.arguments || Array.isArray(toolCall.arguments)
+    const providerCallID = toolCall?.id;
+    const name = toolCall?.name;
+    const definition = this.record.tools.find((tool) => tool.name === name);
+    if (typeof providerCallID !== "string" || providerCallID.length === 0
+      || Buffer.byteLength(providerCallID, "utf8") > 256
+      || this.providerCallIDs.has(providerCallID)
+      || typeof name !== "string" || Buffer.byteLength(name, "utf8") > 128
+      || !definition || !toolCall?.arguments || Array.isArray(toolCall.arguments)
       || typeof toolCall.arguments !== "object") {
       throw new Error("malformed_tool_call");
     }
     const argumentsBytes = Buffer.byteLength(JSON.stringify(toolCall.arguments), "utf8");
     if (argumentsBytes > 64 * 1_024) throw new Error("malformed_tool_call");
+    this.providerCallIDs.add(providerCallID);
     return {
-      providerCallID: String(toolCall.id),
+      providerCallID,
       callID: crypto.randomUUID(),
-      name: toolCall.name,
+      name,
       capabilityID: definition.capability_id,
       arguments: toolCall.arguments,
     };

@@ -62,8 +62,8 @@
     },
     {
       "path": "dist/api/openai-completions.js",
-      "sha256": "536885a4ebc718bdb3f845ded6b57c966cc110e448d7574f4bc2884222672994",
-      "bytes": 9417,
+      "sha256": "97756ec67423e8f26e8b4ac35c8998e13c2934bf7660cc02822ccfd37cfcf572",
+      "bytes": 11200,
       "mode": 384
     },
     {
@@ -327,6 +327,6 @@
   ],
   "package_manifest": {
     "path": "manifest.json",
-    "sha256": "7f144a476a5de8c0d025010bf9eb14327615699bbd6a32b88e40180133c2bdf2"
+    "sha256": "fe3d4057c874f7aeec057d99442521021752eeae71d96d1fbda4587dfff4c7a3"
   }
 }

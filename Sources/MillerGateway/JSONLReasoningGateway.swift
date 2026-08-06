@@ -168,6 +168,14 @@ public actor JSONLReasoningGateway: ReasoningGateway {
             var eventCount = 0
             var responseScalars = 0
             for try await record in source {
+                guard isActiveRun(
+                    requestID: requestID,
+                    turnID: turnID,
+                    generation: generation
+                ) else {
+                    continuation.finish()
+                    return
+                }
                 eventCount += 1
                 guard eventCount <= 1_024 else {
                     throw GatewayProtocolError.invalidSequence
@@ -182,7 +190,9 @@ public actor JSONLReasoningGateway: ReasoningGateway {
                         continuation: continuation
                     )
                 case "reasoning.tool_event":
-                    break
+                    if record["status"]?.stringValue == "tools_unavailable" {
+                        continuation.yield(.status(.toolsUnavailable))
+                    }
                 default:
                     let event = try Self.map(record)
                     if case let .textDelta(_, text) = event {
@@ -192,6 +202,11 @@ public actor JSONLReasoningGateway: ReasoningGateway {
                         }
                     }
                     continuation.yield(event)
+                    if event.isTerminal {
+                        finishRun(requestID: requestID, cancellingTools: true)
+                        continuation.finish()
+                        return
+                    }
                 }
             }
             finishRun(requestID: requestID, cancellingTools: true)
@@ -312,6 +327,17 @@ public actor JSONLReasoningGateway: ReasoningGateway {
             && run.toolTasks[call.callID.rawValue.uuidString.lowercased()] != nil
     }
 
+    private func isActiveRun(
+        requestID: String,
+        turnID: TurnID,
+        generation: Int
+    ) -> Bool {
+        guard let run = activeRun else { return false }
+        return run.requestID == requestID
+            && run.turnID == turnID
+            && run.generation == generation
+    }
+
     private func removeToolTask(_ callID: String, requestID: String) {
         guard var run = activeRun, run.requestID == requestID else { return }
         run.toolTasks.removeValue(forKey: callID)
@@ -372,6 +398,11 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         switch record.type {
         case "reasoning.accepted":
             return .accepted
+        case "reasoning.tool_event":
+            guard record["status"]?.stringValue == "tools_unavailable" else {
+                throw GatewayProtocolError.invalidSequence
+            }
+            return .status(.toolsUnavailable)
         case "reasoning.text_delta":
             guard let ordinal = record["ordinal"]?.integerValue,
                   let text = record["text"]?.stringValue
@@ -414,4 +445,15 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         "response_limit": "The response exceeded a safety limit.",
         "gateway_unavailable": "The reasoning helper is unavailable.",
     ]
+}
+
+private extension ReasoningEvent {
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .stopped, .failed:
+            true
+        default:
+            false
+        }
+    }
 }

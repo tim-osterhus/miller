@@ -659,6 +659,7 @@ public struct GatewaySessionValidator: Sendable {
         var nextOrdinal = 0
         var seenCallIDs: Set<String> = []
         var activeCallIDs: Set<String> = []
+        var toolsUnavailableSeen = false
         var phase: Phase = .awaitingAccepted
     }
 
@@ -745,14 +746,19 @@ public struct GatewaySessionValidator: Sendable {
         case "reasoning.tool_event":
             guard state.phase == .streaming,
                   let callID = record["call_id"]?.stringValue,
-                  record["status"]?.stringValue == "tools_unavailable"
-                    || state.seenCallIDs.contains(callID)
+                  let status = record["status"]?.stringValue
             else {
                 throw GatewayProtocolError.invalidSequence
             }
-            if let status = record["status"]?.stringValue,
-               Self.terminalToolStatuses.contains(status)
-            {
+            if status == "tools_unavailable" {
+                guard !state.toolsUnavailableSeen else {
+                    throw GatewayProtocolError.invalidSequence
+                }
+                state.toolsUnavailableSeen = true
+            } else if !state.seenCallIDs.contains(callID) {
+                throw GatewayProtocolError.invalidSequence
+            }
+            if Self.terminalToolStatuses.contains(status) {
                 guard state.activeCallIDs.remove(callID) != nil else {
                     throw GatewayProtocolError.invalidSequence
                 }

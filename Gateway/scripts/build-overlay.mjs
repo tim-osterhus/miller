@@ -408,7 +408,11 @@ function parseArguments(value) {
   );
   output = output.replace(
     "            let block;\n            let finished = false;",
-    "            let textBlock;\n            const toolBlocks = new Map();\n            let finished = false;",
+    "            let textBlock;\n            const toolBlocks = new Map();\n            const providerCallIDs = new Set();\n            let toolFragmentCount = 0;\n            let aggregateArgumentBytes = 0;\n            let providerEventCount = 0;\n            let finished = false;",
+  );
+  output = output.replace(
+    "            for await (const chunk of data) {",
+    "            for await (const chunk of data) {\n                if (++providerEventCount > 4096) throw new Error(\"Provider event limit exceeded\");",
   );
   output = output.replace(
     `                const delta = choice.delta?.content;
@@ -424,19 +428,35 @@ function parseArguments(value) {
                     textBlock.text += delta;
                     stream.push({ type: "text_delta", contentIndex: output.content.indexOf(textBlock), delta, partial: output });
                 }
-                for (const fragment of choice.delta?.tool_calls ?? []) {
-                    if (!Number.isInteger(fragment.index) || fragment.index < 0) throw new Error("Malformed tool call index");
+                const fragments = choice.delta?.tool_calls ?? [];
+                if (!Array.isArray(fragments)) throw new Error("Malformed tool call fragments");
+                for (const fragment of fragments) {
+                    if (++toolFragmentCount > 1024) throw new Error("Tool call fragment limit exceeded");
+                    if (!Number.isInteger(fragment?.index) || fragment.index < 0 || fragment.index >= 256) throw new Error("Malformed tool call index");
                     let slot = toolBlocks.get(fragment.index);
                     if (!slot) {
-                        const block = { type: "toolCall", id: "", name: "", arguments: {}, partialJson: "" };
+                        if (toolBlocks.size >= 256) throw new Error("Tool call count exceeded");
+                        const id = fragment.id;
+                        const name = fragment.function?.name;
+                        if (typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 256 || providerCallIDs.has(id)) throw new Error("Malformed tool call id");
+                        if (typeof name !== "string" || name.length === 0 || Buffer.byteLength(name, "utf8") > 128) throw new Error("Malformed tool call name");
+                        providerCallIDs.add(id);
+                        const block = { type: "toolCall", id, name, arguments: {}, partialJson: "" };
                         output.content.push(block);
-                        slot = { block, contentIndex: output.content.length - 1 };
+                        slot = { block, contentIndex: output.content.length - 1, argumentBytes: 0 };
                         toolBlocks.set(fragment.index, slot);
                         stream.push({ type: "toolcall_start", contentIndex: slot.contentIndex, partial: output });
                     }
-                    if (fragment.id) slot.block.id += fragment.id;
-                    if (fragment.function?.name) slot.block.name += fragment.function.name;
+                    else {
+                        if (fragment.id !== undefined && fragment.id !== slot.block.id) throw new Error("Conflicting tool call id");
+                        if (fragment.function?.name !== undefined && fragment.function.name !== slot.block.name) throw new Error("Conflicting tool call name");
+                    }
                     const argumentDelta = fragment.function?.arguments ?? "";
+                    if (typeof argumentDelta !== "string") throw new Error("Malformed tool arguments");
+                    const argumentBytes = Buffer.byteLength(argumentDelta, "utf8");
+                    slot.argumentBytes += argumentBytes;
+                    aggregateArgumentBytes += argumentBytes;
+                    if (slot.argumentBytes > 64 * 1024 || aggregateArgumentBytes > 256 * 1024) throw new Error("Tool argument limit exceeded");
                     slot.block.partialJson += argumentDelta;
                     if (argumentDelta) stream.push({ type: "toolcall_delta", contentIndex: slot.contentIndex, delta: argumentDelta, partial: output });
                 }`,
@@ -454,6 +474,9 @@ function parseArguments(value) {
   for (const seam of [
     "requestTools(context)", "toolcall_start", "toolcall_delta", "toolcall_end",
     'message.role === "toolResult"', 'tool_choice: "auto"',
+    "toolFragmentCount > 1024", "fragment.index >= 256",
+    "aggregateArgumentBytes > 256 * 1024", "providerCallIDs.has(id)",
+    "providerEventCount > 4096", "Conflicting tool call id",
   ]) {
     if (!output.includes(seam)) fail(`OpenAI completions transform missed ${seam}`);
   }
@@ -610,7 +633,7 @@ async function build() {
         fail("A1 OpenAI completions module hash changed");
       }
       output = Buffer.from(transformOpenAICompletions(input.toString("utf8")));
-      transformation = "bounded-tool-calls-v1";
+      transformation = "bounded-tool-calls-v2";
     } else if (entry.path === "package.json") {
       if (sha256(input) !== a1PackageSHA256) fail("A1 package manifest hash changed");
       output = Buffer.from(transformPackage(input.toString("utf8")));
@@ -900,6 +923,7 @@ The exact license texts and hashes are retained with this distribution.
         "no-store and no-referrer response headers",
         "awaited callback listener close",
         "bounded OpenAI-compatible tool definitions and arguments",
+        "bounded provider events, fragments, identities, and partial assemblies",
         "streamed tool-call assembly with tool-result replay",
         "cancellation and deadline settle before awaited listener close",
         "fixed 127.0.0.1 listener host",

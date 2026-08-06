@@ -109,6 +109,7 @@ struct HostDependencies: Sendable {
     let archive: @Sendable (ConversationID) async throws -> Void
     let unarchive: @Sendable (ConversationID) async throws -> Void
     let delete: @Sendable (ConversationID) async throws -> Void
+    let reasoningStatus: @Sendable () async -> ReasoningStatus?
 
     init(
         submit: @escaping @Sendable (String, ConversationID) async throws -> TurnID,
@@ -118,7 +119,8 @@ struct HostDependencies: Sendable {
         loadTurns: @escaping @Sendable (ConversationID) async throws -> [Turn],
         archive: @escaping @Sendable (ConversationID) async throws -> Void,
         unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
-        delete: @escaping @Sendable (ConversationID) async throws -> Void
+        delete: @escaping @Sendable (ConversationID) async throws -> Void,
+        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil }
     ) {
         submitOperation = { text, conversationID, _ in
             try await submit(text, conversationID)
@@ -130,6 +132,7 @@ struct HostDependencies: Sendable {
         self.archive = archive
         self.unarchive = unarchive
         self.delete = delete
+        self.reasoningStatus = reasoningStatus
     }
 
     init(
@@ -144,7 +147,8 @@ struct HostDependencies: Sendable {
         loadTurns: @escaping @Sendable (ConversationID) async throws -> [Turn],
         archive: @escaping @Sendable (ConversationID) async throws -> Void,
         unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
-        delete: @escaping @Sendable (ConversationID) async throws -> Void
+        delete: @escaping @Sendable (ConversationID) async throws -> Void,
+        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil }
     ) {
         submitOperation = submit
         self.stop = stop
@@ -154,6 +158,7 @@ struct HostDependencies: Sendable {
         self.archive = archive
         self.unarchive = unarchive
         self.delete = delete
+        self.reasoningStatus = reasoningStatus
     }
 
     func submit(
@@ -309,6 +314,7 @@ final class AppPresentationModel: ObservableObject {
     @Published private(set) var pendingVoiceHistoryAttachment:
         PreparedVoiceHistoryAttachment?
     @Published private(set) var voiceHistoryStatus: String?
+    @Published private(set) var reasoningStatus: ReasoningStatus?
 
     private let dependencies: HostDependencies
     private let providerSettings: ProviderSettingsDependencies
@@ -415,6 +421,9 @@ final class AppPresentationModel: ObservableObject {
     var statusText: String {
         if voiceState.isActive || voiceState == .stopped || voiceState == .closed {
             return voiceStatusText
+        }
+        if activeTurnID != nil, reasoningStatus == .toolsUnavailable {
+            return "Tools unavailable — continuing without them"
         }
         return switch presentationState {
         case .idle: "Idle"
@@ -871,6 +880,7 @@ final class AppPresentationModel: ObservableObject {
         draft = ""
         presentationState = .waiting
         errorCode = nil
+        reasoningStatus = nil
         do {
             let turnID = try await dependencies.submit(
                 text,
@@ -1235,6 +1245,7 @@ final class AppPresentationModel: ObservableObject {
         do {
             try await dependencies.stop()
             activeTurnID = nil
+            reasoningStatus = nil
             turnObservation?.cancel()
             presentationState = .stopped
             await refresh()
@@ -1255,6 +1266,7 @@ final class AppPresentationModel: ObservableObject {
         draft = ""
         presentationState = .ready
         errorCode = nil
+        reasoningStatus = nil
         requestInputFocus()
     }
 
@@ -1336,6 +1348,10 @@ final class AppPresentationModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 do {
+                    let status = await dependencies.reasoningStatus()
+                    if activeTurnID == turnID {
+                        reasoningStatus = status
+                    }
                     if let turn = try await dependencies.loadTurn(turnID) {
                         await apply(turn)
                         if turn.state.isTerminal {
@@ -1355,6 +1371,7 @@ final class AppPresentationModel: ObservableObject {
         presentationState = PresentationDerivation.state(for: turn)
         if turn.state.isTerminal {
             activeTurnID = nil
+            reasoningStatus = nil
             if turn.state == .failed {
                 errorCode = turn.errorCode
             }
@@ -1386,6 +1403,7 @@ final class AppPresentationModel: ObservableObject {
         draft = ""
         presentationState = .ready
         errorCode = nil
+        reasoningStatus = nil
         resetLiveTranscripts()
         liveVoiceFailureCode = nil
         liveTranscriptPersistenceMessage = nil
@@ -1669,7 +1687,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             },
             archive: { [core] id in try await core.archive(conversationID: id) },
             unarchive: { [core] id in try await core.unarchive(conversationID: id) },
-            delete: { [core] id in try await core.delete(conversationID: id) }
+            delete: { [core] id in try await core.delete(conversationID: id) },
+            reasoningStatus: { [core] in await core.activeReasoningStatus }
         )
         let credentialStore = KeychainCredentialStore()
         providerController = ProviderSettingsController(

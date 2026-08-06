@@ -244,12 +244,14 @@ file whose hash, byte count, or mode differs.
 ### A3 transformation
 
 `Gateway/scripts/build-overlay.mjs` has SHA-256
-`541b097adf3c4b7d77bf51763a2b9d76983e2f8610b833bd3042accb95bfd9f6`.
+`57d4fbf2d54b1fb691dae7b5516b515e22f7f0b209a0978a0534d898a03866a5`.
 It changes exactly three overlay files:
 
 - `dist/api/openai-completions.js`: admits bounded OpenAI-compatible tool
-  definitions, assembles streamed tool calls, rejects malformed arguments,
-  and replays bounded tool results without adding runtime network access.
+  definitions; bounds provider events, fragment indices and counts, call
+  identities, and partial argument assemblies before complete calls exist;
+  rejects missing, duplicate, conflicting, or malformed calls; and replays
+  bounded tool results without adding runtime network access.
 
 - `dist/auth/oauth/openai-codex.js`: admits only GET requests to
   `/auth/callback`, requires matching state, rejects a second callback, sends
@@ -272,11 +274,11 @@ The exact generated vendor artifacts are:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `Gateway/vendor/manifest.json` | `ce5fa50ff5abc1c6ccd1c78e6ac87668a0198b79e3581334b00c3971a87b672c` |
-| `Gateway/vendor/pi-mvp-overlay-0.82.0-a3.tgz` | `49b3846b3ec3d1daa9ac704b9eeae085fa4c9aaa35692ed2b7ad027c9ead266c` |
-| `Gateway/vendor/development-bundle-inventory.json` | `b2ee22957e6675f841a9332d5309596e78a04f674cb4dc6b29191339d2149820` |
-| `Gateway/vendor/overlay-files.json` | `afd306f30a4f0a261dbe7d324f7c91be9592f7316250fdd3c377b9db8ac2af79` |
-| `Gateway/vendor/source-map.json` | `20c875d9ecf580ec3223374e511a912bc40a8d9b4808d837ee6614b7c0cc3788` |
+| `Gateway/vendor/manifest.json` | `c082fcb3fbfa6cbe81b9fcc07ec463654551fa0ee7a1768f88306adf3ca4ba0a` |
+| `Gateway/vendor/pi-mvp-overlay-0.82.0-a3.tgz` | `e2f9275e5fc32d8db0530d40347961525d785d0229d723fbe29a9438b6316ab9` |
+| `Gateway/vendor/development-bundle-inventory.json` | `556718fafe736ee3efa0ab6cb61f593c7316f8c5b38521b29167239333af80a9` |
+| `Gateway/vendor/overlay-files.json` | `29e5fd59d8864844665cb63ab51b06479c810e61f2f5f0e6d21c0c63511647cd` |
+| `Gateway/vendor/source-map.json` | `317ec2c88880404b6765cf27054c7f3a845ff7de784885ca2c5007d9e03bdbbc` |
 | `Gateway/vendor/sbom.spdx.json` | `c4f87d60394a0859cd5e234cd8eb536d4f9d08f4ec530ecfafe61314d748ebc7` |
 
 The runtime dependency closure contains only:
@@ -287,7 +289,7 @@ The runtime dependency closure contains only:
   `sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA==`.
 
 The exact package lock SHA-256 is
-`937103fdcfcf315929f2d2262d6f4478bc9a2d124018767abff32549d8a05a48`.
+`4696145d899809e8de806b742a96f14fb6c81c67d7a09f2ce7486ca55eb89e1f`.
 The overlay contains no Pi coding-agent package, unrelated provider package,
 callable shell or filesystem dependency, AWS SDK, Google SDK, Bedrock SDK,
 native add-on, or install script.

@@ -226,11 +226,117 @@ struct JSONLReasoningGatewayToolTests {
         await supervisor.shutdown()
     }
 
-    private func toolRequest() -> ReasoningRequest {
+    @Test
+    func toolsUnavailableIsSurfacedOnceWhileTextContinues() async throws {
+        let fixture = try ToolHelperFixture(mode: "tools-unavailable")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(configuration: fixture.configuration)
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile
+        )
+
+        let events = try await collect(try await gateway.start(toolRequest()))
+
+        #expect(events.filter { $0 == .status(.toolsUnavailable) }.count == 1)
+        #expect(events.contains(.textDelta(ordinal: 0, text: "ordinary text")))
+        #expect(events.last == .completed)
+        await supervisor.shutdown()
+    }
+
+    @Test(arguments: ["late-completed", "late-failed"])
+    func everyInboundRecordIsFencedAfterCancellation(mode: String) async throws {
+        let fixture = try ToolHelperFixture(mode: mode)
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(
+            configuration: fixture.configuration,
+            cancellationTimeout: .milliseconds(500)
+        )
+        let probe = ToolProbe()
+        let request = toolRequest()
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile,
+            toolHandler: { call, emit in
+                await probe.handle(call, emit: emit)
+            }
+        )
+        let stream = try await gateway.start(request)
+        var iterator = stream.makeAsyncIterator()
+        #expect(try await iterator.next() == .accepted)
+
+        await gateway.cancel(.init(
+            turnID: request.turnID,
+            targetGeneration: request.generation
+        ))
+
+        var remaining: [ReasoningEvent] = []
+        do {
+            while let event = try await iterator.next() { remaining.append(event) }
+        } catch {}
+        #expect(remaining.isEmpty)
+        #expect(await probe.callCount == 0)
+        await supervisor.shutdown()
+    }
+
+    @Test
+    func replacementGenerationCannotReceiveBufferedPriorRunRecords() async throws {
+        let fixture = try ToolHelperFixture(mode: "late-completed")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(
+            configuration: fixture.configuration,
+            cancellationTimeout: .milliseconds(500)
+        )
+        let probe = ToolProbe()
+        let first = toolRequest()
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile,
+            toolHandler: { call, emit in
+                await probe.handle(call, emit: emit)
+            }
+        )
+        let firstStream = try await gateway.start(first)
+        var firstIterator = firstStream.makeAsyncIterator()
+        #expect(try await firstIterator.next() == .accepted)
+        await gateway.cancel(.init(
+            turnID: first.turnID,
+            targetGeneration: first.generation
+        ))
+        while (try? await firstIterator.next()) != nil {}
+
+        let replacement = toolRequest(
+            turnID: first.turnID,
+            generation: first.generation + 1
+        )
+        var replacementStream: AsyncThrowingStream<ReasoningEvent, Error>?
+        for _ in 0..<100 where replacementStream == nil {
+            replacementStream = try? await gateway.start(replacement)
+            if replacementStream == nil {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        let replacementEvents = try await collect(
+            try #require(replacementStream)
+        )
+
+        #expect(replacementEvents == [
+            .accepted,
+            .textDelta(ordinal: 0, text: "fresh generation"),
+            .completed,
+        ])
+        #expect(await probe.callCount == 0)
+        await supervisor.shutdown()
+    }
+
+    private func toolRequest(
+        turnID: TurnID = TurnID(),
+        generation: Int = 1
+    ) -> ReasoningRequest {
         ReasoningRequest(
             conversationID: ConversationID(),
-            turnID: TurnID(),
-            generation: 1,
+            turnID: turnID,
+            generation: generation,
             context: [],
             userText: "use tools",
             capabilityCatalog: try! CapabilityCatalogSnapshot([
@@ -373,6 +479,7 @@ private struct ToolHelperFixture {
         const session = crypto.randomUUID();
         var operation;
         var results = 0;
+        var starts = 0;
         const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
         const base = (type) => ({protocol:"miller.gateway",version:1,type,session_id:session,request_id:operation.request_id,turn_id:operation.turn_id,generation:operation.generation});
         send({protocol:"miller.gateway",version:1,type:"gateway.ready",session_id:session,helper_version:"tool-fixture",supported_protocols:[1]});
@@ -385,15 +492,35 @@ private struct ToolHelperFixture {
             if (newline < 0) break;
             const record = JSON.parse(pending.slice(0, newline)); pending = pending.slice(newline + 1);
             if (record.type === "reasoning.start") {
-              operation = record; send(base("reasoning.accepted"));
+              operation = record; starts += 1; send(base("reasoning.accepted"));
+              if (mode.startsWith("late-") && starts > 1) {
+                send({...base("reasoning.text_delta"),ordinal:0,text:"fresh generation"});
+                send(base("reasoning.completed"));
+                continue;
+              }
+              if (mode === "tools-unavailable") {
+                send({...base("reasoning.tool_event"),call_id:record.request_id,status:"tools_unavailable"});
+                send({...base("reasoning.text_delta"),ordinal:0,text:"ordinary text"});
+                send(base("reasoning.completed"));
+                continue;
+              }
               const calls = mode === "two-calls" ? record.tools.slice(0, 2) : record.tools.slice(0, 1);
-              for (const tool of calls) send({...base("reasoning.tool_call"),call_id:crypto.randomUUID(),capability_id:tool.capability_id,arguments:mode === "malformed" ? [] : {query:tool.name}});
+              if (!mode.startsWith("late-")) for (const tool of calls) send({...base("reasoning.tool_call"),call_id:crypto.randomUUID(),capability_id:tool.capability_id,arguments:mode === "malformed" ? [] : {query:tool.name}});
             } else if (record.type === "reasoning.tool_result") {
               results += 1;
               const expected = mode === "two-calls" ? 2 : 1;
               if (results === expected) { send({...base("reasoning.text_delta"),ordinal:0,text:"continued"}); send(base("reasoning.completed")); }
             } else if (record.type === "reasoning.cancel") {
-              send(base("reasoning.stopped"));
+              if (mode.startsWith("late-")) {
+                const callID = crypto.randomUUID();
+                send({...base("reasoning.text_delta"),ordinal:0,text:"late-private-text"});
+                send({...base("reasoning.usage"),input_tokens:1,output_tokens:1});
+                send({...base("reasoning.tool_event"),call_id:record.request_id,status:"tools_unavailable"});
+                send({...base("reasoning.tool_call"),call_id:callID,capability_id:operation.tools[0].capability_id,arguments:{private:true}});
+                send({...base("reasoning.tool_event"),call_id:callID,capability_id:operation.tools[0].capability_id,status:"cancelled"});
+                if (mode === "late-completed") send(base("reasoning.completed"));
+                else send({...base("reasoning.failed"),error_code:"provider_unavailable"});
+              } else send(base("reasoning.stopped"));
             }
           }
         });

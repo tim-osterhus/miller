@@ -39,7 +39,9 @@ Licensed under the MIT License. The exact license text is distributed at
 
 Miller changed the reviewed A1 distribution to harden the OpenAI Codex OAuth
 callback, add bounded OpenAI-compatible tool-call conversion, and assign the
-A3 derived-package identity. The exact changes and retained files are recorded
+A3 derived-package identity. Streamed provider events, fragments, identities,
+and partial argument assemblies are bounded before complete calls exist. The
+exact changes and retained files are recorded
 in `Gateway/vendor/source-map.json`.
 
 ## OpenAI JavaScript 6.26.0

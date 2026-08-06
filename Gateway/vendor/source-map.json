@@ -135,9 +135,9 @@
     },
     {
       "path": "dist/api/openai-completions.js",
-      "transformation": "bounded-tool-calls-v1",
+      "transformation": "bounded-tool-calls-v2",
       "a1_sha256": "aabaf8ccc270b59b98cde3adcab02ff5577bc3d8b55501d7689b48bf7b6cd2d9",
-      "a3_sha256": "536885a4ebc718bdb3f845ded6b57c966cc110e448d7574f4bc2884222672994",
+      "a3_sha256": "97756ec67423e8f26e8b4ac35c8998e13c2934bf7660cc02822ccfd37cfcf572",
       "source": {
         "kind": "transformed_from_exact_tarball",
         "transform_id": "openai-completions-text-only-v1",

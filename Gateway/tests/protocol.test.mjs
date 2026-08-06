@@ -673,6 +673,57 @@ test("reasoning operation admits concurrent distinct calls and rejects duplicate
   assert.equal(emitted.at(-1).type, "reasoning.completed");
 });
 
+test("reasoning operation rejects missing oversized and duplicate provider call identities", async () => {
+  const cases = [
+    {
+      name: "missing provider id",
+      calls: [{ name: toolFixture.name, arguments: {} }],
+    },
+    {
+      name: "oversized provider id",
+      calls: [{ id: "x".repeat(257), name: toolFixture.name, arguments: {} }],
+    },
+    {
+      name: "oversized provider name",
+      calls: [{ id: "provider-one", name: "x".repeat(129), arguments: {} }],
+    },
+    {
+      name: "duplicate provider id",
+      calls: [
+        { id: "provider-duplicate", name: toolFixture.name, arguments: {} },
+        { id: "provider-duplicate", name: toolFixture.name, arguments: {} },
+      ],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const emitted = [];
+    const record = reasoningRecord();
+    await new ReasoningOperation(
+      record,
+      { kind: "api_key", key: "synthetic" },
+      (event) => emitted.push(event),
+      () => {},
+      () => events([
+        ...fixture.calls.map((toolCall) => ({ type: "toolcall_end", toolCall })),
+        { type: "done", message: { content: [] } },
+      ]),
+      { toolTimeoutMilliseconds: 5 },
+    ).run();
+    assert.equal(
+      emitted.some((event) => event.type === "reasoning.tool_call"),
+      false,
+      fixture.name,
+    );
+    assert.equal(emitted.at(-1).type, "reasoning.failed", fixture.name);
+    assert.equal(
+      JSON.stringify(emitted).includes("provider-duplicate"),
+      false,
+      fixture.name,
+    );
+  }
+});
+
 test("tool wait supports timeout, cancellation, malformed args, and unsupported-tool fallback", async () => {
   const timeoutRecord = reasoningRecord();
   const timeoutEvents = [];

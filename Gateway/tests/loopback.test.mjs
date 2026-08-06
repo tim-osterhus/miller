@@ -128,7 +128,10 @@ async function startProvider(handler) {
   const address = server.address();
   return {
     baseURL: `http://127.0.0.1:${address.port}/v1`,
-    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    }),
   };
 }
 
@@ -317,6 +320,89 @@ test("production A3 overlay completes a tool round then continues", async (conte
     && record.type === "reasoning.tool_call").length, 1);
   assert.equal(client.records.filter((record) => record.request_id === turn.request_id
     && record.type === "reasoning.text_delta").map((record) => record.text).join(""), "continued");
+});
+
+test("production A3 overlay rejects hostile tool fragments before stream completion", async (context) => {
+  const valid = (index, overrides = {}) => ({
+    index,
+    id: `provider-${index}`,
+    function: { name: "miller_tool_0", arguments: "{}" },
+    ...overrides,
+  });
+  const hostile = [
+    ["huge index", [valid(256)]],
+    ["too many maps", Array.from({ length: 257 }, (_, index) => valid(index))],
+    ["oversized id", [valid(0, { id: "private-id-" + "x".repeat(257) })]],
+    ["oversized name", [valid(0, {
+      function: { name: "private-name-" + "x".repeat(129), arguments: "{}" },
+    })]],
+    ["oversized partial arguments", [valid(0, {
+      function: { name: "miller_tool_0", arguments: `{"private":"${"x".repeat(65_536)}` },
+    })]],
+    ["aggregate partial arguments", Array.from({ length: 5 }, (_, index) => valid(index, {
+      function: { name: "miller_tool_0", arguments: `{"private":"${"x".repeat(60_000)}` },
+    }))],
+    ["missing id", [{ index: 0, function: { name: "miller_tool_0", arguments: "{}" } }]],
+    ["duplicate id", [valid(0, { id: "private-duplicate" }), valid(1, { id: "private-duplicate" })]],
+    ["conflicting fragments", [
+      valid(0, { id: "provider-one" }),
+      valid(0, { id: "provider-two", function: { name: "miller_tool_1", arguments: "" } }),
+    ]],
+    ["excess fragment count", [
+      valid(0),
+      ...Array.from({ length: 1_024 }, () => ({ index: 0, function: { arguments: "" } })),
+    ]],
+  ];
+
+  for (const [name, fragments] of hostile) {
+    await context.test(name, async () => {
+      const provider = await startProvider((_request, response) => {
+        sse(response, [{
+          choices: [{ delta: { tool_calls: fragments }, finish_reason: null }],
+        }], { hold: true });
+      });
+      const client = new HelperClient();
+      try {
+        await client.ready();
+        const turn = ids();
+        await restore(client, turn.credential_ref);
+        client.send({
+          type: "reasoning.start",
+          request_id: turn.request_id,
+          conversation_id: turn.conversation_id,
+          turn_id: turn.turn_id,
+          generation: 1,
+          provider_profile: profile(provider.baseURL, turn.credential_ref),
+          context: [],
+          user_text: "hostile fragments",
+          tools: [{
+            capability_id: "miller_mcp/notes/lookup",
+            name: "miller_tool_0",
+            description: "Look up a note",
+            input_schema: { type: "object" },
+          }],
+        });
+        const failure = await client.waitFor(
+          (record) => record.request_id === turn.request_id
+            && record.type === "reasoning.failed",
+          750,
+        );
+        assert.equal(failure.error_code, "provider_unavailable");
+        assert.equal(client.records.some((record) => record.request_id === turn.request_id
+          && record.type === "reasoning.tool_call"), false);
+        assert.equal(JSON.stringify(client.records).includes("private-"), false);
+        assert.match(
+          client.stderr,
+          /^provider_failure [0-9a-f-]{36} reasoning\n$/,
+        );
+        assert.equal(client.stderr.includes("private-"), false);
+      } finally {
+        if (!client.exited) client.child.kill();
+        await client.exit;
+        await provider.close();
+      }
+    });
+  }
 });
 
 test("production helper returns the local Codex catalog and accepts custom readiness", async (context) => {

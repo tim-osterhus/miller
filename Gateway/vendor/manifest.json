@@ -18,7 +18,7 @@
   },
   "transformation": {
     "script": "Gateway/scripts/build-overlay.mjs",
-    "script_sha256": "541b097adf3c4b7d77bf51763a2b9d76983e2f8610b833bd3042accb95bfd9f6",
+    "script_sha256": "57d4fbf2d54b1fb691dae7b5516b515e22f7f0b209a0978a0534d898a03866a5",
     "modified_overlay_files": [
       "dist/api/openai-completions.js",
       "dist/auth/oauth/openai-codex.js",
@@ -30,6 +30,7 @@
       "no-store and no-referrer response headers",
       "awaited callback listener close",
       "bounded OpenAI-compatible tool definitions and arguments",
+      "bounded provider events, fragments, identities, and partial assemblies",
       "streamed tool-call assembly with tool-result replay",
       "cancellation and deadline settle before awaited listener close",
       "fixed 127.0.0.1 listener host",
@@ -50,13 +51,13 @@
   },
   "gateway": {
     "package_json_sha256": "7e4ec21149296fb16732c0b4358ce68caa7ab2c238d7f5276118bf4e3d2f33b0",
-    "package_lock_sha256": "937103fdcfcf315929f2d2262d6f4478bc9a2d124018767abff32549d8a05a48"
+    "package_lock_sha256": "4696145d899809e8de806b742a96f14fb6c81c67d7a09f2ce7486ca55eb89e1f"
   },
   "files": [
     {
       "path": "development-bundle-inventory.json",
       "role": "development_bundle_inventory",
-      "sha256": "b2ee22957e6675f841a9332d5309596e78a04f674cb4dc6b29191339d2149820",
+      "sha256": "556718fafe736ee3efa0ab6cb61f593c7316f8c5b38521b29167239333af80a9",
       "bytes": 289
     },
     {
@@ -86,14 +87,14 @@
     {
       "path": "overlay-files.json",
       "role": "file_inventory",
-      "sha256": "afd306f30a4f0a261dbe7d324f7c91be9592f7316250fdd3c377b9db8ac2af79",
-      "bytes": 9874
+      "sha256": "29e5fd59d8864844665cb63ab51b06479c810e61f2f5f0e6d21c0c63511647cd",
+      "bytes": 9875
     },
     {
       "path": "pi-mvp-overlay-0.82.0-a3.tgz",
       "role": "overlay_archive",
-      "sha256": "49b3846b3ec3d1daa9ac704b9eeae085fa4c9aaa35692ed2b7ad027c9ead266c",
-      "bytes": 66713
+      "sha256": "e2f9275e5fc32d8db0530d40347961525d785d0229d723fbe29a9438b6316ab9",
+      "bytes": 67083
     },
     {
       "path": "sbom.spdx.json",
@@ -104,7 +105,7 @@
     {
       "path": "source-map.json",
       "role": "source_map",
-      "sha256": "20c875d9ecf580ec3223374e511a912bc40a8d9b4808d837ee6614b7c0cc3788",
+      "sha256": "317ec2c88880404b6765cf27054c7f3a845ff7de784885ca2c5007d9e03bdbbc",
       "bytes": 50731
     }
   ]

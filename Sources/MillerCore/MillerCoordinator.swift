@@ -20,6 +20,7 @@ public actor MillerCoordinator {
     private let contextSelector: ContextSelector
     private var active: ActiveTurn?
     private var storageAvailable = true
+    public private(set) var activeReasoningStatus: ReasoningStatus?
 
     public init(
         repository: any ConversationRepository,
@@ -47,6 +48,7 @@ public actor MillerCoordinator {
         guard active == nil else {
             throw CoreError.turnAlreadyActive
         }
+        activeReasoningStatus = nil
 
         let turnID = TurnID()
         let generation = 1
@@ -97,6 +99,7 @@ public actor MillerCoordinator {
             }
             if active?.id == turnID, active?.phase == .stopping {
                 active = nil
+                activeReasoningStatus = nil
             }
             return turnID
         }
@@ -184,6 +187,7 @@ public actor MillerCoordinator {
 
         if active?.id == turn.id, active?.phase == .stopping {
             active = nil
+            activeReasoningStatus = nil
         }
         turn.consumer?.cancel()
         await gateway.cancel(
@@ -265,6 +269,9 @@ public actor MillerCoordinator {
         case .accepted, .usage, .capabilityLifecycle,
              .capabilityApprovalRequested:
             return
+
+        case let .status(status):
+            activeReasoningStatus = status
 
         case let .textDelta(ordinal, text):
             guard ordinal == active?.expectedOrdinal else {
@@ -402,6 +409,7 @@ public actor MillerCoordinator {
             return
         }
         active = nil
+        activeReasoningStatus = nil
     }
 
     private func storageDidFail(
@@ -412,6 +420,7 @@ public actor MillerCoordinator {
         let consumer = active?.id == turnID ? active?.consumer : nil
         if active?.id == turnID {
             active = nil
+            activeReasoningStatus = nil
         }
         consumer?.cancel()
         await gateway.cancel(
@@ -425,6 +434,7 @@ public actor MillerCoordinator {
     private func clearReservation(turnID: TurnID) {
         if active?.id == turnID {
             active = nil
+            activeReasoningStatus = nil
         }
     }
 

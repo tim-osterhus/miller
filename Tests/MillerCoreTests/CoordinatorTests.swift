@@ -126,6 +126,27 @@ struct CoordinatorTests {
     }
 
     @Test
+    func toolsUnavailableStatusIsActiveOnlyForTheCurrentTurn() async throws {
+        let repository = FakeRepository()
+        let gateway = FakeGateway()
+        let coordinator = MillerCoordinator(repository: repository, gateway: gateway)
+        _ = try await coordinator.submit(text: "continue", conversationID: ConversationID())
+
+        await gateway.yield(.status(.toolsUnavailable))
+        await settle()
+
+        #expect(await coordinator.activeReasoningStatus == .toolsUnavailable)
+        #expect(await repository.appends.isEmpty)
+
+        await gateway.yield(.textDelta(ordinal: 0, text: "ordinary text"))
+        await gateway.yield(.completed)
+        await eventually { await coordinator.activeTurnID == nil }
+
+        #expect(await coordinator.activeReasoningStatus == nil)
+        #expect(await repository.appends.map(\.text) == ["ordinary text"])
+    }
+
+    @Test
     func storageFailureCancelsReasoningAndBlocksNewTurns() async throws {
         let repository = FakeRepository()
         await repository.failAppends()

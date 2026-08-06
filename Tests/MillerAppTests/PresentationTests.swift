@@ -138,6 +138,33 @@ struct PresentationTests {
     }
 
     @Test
+    func toolsUnavailableStatusIsVisibleWithoutTranscriptContaminationAndClearsOnStop() async {
+        let activeID = TurnID()
+        let acceptedTurn = turn(state: .accepted)
+        let model = AppPresentationModel(
+            dependencies: HostDependencies(
+                submit: { _, _ in activeID },
+                stop: {},
+                loadTurn: { _ in acceptedTurn },
+                loadConversations: { [] },
+                loadTurns: { _ in [] },
+                archive: { _ in },
+                unarchive: { _ in },
+                delete: { _ in },
+                reasoningStatus: { .toolsUnavailable }
+            )
+        )
+        model.draft = "continue without tools"
+
+        await model.submit()
+        await eventually { model.statusText == "Tools unavailable — continuing without them" }
+
+        #expect(model.visibleTurns.isEmpty)
+        await model.stop()
+        #expect(model.statusText == "Stopped")
+    }
+
+    @Test
     func shortcutFailureDoesNotDisableMenuPresentation() {
         let model = AppPresentationModel(dependencies: dependencies())
         model.setShortcutAvailable(false)
@@ -324,6 +351,14 @@ struct PresentationTests {
                 archivedAt: state == .archived ? updatedAt : nil
             )
         )
+    }
+
+    private func eventually(_ condition: () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("Condition did not become true")
     }
 }
 
