@@ -225,7 +225,9 @@ public struct PluginBundleImporter: Sendable {
     }
 
     private func parseMCP(_ object: [String: Any], root: URL) throws -> [PluginMCPDraft] {
-        guard let definitions = object["mcpServers"] as? [String: Any] else {
+        guard Set(object.keys) == ["mcpServers"],
+              let definitions = object["mcpServers"] as? [String: Any]
+        else {
             throw PluginBundleImportError.invalidBundle
         }
         var seen = Set<String>(), drafts: [PluginMCPDraft] = []
@@ -233,8 +235,19 @@ public struct PluginBundleImporter: Sendable {
             guard let id = safeIdentifier(rawID), seen.insert(id).inserted,
                   let value = definitions[rawID] as? [String: Any]
             else { throw PluginBundleImportError.invalidBundle }
-            let rawCommand = value["command"] as? String
-            let endpoint = value["url"] as? String ?? value["endpoint"] as? String
+            let supportedFields: Set<String> = [
+                "command", "args", "env", "env_vars", "url", "endpoint",
+            ]
+            guard Set(value.keys).isSubset(of: supportedFields) else {
+                throw PluginBundleImportError.invalidBundle
+            }
+            let rawCommand = try optionalString(value, key: "command")
+            let url = try optionalString(value, key: "url")
+            let alternateEndpoint = try optionalString(value, key: "endpoint")
+            guard url == nil || alternateEndpoint == nil else {
+                throw PluginBundleImportError.invalidBundle
+            }
+            let endpoint = url ?? alternateEndpoint
             guard (rawCommand == nil) != (endpoint == nil) else {
                 throw PluginBundleImportError.invalidBundle
             }
@@ -251,13 +264,48 @@ public struct PluginBundleImporter: Sendable {
                 guard let url = URL(string: endpoint), url.scheme == "https",
                       url.host != nil else { throw PluginBundleImportError.invalidBundle }
             }
-            let arguments = value["args"] as? [String] ?? []
+            let arguments: [String]
+            if let raw = value["args"] {
+                guard let decoded = raw as? [String] else {
+                    throw PluginBundleImportError.invalidBundle
+                }
+                arguments = decoded
+            } else {
+                arguments = []
+            }
             guard arguments.count <= 256,
                   arguments.allSatisfy({ $0.utf8.count <= 16 * 1_024 && !$0.contains("\0") })
             else { throw PluginBundleImportError.invalidBundle }
-            let env = value["env"] as? [String: Any] ?? [:]
-            guard env.count <= 128 else { throw PluginBundleImportError.invalidBundle }
-            let unresolved = env.keys.sorted()
+            let environment: [String: String]
+            if let raw = value["env"] {
+                guard let decoded = raw as? [String: String] else {
+                    throw PluginBundleImportError.invalidBundle
+                }
+                environment = decoded
+            } else {
+                environment = [:]
+            }
+            let inheritedEnvironment: [String]
+            if let raw = value["env_vars"] {
+                guard let decoded = raw as? [String] else {
+                    throw PluginBundleImportError.invalidBundle
+                }
+                inheritedEnvironment = decoded
+            } else {
+                inheritedEnvironment = []
+            }
+            guard environment.count <= 128, inheritedEnvironment.count <= 128,
+                  rawCommand != nil || (
+                    arguments.isEmpty && environment.isEmpty
+                        && inheritedEnvironment.isEmpty
+                  ),
+                  environment.allSatisfy({ key, value in
+                      validEnvironmentName(key) && value == "${\(key)}"
+                  }),
+                  inheritedEnvironment.allSatisfy(validEnvironmentName)
+            else { throw PluginBundleImportError.invalidBundle }
+            let unresolved = Set(environment.keys)
+                .union(inheritedEnvironment).sorted()
             _ = root
             drafts.append(.init(
                 id: id, command: command, arguments: arguments,
@@ -266,6 +314,28 @@ public struct PluginBundleImporter: Sendable {
             ))
         }
         return drafts
+    }
+
+    private func optionalString(
+        _ object: [String: Any], key: String
+    ) throws -> String? {
+        guard let value = object[key] else { return nil }
+        guard let string = value as? String, !string.isEmpty,
+              string.utf8.count <= 4_096, !string.contains("\0")
+        else { throw PluginBundleImportError.invalidBundle }
+        return string
+    }
+
+    private func validEnvironmentName(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 256,
+              let first = value.unicodeScalars.first,
+              first.isASCII,
+              first.properties.isAlphabetic || first == "_"
+        else { return false }
+        return value.unicodeScalars.dropFirst().allSatisfy {
+            $0.isASCII && ($0.properties.isAlphabetic
+                || (48...57).contains($0.value) || $0 == "_")
+        }
     }
 
     private func parseApps(_ object: [String: Any]) throws -> [PluginAppMetadata] {

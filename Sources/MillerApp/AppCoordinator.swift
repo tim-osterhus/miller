@@ -477,6 +477,8 @@ final class AppPresentationModel: ObservableObject {
             return switch reasoningStatus {
             case .toolsUnavailable: "Tools unavailable — continuing without them"
             case .portableSkillsOmitted: "Some enabled skills were omitted to stay within limits"
+            case .portableSkillCleanupPending:
+                "Private skill cleanup is pending"
             }
         }
         return switch presentationState {
@@ -1748,6 +1750,9 @@ final class AppPresentationModel: ObservableObject {
     }
 
     private static func liveFailureCode(_ error: Error) -> String {
+        if (error as? GPTLiveSkillProjectionError) == .cleanupPending {
+            return "cleanup_pending"
+        }
         if error is GPTLiveCredentialError { return "voice_unavailable" }
         if let audio = error as? LiveAudioError {
             switch audio {

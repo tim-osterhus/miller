@@ -47,6 +47,7 @@ public struct ReasoningRequest: Sendable, Equatable {
 public enum ReasoningStatus: String, Sendable, Equatable, Codable {
     case toolsUnavailable = "tools_unavailable"
     case portableSkillsOmitted = "portable_skills_omitted"
+    case portableSkillCleanupPending = "portable_skill_cleanup_pending"
 }
 
 public enum ReasoningEvent: Sendable, Equatable {

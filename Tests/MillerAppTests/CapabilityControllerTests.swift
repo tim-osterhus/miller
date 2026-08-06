@@ -2467,8 +2467,19 @@ struct CapabilityControllerTests {
         )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let repository = try SQLiteCapabilityRepository(
-            path: root.appendingPathComponent("miller.sqlite3").path
+        let databasePath = root.appendingPathComponent("miller.sqlite3").path
+        let repository = try SQLiteCapabilityRepository(path: databasePath)
+        let profileID = UUID()
+        try await SQLiteConversationRepository(path: databasePath).saveProviderProfile(
+            try ProviderProfile(
+                id: profileID, kind: .codexOAuth, label: "Codex",
+                baseURL: nil, model: "gpt-5.6-terra", isSelected: true
+            )
+        )
+        let skill = portableSkillRecord(id: "typed-authority")
+        try await repository.saveSkill(skill)
+        try await repository.setSkillEnabled(
+            true, skillID: skill.id, providerProfileID: profileID
         )
         let server = settingsControllerServer(policy: .askBeforeChanges)
         try await repository.saveServer(server)
@@ -2484,7 +2495,7 @@ struct CapabilityControllerTests {
         )
         let preparation = Task { @MainActor in
             try await controller.prepareRequest(
-                request, providerProfileID: UUID(), kind: .codexOAuth
+                request, providerProfileID: profileID, kind: .codexOAuth
             )
         }
         #expect(await waitForConfigurationRequest(loading))
@@ -2498,12 +2509,29 @@ struct CapabilityControllerTests {
                 return error
             }
         }
+        let skillDisable = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.setPortableSkillEnabledFromSettings(
+                    false, skillID: skill.id, providerProfileID: profileID
+                )
+                return nil
+            } catch { return error }
+        }
+        let skillDelete = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.deletePortableSkillFromSettings(id: skill.id)
+                return nil
+            } catch { return error }
+        }
         try await Task.sleep(for: .milliseconds(30))
 
         #expect(await loading.requestCount == 1)
         await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
-        _ = try await preparation.value
+        let prepared = try await preparation.value
         #expect(await mutation.value as? CapabilityControllerError == .settingsBusy)
+        #expect(await skillDisable.value as? CapabilityControllerError == .settingsBusy)
+        #expect(await skillDelete.value as? CapabilityControllerError == .settingsBusy)
+        #expect(prepared.portableSkillAttachment?.skills.map(\.id) == [skill.id])
         await #expect(throws: CapabilityControllerError.settingsBusy) {
             try await controller.setServerPolicyFromSettings(
                 .fullyTrusted, serverID: server.id
@@ -2518,8 +2546,19 @@ struct CapabilityControllerTests {
         )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let repository = try SQLiteCapabilityRepository(
-            path: root.appendingPathComponent("miller.sqlite3").path
+        let databasePath = root.appendingPathComponent("miller.sqlite3").path
+        let repository = try SQLiteCapabilityRepository(path: databasePath)
+        let profileID = UUID()
+        try await SQLiteConversationRepository(path: databasePath).saveProviderProfile(
+            try ProviderProfile(
+                id: profileID, kind: .codexOAuth, label: "Codex",
+                baseURL: nil, model: "gpt-5.6-terra", isSelected: true
+            )
+        )
+        let skill = portableSkillRecord(id: "voice-authority")
+        try await repository.saveSkill(skill)
+        try await repository.setSkillEnabled(
+            true, skillID: skill.id, providerProfileID: profileID
         )
         let server = settingsControllerServer(policy: .askBeforeChanges)
         try await repository.saveServer(server)
@@ -2530,7 +2569,7 @@ struct CapabilityControllerTests {
             settingsSecrets: .unavailable
         )
         let preparation = Task { @MainActor in
-            try await controller.prepareLiveVoice(providerProfileID: UUID())
+            try await controller.prepareLiveVoice(providerProfileID: profileID)
         }
         #expect(await waitForConfigurationRequest(loading))
         let mutation = Task { @MainActor () -> (any Error)? in
@@ -2543,12 +2582,31 @@ struct CapabilityControllerTests {
                 return error
             }
         }
+        let skillDisable = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.setPortableSkillEnabledFromSettings(
+                    false, skillID: skill.id, providerProfileID: profileID
+                )
+                return nil
+            } catch { return error }
+        }
+        let skillDelete = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.deletePortableSkillFromSettings(id: skill.id)
+                return nil
+            } catch { return error }
+        }
         try await Task.sleep(for: .milliseconds(30))
 
         #expect(await loading.requestCount == 1)
         await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
         let voicePreparation = try await preparation.value
         #expect(await mutation.value as? CapabilityControllerError == .settingsBusy)
+        #expect(await skillDisable.value as? CapabilityControllerError == .settingsBusy)
+        #expect(await skillDelete.value as? CapabilityControllerError == .settingsBusy)
+        #expect(try await controller.selectedSkillAttachment(
+            providerProfileID: profileID
+        )?.skills.map(\.id) == [skill.id])
         try controller.admitVoiceAssociation(
             sessionID: UUID(),
             preparation: voicePreparation
@@ -4033,6 +4091,15 @@ struct CapabilityControllerTests {
         #expect(snapshot.adapterProcessState == .noReachableLeasePID)
         #expect(snapshot.adapterProcessState.diagnosticsLabel == "No reachable lease PID")
     }
+}
+
+private func portableSkillRecord(id: String) -> PortableSkillRecord {
+    PortableSkillRecord(
+        id: id, pluginID: nil, name: id, description: "Authority proof",
+        markdownSnapshot: "Use the admitted snapshot.",
+        sourceHash: String(repeating: "a", count: 64), enabled: false,
+        createdAt: .distantPast, updatedAt: .distantPast
+    )
 }
 
 private func settingsControllerServer(

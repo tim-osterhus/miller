@@ -23,6 +23,10 @@ enum LiveVoiceState: String, Equatable, Sendable {
     }
 }
 
+enum GPTLiveSkillProjectionError: Error, Equatable, Sendable {
+    case cleanupPending
+}
+
 enum LiveTranscriptRole: Equatable, Sendable {
     case user
     case assistant
@@ -292,8 +296,20 @@ actor GPTLiveController {
         else { throw GPTLiveCredentialError.unavailable }
         let sessionID = UUID()
         let projector = PortableSkillProjector()
+        if makeDirectSession == nil {
+            do {
+                try projector.removeStaleMaterializedRoots(
+                    under: temporaryParentURL
+                )
+            } catch {
+                terminalFailurePresented = true
+                await receive(.failed(code: "cleanup_pending"))
+                throw GPTLiveSkillProjectionError.cleanupPending
+            }
+        }
         var projectedSkillRoot: URL?
         var projectedSkillInstructions: String?
+        var projectedSkillCleanupAttempted = false
         if makeDirectSession == nil,
            let attachment = try await portableSkillAttachment(confirmedProfile.id)
         {
@@ -310,10 +326,16 @@ actor GPTLiveController {
             }
         }
         defer {
-            if let projectedSkillRoot {
-                try? projector.removeMaterializedRoot(
-                    projectedSkillRoot, under: temporaryParentURL
-                )
+            if let projectedSkillRoot, !projectedSkillCleanupAttempted {
+                do {
+                    try projector.removeMaterializedRoot(
+                        projectedSkillRoot, under: temporaryParentURL
+                    )
+                } catch {
+                    Task { @MainActor in
+                        await receive(.failed(code: "cleanup_pending"))
+                    }
+                }
             }
         }
         let peer = try await makePeer?()
@@ -381,6 +403,10 @@ actor GPTLiveController {
                 await peer.close()
                 await releaseAttachedPeerIfNeeded()
             }
+            projectedSkillCleanupAttempted = true
+            guard await cleanupProjectedSkillRoot(
+                projectedSkillRoot, projector: projector, receive: receive
+            ) else { throw GPTLiveSkillProjectionError.cleanupPending }
             return
         }
         let identity = LiveSessionIdentity(
@@ -394,6 +420,10 @@ actor GPTLiveController {
                 await peer.close()
                 await releaseAttachedPeerIfNeeded()
             }
+            projectedSkillCleanupAttempted = true
+            guard await cleanupProjectedSkillRoot(
+                projectedSkillRoot, projector: projector, receive: receive
+            ) else { throw GPTLiveSkillProjectionError.cleanupPending }
             return
         }
         do {
@@ -438,8 +468,18 @@ actor GPTLiveController {
                 }
             }
             await releaseAttachedPeerIfNeeded()
+            projectedSkillCleanupAttempted = true
+            guard await cleanupProjectedSkillRoot(
+                projectedSkillRoot, projector: projector, receive: receive
+            ) else { throw GPTLiveSkillProjectionError.cleanupPending }
         } catch {
             await releaseAttachedPeerIfNeeded()
+            if !projectedSkillCleanupAttempted {
+                projectedSkillCleanupAttempted = true
+                guard await cleanupProjectedSkillRoot(
+                    projectedSkillRoot, projector: projector, receive: receive
+                ) else { throw GPTLiveSkillProjectionError.cleanupPending }
+            }
             guard !stopRequested || clientSessionBecameActive else { return }
             if !terminalFailurePresented {
                 await receive(.failed(code: Self.failureCode(error)))
@@ -507,6 +547,22 @@ actor GPTLiveController {
         await releasePeer()
     }
 
+    private func cleanupProjectedSkillRoot(
+        _ root: URL?,
+        projector: PortableSkillProjector,
+        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+    ) async -> Bool {
+        guard let root else { return true }
+        do {
+            try projector.removeMaterializedRoot(root, under: temporaryParentURL)
+            return true
+        } catch {
+            terminalFailurePresented = true
+            await receive(.failed(code: "cleanup_pending"))
+            return false
+        }
+    }
+
     nonisolated private static func sameCredentialAuthority(
         _ admitted: ProviderProfile,
         _ current: ProviderProfile
@@ -546,6 +602,11 @@ actor GPTLiveController {
     private func markTerminalFailurePresented() { terminalFailurePresented = true }
 
     private static func failureCode(_ error: Error) -> String {
+        if let projection = error as? GPTLiveSkillProjectionError,
+           projection == .cleanupPending
+        {
+            return "cleanup_pending"
+        }
         if let audio = error as? LiveAudioError {
             switch audio {
             case .audioBackpressure: return "audio_backpressure"

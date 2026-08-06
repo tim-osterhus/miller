@@ -32,6 +32,59 @@ struct PortableSkillRoutingTests {
     }
 
     @Test
+    func liveAdmissionReportsUnsafeStaleSkillCleanupWithoutStartingHelper() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "miller-live-sweep-\(UUID().uuidString)"
+        )
+        let outside = FileManager.default.temporaryDirectory.appending(
+            path: "miller-live-outside-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: root.appending(path: "miller-skills-unsafe"),
+            withDestinationURL: outside
+        )
+        let helper = root.appending(path: "helper")
+        try Data("#!/bin/sh\nexit 99\n".utf8).write(to: helper)
+        #expect(chmod(helper.path, 0o700) == 0)
+        let profile = try ProviderProfile(
+            kind: .codexOAuth, label: "Codex", baseURL: nil,
+            model: "gpt-5.6-terra", isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"account-1"}"#.utf8
+            )
+        )
+        var events: [LiveVoiceEvent] = []
+        let controller = try GPTLiveController(
+            helperURL: helper,
+            temporaryParentURL: root,
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {}, microphonePermission: { .authorized },
+            makePeer: { PortableSkillRoutingPeer() },
+            helperVerifier: { _ in }, spawnedProcessVerifier: { _ in }
+        )
+
+        do {
+            try await controller.start { event in events.append(event) }
+            Issue.record("Expected stale private-root cleanup to fail closed")
+        } catch {
+            #expect((error as? GPTLiveSkillProjectionError) == .cleanupPending)
+        }
+
+        #expect(events == [.failed(code: "cleanup_pending")])
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    @Test
     func productionAdaptersProjectOneImportedSkillProspectivelyAndPreserveDurableTurn() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "miller-portable-routing-\(UUID().uuidString)")

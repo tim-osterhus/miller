@@ -52,6 +52,82 @@ struct PluginBundleImporterTests {
     }
 
     @Test
+    func preservesReviewableEnvironmentRequirements() throws {
+        let root = try pluginRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeJSON(
+            ["name": "semantic"],
+            to: root.appending(path: ".codex-plugin/plugin.json")
+        )
+        try writeJSON([
+            "mcpServers": [
+                "stdio": [
+                    "command": "/usr/bin/true",
+                    "args": ["--stdio"],
+                    "env": ["TOKEN": "${TOKEN}"],
+                    "env_vars": ["ACCOUNT_ID", "TOKEN"],
+                ],
+                "remote": ["url": "https://example.com/mcp"],
+            ],
+        ], to: root.appending(path: ".mcp.json"))
+
+        let imported = try PluginBundleImporter().importBundle(at: root)
+
+        #expect(imported.mcpDrafts.map(\.id) == ["remote", "stdio"])
+        #expect(imported.mcpDrafts[0].unresolvedSecrets == [])
+        #expect(imported.mcpDrafts[1].unresolvedSecrets == ["ACCOUNT_ID", "TOKEN"])
+    }
+
+    @Test
+    func rejectsMalformedOrUnsupportedMCPSemantics() throws {
+        let cases: [[String: Any]] = [
+            ["command": "/usr/bin/true", "args": "--stdio"],
+            ["command": "/usr/bin/true", "env": ["TOKEN": 42]],
+            ["command": "/usr/bin/true", "env": ["TOKEN": "literal-secret"]],
+            ["command": "/usr/bin/true", "env_vars": "TOKEN"],
+            ["command": "/usr/bin/true", "cwd": "relative/path"],
+            ["url": "https://example.com/mcp", "bearer_token_env_var": 42],
+            ["url": "https://example.com/mcp", "bearer_token_env_var": "TOKEN"],
+            ["url": "https://example.com/mcp", "headers": ["X-Test": "value"]],
+            ["url": "https://example.com/mcp", "endpoint": "https://other.example/mcp"],
+        ]
+        for server in cases {
+            let root = try pluginRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try writeJSON(
+                ["name": "semantic"],
+                to: root.appending(path: ".codex-plugin/plugin.json")
+            )
+            try writeJSON(
+                ["mcpServers": ["server": server]],
+                to: root.appending(path: ".mcp.json")
+            )
+
+            #expect(throws: PluginBundleImportError.invalidBundle) {
+                _ = try PluginBundleImporter().importBundle(at: root)
+            }
+        }
+    }
+
+    @Test
+    func rejectsUnknownRootMCPSemantics() throws {
+        let root = try pluginRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeJSON(
+            ["name": "semantic"],
+            to: root.appending(path: ".codex-plugin/plugin.json")
+        )
+        try writeJSON([
+            "mcpServers": ["server": ["command": "/usr/bin/true"]],
+            "authentication": ["mode": "ambient"],
+        ], to: root.appending(path: ".mcp.json"))
+
+        #expect(throws: PluginBundleImportError.invalidBundle) {
+            _ = try PluginBundleImporter().importBundle(at: root)
+        }
+    }
+
+    @Test
     func atomicallyRejectsDuplicatesEscapesSymlinksAndLimits() throws {
         let root = try pluginRoot()
         defer { try? FileManager.default.removeItem(at: root) }

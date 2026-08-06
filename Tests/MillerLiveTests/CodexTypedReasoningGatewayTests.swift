@@ -6,6 +6,132 @@ import Testing
 @Suite(.serialized)
 struct CodexTypedReasoningGatewayTests {
     @Test
+    func nextTurnSweepsOnlyValidatedStalePrivateSkillRoots() async throws {
+        let parent = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-sweep-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let stale = parent.appending(path: "portable-skills-stale")
+        let unrelated = parent.appending(path: "ordinary")
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+        try Data("private".utf8).write(to: stale.appending(path: "SKILL.md"))
+        let factory = TypedClientFactory(mode: "typed-normal")
+        let gateway = CodexTypedReasoningGateway(
+            makeClient: { try factory.makeClient() }, credential: { credential },
+            model: { "gpt-5.6-terra" }, cwd: parent.path
+        )
+
+        let events = try await collect(try await gateway.start(request(
+            context: [], userText: "hello"
+        )))
+
+        #expect(events.last == .completed)
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    @Test
+    func unsafeStaleSkillRootFailsClosedWithOwnerVisibleStatus() async throws {
+        let parent = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-sweep-\(UUID().uuidString)"
+        )
+        let outside = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-outside-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(at: parent)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: parent.appending(path: "portable-skills-stale"),
+            withDestinationURL: outside
+        )
+        let factory = TypedClientFactory(mode: "typed-normal")
+        let gateway = CodexTypedReasoningGateway(
+            makeClient: { try factory.makeClient() }, credential: { credential },
+            model: { "gpt-5.6-terra" }, cwd: parent.path
+        )
+
+        let events = try await collect(try await gateway.start(request(
+            context: [], userText: "hello"
+        )))
+
+        #expect(events == [
+            .accepted,
+            .status(.portableSkillCleanupPending),
+            .failed(
+                code: "cleanup_pending",
+                message: "Private skill cleanup is pending."
+            ),
+        ])
+        #expect(factory.createdRoots.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    @Test
+    func activeTurnCleanupFailureReplacesNormalStopWithTerminalFailure() async throws {
+        let parent = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-cleanup-\(UUID().uuidString)"
+        )
+        let outside = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-outside-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(at: parent)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let marker = parent.appending(path: "turn.txt")
+        let factory = TypedClientFactory(
+            mode: "typed-portable-skill-wait", extraArguments: [marker.path]
+        )
+        let gateway = CodexTypedReasoningGateway(
+            makeClient: { try factory.makeClient() }, credential: { credential },
+            model: { "gpt-5.6-terra" }, cwd: parent.path
+        )
+        let attachment = try PortableSkillAttachment(skills: [.init(
+            id: "skill", pluginID: nil, name: "Weather", description: "Private",
+            markdown: "Use this private instruction.", sourceHash: "hash", enabled: true
+        )])
+        let value = request(
+            context: [], userText: "wait", portableSkillAttachment: attachment
+        )
+        let stream = try await gateway.start(value)
+        let collector = Task { try await collect(stream) }
+        try await waitUntil {
+            FileManager.default.fileExists(atPath: marker.path)
+                && factory.latestClient?.hasActiveTypedTurn == true
+        }
+        let materialized = try #require(
+            try FileManager.default.contentsOfDirectory(
+                at: parent, includingPropertiesForKeys: nil
+            ).first { $0.lastPathComponent.hasPrefix("portable-skills-") }
+        )
+        try FileManager.default.removeItem(at: materialized)
+        try FileManager.default.createSymbolicLink(
+            at: materialized, withDestinationURL: outside
+        )
+
+        await gateway.cancel(.init(
+            turnID: value.turnID, targetGeneration: value.generation
+        ))
+        let events = try await collector.value
+
+        #expect(events.contains(.status(.portableSkillCleanupPending)))
+        #expect(events.last == .failed(
+            code: "cleanup_pending",
+            message: "Private skill cleanup is pending."
+        ))
+        #expect(!events.contains(.stopped))
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    @Test
     func streamsEphemeralTurnFromBoundedMillerContextAndCleansProcess() async throws {
         let factory = TypedClientFactory(mode: "typed-normal")
         let gateway = CodexTypedReasoningGateway(
@@ -549,11 +675,13 @@ struct CodexTypedReasoningGatewayTests {
     }
 
     private func request(
-        context: [ReasoningMessage], userText: String
+        context: [ReasoningMessage], userText: String,
+        portableSkillAttachment: PortableSkillAttachment? = nil
     ) -> ReasoningRequest {
         .init(
             conversationID: .init(), turnID: .init(), generation: 1,
-            context: context, userText: userText
+            context: context, userText: userText,
+            portableSkillAttachment: portableSkillAttachment
         )
     }
 

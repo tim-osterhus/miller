@@ -157,6 +157,31 @@ struct PortableSkillImporterTests {
         try PortableSkillProjector().removeMaterializedRoot(root, under: parent)
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
+
+    @Test
+    func projectorSweepsOnlyValidatedStaleRootsAndRejectsSymlinkEscapes() throws {
+        let parent = try temporaryDirectory()
+        let outside = try temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: parent)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        let stale = parent.appending(path: "miller-skills-stale")
+        let unrelated = parent.appending(path: "ordinary")
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+
+        try PortableSkillProjector().removeStaleMaterializedRoots(under: parent)
+
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+        let unsafe = parent.appending(path: "miller-skills-unsafe")
+        try FileManager.default.createSymbolicLink(at: unsafe, withDestinationURL: outside)
+        #expect(throws: PortableSkillImportError.unsafeSource) {
+            try PortableSkillProjector().removeStaleMaterializedRoots(under: parent)
+        }
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+    }
 }
 
 private func temporaryDirectory() throws -> URL {

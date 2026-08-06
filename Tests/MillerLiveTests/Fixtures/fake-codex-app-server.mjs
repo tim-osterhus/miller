@@ -521,7 +521,7 @@ lines.on("line", (line) => {
     }
     if (request.method === "turn/start") {
       const input = request.params?.input;
-      const portableSkillInputIsValid = mode !== "typed-portable-skill-routing-proof"
+      const portableSkillInputIsValid = !mode.startsWith("typed-portable-skill-")
         ? input?.length === 1
         : input?.length === 1 || (
           input?.length === 2 && input[1]?.type === "skill"
@@ -575,7 +575,7 @@ lines.on("line", (line) => {
         emitTypedTurnStarted();
       }
       if (mode.startsWith("typed-turn-duplicate-")) return;
-      if (mode === "typed-wait") {
+      if (mode === "typed-wait" || mode === "typed-portable-skill-wait") {
         if (pidPath) fs.writeFileSync(pidPath, "turn-started\n", { mode: 0o600 });
         return;
       }

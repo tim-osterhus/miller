@@ -1271,13 +1271,19 @@ final class CapabilityController: ObservableObject {
     func setPortableSkillEnabledFromSettings(
         _ enabled: Bool, skillID: String, providerProfileID: UUID
     ) async throws {
-        try await settingsRepositoryOrThrow().setSkillEnabled(
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { finishSettingsMutation() }
+        try await repository.setSkillEnabled(
             enabled, skillID: skillID, providerProfileID: providerProfileID
         )
     }
 
     func deletePortableSkillFromSettings(id: String) async throws {
-        try await settingsRepositoryOrThrow().deleteSkill(id: id)
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { finishSettingsMutation() }
+        try await repository.deleteSkill(id: id)
     }
 
     func deletePluginFromSettings(id: String) async throws {

@@ -70,7 +70,32 @@ public struct PortableSkillProjector: Sendable {
         guard candidate.deletingLastPathComponent() == parent,
               candidate.lastPathComponent.hasPrefix("miller-skills-")
         else { throw PortableSkillImportError.unsafeSource }
+        let values = try candidate.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey,
+        ])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw PortableSkillImportError.unsafeSource
+        }
         try FileManager.default.removeItem(at: candidate)
+    }
+
+    public func removeStaleMaterializedRoots(under trustedParent: URL) throws {
+        let parent = trustedParent.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: parent.path) else { return }
+        let parentValues = try parent.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey,
+        ])
+        guard parentValues.isDirectory == true,
+              parentValues.isSymbolicLink != true
+        else { throw PortableSkillImportError.unsafeSource }
+        let children = try FileManager.default.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        ).filter { $0.lastPathComponent.hasPrefix("miller-skills-") }
+        for child in children {
+            try removeMaterializedRoot(child, under: parent)
+        }
     }
 
     private static func safeID(_ value: String) -> Bool {
