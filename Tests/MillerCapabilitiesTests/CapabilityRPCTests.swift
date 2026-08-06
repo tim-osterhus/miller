@@ -428,6 +428,242 @@ struct CapabilityRPCTests {
         await server.stop()
         #expect(await server.activeClientCountForTesting() == 0)
     }
+
+    @Test
+    func clientUsesOneAbsoluteDeadlineAgainstATrickledResponse() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
+        try CapabilityRPCRuntime.prepareManagedRoot(root, trustedParent: parent)
+        let socketURL = root.appending(path: "capability.sock")
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard listener >= 0 else { throw POSIXError(.ENOTSOCK) }
+        try bindUnixSocket(listener, path: socketURL.path)
+        _ = chmod(socketURL.path, 0o600)
+        guard Darwin.listen(listener, 1) == 0 else {
+            Darwin.close(listener)
+            throw POSIXError(.EIO)
+        }
+        let token = CapabilityRPCSessionToken.random()
+        let fakePeer = Task.detached { () -> Bool in
+            let descriptor = Darwin.accept(listener, nil, nil)
+            guard descriptor >= 0 else { return false }
+            defer { Darwin.close(descriptor) }
+            var noSignal: Int32 = 1
+            _ = setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSignal,
+                socklen_t(MemoryLayout<Int32>.size)
+            )
+            do {
+                _ = try readRPCFrame(from: descriptor)
+                let request = try CapabilityRPCCodec.decode(
+                    CapabilityRPCRequestEnvelope.self,
+                    from: readRPCFrame(from: descriptor)
+                )
+                var response = try CapabilityRPCCodec.encode(
+                    CapabilityRPCResponseEnvelope(
+                        requestID: request.requestID,
+                        response: .catalog([])
+                    )
+                )
+                response.append(UInt8(ascii: "\n"))
+                let chunkSize = max(1, response.count / 4)
+                var offset = 0
+                while offset < response.count {
+                    let end = min(response.count, offset + chunkSize)
+                    let sent = response.withUnsafeBytes { bytes in
+                        Darwin.write(
+                            descriptor,
+                            bytes.baseAddress!.advanced(by: offset),
+                            end - offset
+                        )
+                    }
+                    guard sent == end - offset else { return false }
+                    offset = end
+                    if offset < response.count { usleep(70_000) }
+                }
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        let endpoint = CapabilityRPCEndpoint(
+            socketURL: socketURL,
+            token: token,
+            trustedParentURL: parent
+        )
+        let clock = ContinuousClock()
+        let started = clock.now
+        await #expect(throws: CapabilityRPCError.timedOut) {
+            _ = try await CapabilityRPCClient(
+                endpoint: endpoint,
+                timeout: .milliseconds(120)
+            ).send(.list(providerProfileID: UUID()))
+        }
+        #expect(started.duration(to: clock.now) < .milliseconds(500))
+        #expect(await fakePeer.value == false)
+
+        shutdown(listener, SHUT_RDWR)
+        Darwin.close(listener)
+        unlink(socketURL.path)
+        try CapabilityRPCRuntime.removeManagedRoot(root, trustedParent: parent)
+    }
+
+    @Test
+    func serverBoundsLargeResponseWritesAndReleasesTheClientSlot() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let profileID = UUID()
+        let catalog = try makeLargeCatalog(profileID: profileID)
+        let encodedSize = try CapabilityRPCCodec.encode(
+            CapabilityRPCResponseEnvelope(
+                requestID: UUID(),
+                response: .catalog(catalog)
+            )
+        ).count
+        #expect(encodedSize > 800_000)
+        #expect(encodedSize < CapabilityRPCCodec.maximumFrameBytes)
+        let server = CapabilityRPCServer(
+            trustedParent: parent,
+            responseWriteTimeout: .milliseconds(120)
+        ) { _ in .catalog(catalog) }
+        let endpoint = try await server.start()
+
+        let stalled = try connectUnixSocket(endpoint.socketURL)
+        var receiveBuffer: Int32 = 1_024
+        _ = setsockopt(
+            stalled,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &receiveBuffer,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
+        try writeRPCFrame(
+            CapabilityRPCAuthenticationFrame(token: endpoint.token),
+            to: stalled
+        )
+        try writeRPCFrame(
+            CapabilityRPCRequestEnvelope(
+                requestID: UUID(),
+                request: .list(providerProfileID: profileID)
+            ),
+            to: stalled
+        )
+        #expect(await waitForNoActiveClients(server))
+        Darwin.close(stalled)
+
+        let healthy = CapabilityRPCClient(endpoint: endpoint, timeout: .seconds(2))
+        #expect(
+            try await healthy.send(.list(providerProfileID: profileID))
+                == .catalog(catalog)
+        )
+        #expect(await waitForNoActiveClients(server))
+        await server.stop()
+        #expect(await server.activeClientCountForTesting() == 0)
+    }
+
+    @Test
+    func cancellationRetainsDescriptorOwnershipUntilShutdownCompletes() async throws {
+        for iteration in 0..<128 {
+            var owned = [Int32](repeating: -1, count: 2)
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &owned) == 0 else {
+                throw POSIXError(.ENOTSOCK)
+            }
+
+            let shutdownEntered = DispatchSemaphore(value: 0)
+            let allowShutdown = DispatchSemaphore(value: 0)
+            let finishStarted = DispatchSemaphore(value: 0)
+            let finishCompleted = DispatchSemaphore(value: 0)
+            let box = RPCDescriptorBox { descriptor in
+                shutdownEntered.signal()
+                allowShutdown.wait()
+                _ = Darwin.shutdown(descriptor, SHUT_RDWR)
+            }
+            #expect(box.install(owned[0]))
+
+            let cancellation = Task.detached { box.cancel() }
+            let didEnterShutdown = await Task.detached {
+                waitSynchronously(
+                    shutdownEntered,
+                    timeout: .now() + .seconds(1)
+                )
+            }.value
+            #expect(
+                didEnterShutdown == .success
+            )
+            let ownedDescriptor = owned[0]
+            let finish = Task.detached {
+                finishStarted.signal()
+                box.finish(ownedDescriptor)
+                finishCompleted.signal()
+            }
+            let didStartFinish = await Task.detached {
+                waitSynchronously(
+                    finishStarted,
+                    timeout: .now() + .seconds(1)
+                )
+            }.value
+            #expect(
+                didStartFinish == .success
+            )
+            let didFinishEarly = await Task.detached {
+                waitSynchronously(
+                    finishCompleted,
+                    timeout: .now() + .milliseconds(2)
+                )
+            }.value
+            #expect(
+                didFinishEarly == .timedOut
+            )
+
+            var sentinels = [[Int32]]()
+            for _ in 0..<8 {
+                var pair = [Int32](repeating: -1, count: 2)
+                guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
+                    allowShutdown.signal()
+                    await cancellation.value
+                    await finish.value
+                    Darwin.close(owned[1])
+                    throw POSIXError(.ENOTSOCK)
+                }
+                var noSignal: Int32 = 1
+                for descriptor in pair {
+                    _ = setsockopt(
+                        descriptor,
+                        SOL_SOCKET,
+                        SO_NOSIGPIPE,
+                        &noSignal,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    )
+                    #expect(descriptor != ownedDescriptor)
+                }
+                sentinels.append(pair)
+            }
+
+            allowShutdown.signal()
+            await cancellation.value
+            await finish.value
+
+            for pair in sentinels {
+                var outbound = UInt8(iteration & 0xff)
+                var inbound: UInt8 = 0
+                #expect(Darwin.write(pair[0], &outbound, 1) == 1)
+                #expect(recv(pair[1], &inbound, 1, MSG_DONTWAIT) == 1)
+                #expect(inbound == outbound)
+                outbound &+= 1
+                #expect(Darwin.write(pair[1], &outbound, 1) == 1)
+                #expect(recv(pair[0], &inbound, 1, MSG_DONTWAIT) == 1)
+                #expect(inbound == outbound)
+                Darwin.close(pair[0])
+                Darwin.close(pair[1])
+            }
+            Darwin.close(owned[1])
+        }
+    }
 }
 
 private actor CancellationProbe {
@@ -471,6 +707,48 @@ private func makeDescriptor(profileID: UUID) throws -> CapabilityDescriptor {
         inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
         readOnlyHint: true, providerProfileIDs: [profileID], isAvailable: true
     )
+}
+
+private func makeLargeCatalog(profileID: UUID) throws -> [CapabilityDescriptor] {
+    let schema = Data(
+        (#"{"type":"object","padding":""#
+            + String(repeating: "x", count: 59_950)
+            + #""}"#).utf8
+    )
+    return try (0..<10).map { index in
+        let toolName = "large_\(index)"
+        return try CapabilityDescriptor(
+            id: CapabilityID(
+                source: .millerMCP,
+                serverID: "large",
+                toolName: toolName
+            ),
+            source: .millerMCP,
+            serverID: "large",
+            toolName: toolName,
+            displayName: "Large \(index)",
+            summary: "Large response fixture",
+            inputSchemaJSON: schema,
+            readOnlyHint: true,
+            providerProfileIDs: [profileID],
+            isAvailable: true
+        )
+    }
+}
+
+private func waitForNoActiveClients(_ server: CapabilityRPCServer) async -> Bool {
+    for _ in 0..<100 {
+        if await server.activeClientCountForTesting() == 0 { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return await server.activeClientCountForTesting() == 0
+}
+
+private func waitSynchronously(
+    _ semaphore: DispatchSemaphore,
+    timeout: DispatchTime
+) -> DispatchTimeoutResult {
+    semaphore.wait(timeout: timeout)
 }
 
 private func trustedRuntimeParent() throws -> URL {

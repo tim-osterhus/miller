@@ -252,6 +252,7 @@ public actor CapabilityRPCServer {
     private let handler: CapabilityRPCHandler
     private let authenticationTimeout: Duration
     private let requestFrameTimeout: Duration
+    private let responseWriteTimeout: Duration
     private var listener: Int32 = -1
     private var socketURL: URL?
     private var activeClients = Set<Int32>()
@@ -264,6 +265,7 @@ public actor CapabilityRPCServer {
         trustedParent: URL,
         authenticationTimeout: Duration = .seconds(2),
         requestFrameTimeout: Duration = .seconds(2),
+        responseWriteTimeout: Duration = .seconds(2),
         handler: @escaping CapabilityRPCHandler
     ) {
         self.trustedParent = trustedParent
@@ -271,6 +273,7 @@ public actor CapabilityRPCServer {
         self.handler = handler
         self.authenticationTimeout = authenticationTimeout
         self.requestFrameTimeout = requestFrameTimeout
+        self.responseWriteTimeout = responseWriteTimeout
     }
 
     deinit {
@@ -389,6 +392,7 @@ public actor CapabilityRPCServer {
         activeClients.insert(descriptor)
         let authenticationTimeout = self.authenticationTimeout
         let requestFrameTimeout = self.requestFrameTimeout
+        let responseWriteTimeout = self.responseWriteTimeout
         clientTasks[descriptor] = Task.detached(priority: .userInitiated) {
             [weak self] in
             await handleClient(
@@ -396,6 +400,7 @@ public actor CapabilityRPCServer {
                 token: token,
                 authenticationTimeout: authenticationTimeout,
                 requestFrameTimeout: requestFrameTimeout,
+                responseWriteTimeout: responseWriteTimeout,
                 handler: handler
             )
             await self?.completed(descriptor)
@@ -417,13 +422,14 @@ private func handleClient(
     token: CapabilityRPCSessionToken,
     authenticationTimeout: Duration,
     requestFrameTimeout: Duration,
+    responseWriteTimeout: Duration,
     handler: @escaping CapabilityRPCHandler
 ) async {
     do {
         var reader = RPCFrameReader()
         let firstFrame = try reader.read(
             from: descriptor,
-            timeout: authenticationTimeout
+            deadline: try RPCOperationDeadline(timeout: authenticationTimeout)
         )
         guard let auth = try? CapabilityRPCCodec.decode(
             CapabilityRPCAuthenticationFrame.self, from: firstFrame
@@ -433,14 +439,15 @@ private func handleClient(
                     requestID: UUID(),
                     response: .failed(nil, code: "authentication_failed")
                 ),
-                to: descriptor
+                to: descriptor,
+                deadline: try RPCOperationDeadline(timeout: responseWriteTimeout)
             )
             return
         }
 
         let requestFrame = try reader.read(
             from: descriptor,
-            timeout: requestFrameTimeout
+            deadline: try RPCOperationDeadline(timeout: requestFrameTimeout)
         )
         let request = try CapabilityRPCCodec.decode(
             CapabilityRPCRequestEnvelope.self, from: requestFrame
@@ -456,21 +463,43 @@ private func handleClient(
                 requestID: request.requestID,
                 response: response
             ),
-            to: descriptor
+            to: descriptor,
+            deadline: try RPCOperationDeadline(timeout: responseWriteTimeout)
         )
     } catch {
         // A malformed or disconnected peer is closed without retaining payloads.
     }
 }
 
-private struct RPCFrameReader {
+struct RPCOperationDeadline: Sendable {
+    let instant: ContinuousClock.Instant
+
+    init(timeout: Duration) throws {
+        guard timeout > .zero, timeout <= .seconds(60) else {
+            throw CapabilityRPCError.timedOut
+        }
+        instant = ContinuousClock().now.advanced(by: timeout)
+    }
+
+    func remainingMilliseconds() throws -> Int32 {
+        let remaining = ContinuousClock().now.duration(to: instant)
+        guard remaining > .zero else { throw CapabilityRPCError.timedOut }
+        let components = remaining.components
+        let milliseconds = components.seconds * 1_000
+            + components.attoseconds / 1_000_000_000_000_000
+        return Int32(max(1, min(Int64(Int32.max), milliseconds)))
+    }
+}
+
+struct RPCFrameReader {
     private var buffered = Data()
 
-    mutating func read(from descriptor: Int32, timeout: Duration) throws -> Data {
-        guard timeout > .zero else { throw CapabilityRPCError.timedOut }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
+    mutating func read(
+        from descriptor: Int32,
+        deadline: RPCOperationDeadline
+    ) throws -> Data {
         while true {
+            if Task.isCancelled { throw CancellationError() }
             if let newline = buffered.firstIndex(of: UInt8(ascii: "\n")) {
                 let frame = Data(buffered[..<newline])
                 buffered.removeSubrange(...newline)
@@ -485,9 +514,13 @@ private struct RPCFrameReader {
             guard buffered.count <= CapabilityRPCCodec.maximumFrameBytes else {
                 throw CapabilityRPCError.frameTooLarge
             }
-            try waitForReadable(descriptor, deadline: deadline, clock: clock)
+            try waitForRPCEvent(
+                descriptor,
+                events: Int16(POLLIN),
+                deadline: deadline
+            )
             var bytes = [UInt8](repeating: 0, count: 4_096)
-            let count = Darwin.read(descriptor, &bytes, bytes.count)
+            let count = recv(descriptor, &bytes, bytes.count, MSG_DONTWAIT)
             if count == 0 { throw CapabilityRPCError.peerDisconnected }
             if count < 0 {
                 if errno == EINTR { continue }
@@ -499,21 +532,21 @@ private struct RPCFrameReader {
     }
 }
 
-private func waitForReadable(
+@discardableResult
+private func waitForRPCEvent(
     _ descriptor: Int32,
-    deadline: ContinuousClock.Instant,
-    clock: ContinuousClock
-) throws {
+    events: Int16,
+    deadline: RPCOperationDeadline
+) throws -> Int16 {
     while true {
-        let remaining = clock.now.duration(to: deadline)
-        guard remaining > .zero else { throw CapabilityRPCError.timedOut }
-        var value = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&value, 1, durationMilliseconds(remaining))
+        if Task.isCancelled { throw CancellationError() }
+        var value = pollfd(fd: descriptor, events: events, revents: 0)
+        let ready = poll(&value, 1, try deadline.remainingMilliseconds())
         if ready > 0 {
             if value.revents & Int16(POLLNVAL | POLLERR) != 0 {
                 throw CapabilityRPCError.peerDisconnected
             }
-            if value.revents & Int16(POLLIN) != 0 { return }
+            if value.revents & events != 0 { return value.revents }
             if value.revents & Int16(POLLHUP) != 0 {
                 throw CapabilityRPCError.peerDisconnected
             }
@@ -523,13 +556,6 @@ private func waitForReadable(
             throw CapabilityRPCError.peerDisconnected
         }
     }
-}
-
-private func durationMilliseconds(_ duration: Duration) -> Int32 {
-    let components = duration.components
-    let milliseconds = components.seconds * 1_000
-        + components.attoseconds / 1_000_000_000_000_000
-    return Int32(max(1, min(Int64(Int32.max), milliseconds)))
 }
 
 private enum HandlerPeerRace: Sendable {
@@ -620,45 +646,49 @@ func bindUnixSocket(_ descriptor: Int32, path: String) throws {
 }
 
 func readRPCFrame(from descriptor: Int32) throws -> Data {
-    var result = Data()
-    result.reserveCapacity(4_096)
-    var byte: UInt8 = 0
-    while true {
-        let count = Darwin.read(descriptor, &byte, 1)
-        if count == 0 { throw CapabilityRPCError.peerDisconnected }
-        if count < 0 {
-            if errno == EINTR { continue }
-            if errno == EAGAIN || errno == EWOULDBLOCK {
-                throw CapabilityRPCError.timedOut
-            }
-            throw CapabilityRPCError.peerDisconnected
-        }
-        if byte == UInt8(ascii: "\n") {
-            guard !result.isEmpty else { throw CapabilityRPCError.malformedFrame }
-            return result
-        }
-        result.append(byte)
-        guard result.count <= CapabilityRPCCodec.maximumFrameBytes else {
-            throw CapabilityRPCError.frameTooLarge
-        }
-    }
+    var reader = RPCFrameReader()
+    return try reader.read(
+        from: descriptor,
+        deadline: RPCOperationDeadline(timeout: .seconds(60))
+    )
 }
 
 func writeRPCFrame<T: Encodable>(_ value: T, to descriptor: Int32) throws {
+    try writeRPCFrame(
+        value,
+        to: descriptor,
+        deadline: RPCOperationDeadline(timeout: .seconds(60))
+    )
+}
+
+func writeRPCFrame<T: Encodable>(
+    _ value: T,
+    to descriptor: Int32,
+    deadline: RPCOperationDeadline
+) throws {
     var data = try CapabilityRPCCodec.encode(value)
     data.append(UInt8(ascii: "\n"))
     var offset = 0
     try data.withUnsafeBytes { bytes in
         while offset < bytes.count {
-            let count = Darwin.write(
-                descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset
+            if Task.isCancelled { throw CancellationError() }
+            try waitForRPCEvent(
+                descriptor,
+                events: Int16(POLLOUT),
+                deadline: deadline
+            )
+            let count = send(
+                descriptor,
+                bytes.baseAddress!.advanced(by: offset),
+                bytes.count - offset,
+                MSG_DONTWAIT
             )
             if count > 0 {
                 offset += count
             } else if count < 0 && errno == EINTR {
                 continue
             } else if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
-                throw CapabilityRPCError.timedOut
+                continue
             } else {
                 throw CapabilityRPCError.peerDisconnected
             }
