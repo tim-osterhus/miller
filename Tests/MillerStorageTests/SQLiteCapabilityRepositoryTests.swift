@@ -430,6 +430,60 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func openAuditCanRequireApprovalBeforeTerminalization() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(
+            conversationID,
+            database: SQLiteDatabase(path: fixture.path)
+        )
+        let callID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: callID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil
+            )
+        )
+
+        try await repository.requireAuditApproval(
+            id: callID,
+            effectivePolicy: .askBeforeChanges
+        )
+        try await repository.requireAuditApproval(
+            id: callID,
+            effectivePolicy: .askBeforeChanges
+        )
+
+        var stored = try #require(try await repository.audit(id: callID))
+        #expect(stored.approvalRequested)
+        #expect(stored.effectivePolicy == .askBeforeChanges)
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.requireAuditApproval(
+                id: callID,
+                effectivePolicy: .fullyTrusted
+            )
+        }
+
+        try await repository.terminalizeAudit(
+            id: callID,
+            outcome: .succeeded,
+            approvalDecision: .allowOnce
+        )
+        stored = try #require(try await repository.audit(id: callID))
+        #expect(stored.terminalOutcome == .succeeded)
+        #expect(stored.approvalDecision == .allowOnce)
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.requireAuditApproval(
+                id: callID,
+                effectivePolicy: .askBeforeChanges
+            )
+        }
+    }
+
+    @Test
     func terminalAuditReplayWithoutTimestampDoesNotAssertANewClockValue() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)

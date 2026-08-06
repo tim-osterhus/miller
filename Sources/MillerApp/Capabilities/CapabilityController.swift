@@ -95,7 +95,12 @@ struct CapabilityRuntimeConfiguration: Sendable {
 }
 
 struct CapabilityPersistenceDependencies: Sendable {
+    let loadOpenAudits: @Sendable () async throws -> [CapabilityAuditRecord]
     let beginAudit: @Sendable (CapabilityAuditRecord) async throws -> Void
+    let requireApproval: @Sendable (
+        CapabilityCallID,
+        CapabilityPolicy
+    ) async throws -> Void
     let terminalizeAudit: @Sendable (
         CapabilityCallID,
         CapabilityTerminalOutcome,
@@ -103,7 +108,9 @@ struct CapabilityPersistenceDependencies: Sendable {
     ) async throws -> Void
 
     static let unavailable = Self(
+        loadOpenAudits: { [] },
         beginAudit: { _ in },
+        requireApproval: { _, _ in },
         terminalizeAudit: { _, _, _ in }
     )
 }
@@ -315,6 +322,7 @@ final class CapabilityController: ObservableObject {
     private var begunAuditIDs = Set<CapabilityCallID>()
     private var terminalAuditIDs = Set<CapabilityCallID>()
     private var pendingTerminalAudits: [CapabilityCallID: CapabilityLifecycleEvent] = [:]
+    private var pendingApprovalUpgrades: [CapabilityCallID: CapabilityPolicy] = [:]
     private var activeTypedAssociation: CapabilityAssociation?
     private var activeVoiceAssociation: CapabilityAssociation?
     private var activeProviderProfileID: UUID?
@@ -384,8 +392,19 @@ final class CapabilityController: ObservableObject {
                 return value
             },
             persistence: CapabilityPersistenceDependencies(
+                loadOpenAudits: { [repository] in
+                    try await repository.audits().filter {
+                        $0.terminalOutcome == nil
+                    }
+                },
                 beginAudit: { [repository] record in
                     try await repository.beginAudit(record)
+                },
+                requireApproval: { [repository] id, policy in
+                    try await repository.requireAuditApproval(
+                        id: id,
+                        effectivePolicy: policy
+                    )
                 },
                 terminalizeAudit: { [repository] id, outcome, decision in
                     try await repository.terminalizeAudit(
@@ -408,6 +427,7 @@ final class CapabilityController: ObservableObject {
         guard broker == nil, startupError == nil else { return }
         do {
             let configuration = try await loadConfiguration()
+            try await recoverDurableNonterminalAudits()
             let broker = try CapabilityBroker(
                 configurations: configuration.servers,
                 toolPolicies: configuration.toolPolicies,
@@ -442,17 +462,25 @@ final class CapabilityController: ObservableObject {
         }
     }
 
+    private func recoverDurableNonterminalAudits() async throws {
+        for audit in try await persistence.loadOpenAudits() {
+            try await persistence.terminalizeAudit(
+                audit.id,
+                .cancelled,
+                nil
+            )
+        }
+    }
+
     func shutdown() async {
-        declinePendingApprovals(for: .close)
+        declinePendingApprovals(for: .interrupt)
         await finalizeProviderActivities()
-        for task in rpcTasks.values { task.cancel() }
+        await recoverPendingTerminalAuditsBestEffort()
+        retainOnlyUndurableProviderActivityAuthority()
         rpcTasks.removeAll()
         eventEmitters.removeAll()
-        providerCallIDs.removeAll()
-        await rpcServer?.stop()
-        rpcServer = nil
-        rpcEndpoint = nil
-        bridgeBox?.clear()
+        await stopBridge()
+        activeProviderProfileID = nil
         await broker?.disconnectAll()
     }
 
@@ -694,6 +722,28 @@ final class CapabilityController: ObservableObject {
         }
         providerCallPolicies[callID] = request.policy
         approvalCanAllowOnce[callID] = approval.availableDecisions.contains("accept")
+        if begunAuditIDs.contains(callID) {
+            do {
+                try await persistence.requireApproval(
+                    callID,
+                    request.policy.value
+                )
+            } catch {
+                pendingApprovalUpgrades[callID] = request.policy.value
+                approvalDecisions[callID] = .decline
+                if let event = try? CapabilityLifecycleEvent(
+                    callID: callID,
+                    capabilityID: request.capabilityID,
+                    summary: request.summary,
+                    state: .terminal,
+                    outcome: .declined,
+                    policy: request.policy
+                ) {
+                    await recordLifecycle(event)
+                }
+                return .decline
+            }
+        }
         let decision = await requestApproval(request)
         if decision == .allowOnce, let context = callContexts[callID] {
             do {
@@ -778,7 +828,7 @@ final class CapabilityController: ObservableObject {
             outcome: activity.outcome,
             policy: policy
         )
-        if activity.phase == .terminal, let event {
+        if let event {
             await recordLifecycle(event)
         }
         if activity.phase == .terminal, terminalAuditIDs.contains(callID) {
@@ -922,7 +972,7 @@ final class CapabilityController: ObservableObject {
     }
 
     func declinePendingApprovals(for termination: CapabilityApprovalTermination) {
-        if termination != .timeout {
+        if termination == .interrupt {
             activeProviderCallbackAuthority = nil
             providerCallbackAuthorityBox?.clear()
             cancelActiveRPCWork()
@@ -1078,7 +1128,8 @@ final class CapabilityController: ObservableObject {
                 )
             } catch {
                 if event.state == .terminal {
-                    pendingTerminalAudits[event.callID] = event
+                    pendingTerminalAudits[event.callID] =
+                        pendingTerminalAudits[event.callID] ?? event
                 }
                 return
             }
@@ -1089,9 +1140,10 @@ final class CapabilityController: ObservableObject {
             }
             return
         }
-        pendingTerminalAudits[event.callID] = event
+        let terminalEvent = pendingTerminalAudits[event.callID] ?? event
+        pendingTerminalAudits[event.callID] = terminalEvent
         do {
-            try await persistTerminalAudit(event, context: context)
+            try await persistTerminalAudit(terminalEvent, context: context)
         } catch {
             return
         }
@@ -1139,6 +1191,10 @@ final class CapabilityController: ObservableObject {
             pendingTerminalAudits[event.callID] = nil
             return
         }
+        if let policy = pendingApprovalUpgrades[event.callID] {
+            try await persistence.requireApproval(event.callID, policy)
+            pendingApprovalUpgrades[event.callID] = nil
+        }
         try await persistence.terminalizeAudit(
             event.callID,
             outcome,
@@ -1173,6 +1229,12 @@ final class CapabilityController: ObservableObject {
     private func recoverPendingTerminalAudits() async throws {
         for callID in Array(pendingTerminalAudits.keys) {
             try await recoverPendingTerminalAudit(callID)
+        }
+    }
+
+    private func recoverPendingTerminalAuditsBestEffort() async {
+        for callID in Array(pendingTerminalAudits.keys) {
+            try? await recoverPendingTerminalAudit(callID)
         }
     }
 
@@ -1213,12 +1275,17 @@ final class CapabilityController: ObservableObject {
         begunAuditIDs.remove(callID)
         terminalAuditIDs.remove(callID)
         pendingTerminalAudits[callID] = nil
+        pendingApprovalUpgrades[callID] = nil
         providerCallPolicies[callID] = nil
         providerCallStartedAt[callID] = nil
         approvalCanAllowOnce[callID] = nil
     }
 
     private func cancelActiveRPCWork() {
+        if case .typed(_, let turnID, let generation) = activeTypedAssociation {
+            markTypedGenerationCancelled(Self.typedKey(turnID, generation))
+            activeTypedAssociation = nil
+        }
         if case .voice(let sessionID, _) = activeVoiceAssociation {
             markVoiceSessionCancelled(sessionID)
             activeVoiceAssociation = nil

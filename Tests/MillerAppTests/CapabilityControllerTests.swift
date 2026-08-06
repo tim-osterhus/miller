@@ -153,6 +153,151 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func shutdownRetriesFailedPiTerminalBeforeRestart() async throws {
+        let audit = CapabilityAuditProbe(terminalFailures: 2)
+        let first = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await #expect(throws: CapabilityControllerError.auditUnavailable) {
+            _ = try await first.controller.execute(
+                callID: CapabilityCallID(),
+                capabilityID: first.capabilityID,
+                argumentsJSON: Data("{}".utf8),
+                providerProfileID: first.profileID,
+                association: .typed(
+                    conversationID: ConversationID(),
+                    turnID: TurnID(),
+                    generation: 1
+                ),
+                route: .typedPi
+            )
+        }
+        #expect(await audit.openAudits().count == 1)
+
+        await first.controller.shutdown()
+        let restarted = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await restarted.controller.start()
+
+        #expect(await audit.openAudits().isEmpty)
+        #expect(await audit.outcomes == [.succeeded])
+        #expect(await audit.terminalRows == 1)
+    }
+
+    @Test
+    func shutdownRetriesFailedLocalRPCTerminalBeforeRestart() async throws {
+        let audit = CapabilityAuditProbe(terminalFailures: 2)
+        let trustedParent = try makeTrustedParent()
+        let bridgeBox = CapabilityBridgeSessionBox(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true")
+        )
+        let first = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            trustedParent: trustedParent,
+            bridgeBox: bridgeBox,
+            audit: audit
+        )
+        let request = ReasoningRequest(
+            conversationID: ConversationID(),
+            turnID: TurnID(),
+            generation: 1,
+            context: [],
+            userText: "Use local capability"
+        )
+        _ = try await first.controller.prepareRequest(
+            request,
+            providerProfileID: first.profileID,
+            kind: .codexOAuth
+        )
+        let response = try await bridgeClient(bridgeBox).call(
+            callID: CapabilityCallID(),
+            capabilityID: first.capabilityID,
+            argumentsJSON: Data("{}".utf8)
+        )
+        guard case .failed(_, let code) = response else {
+            Issue.record("Expected RPC to report its fenced audit failure")
+            await first.controller.shutdown()
+            try? FileManager.default.removeItem(at: trustedParent)
+            return
+        }
+        #expect(code == "call_failed")
+        #expect(await audit.openAudits().count == 1)
+
+        await first.controller.shutdown()
+        let restarted = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await restarted.controller.start()
+
+        #expect(await audit.openAudits().isEmpty)
+        #expect(await audit.outcomes == [.succeeded])
+        #expect(await audit.terminalRows == 1)
+        try? FileManager.default.removeItem(at: trustedParent)
+    }
+
+    @Test
+    func shutdownRetriesIndependentPendingTerminalsAfterOneFailure() async throws {
+        let audit = CapabilityAuditProbe(terminalFailures: 4)
+        let fixture = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            sessionDelay: .milliseconds(25),
+            audit: audit
+        )
+        let conversationID = ConversationID()
+
+        async let first = #expect(throws: CapabilityControllerError.auditUnavailable) {
+            _ = try await fixture.controller.execute(
+                callID: CapabilityCallID(),
+                capabilityID: fixture.capabilityID,
+                argumentsJSON: Data("{}".utf8),
+                providerProfileID: fixture.profileID,
+                association: .typed(
+                    conversationID: conversationID,
+                    turnID: TurnID(),
+                    generation: 1
+                ),
+                route: .typedPi
+            )
+        }
+        async let second = #expect(throws: CapabilityControllerError.auditUnavailable) {
+            _ = try await fixture.controller.execute(
+                callID: CapabilityCallID(),
+                capabilityID: fixture.capabilityID,
+                argumentsJSON: Data("{}".utf8),
+                providerProfileID: fixture.profileID,
+                association: .typed(
+                    conversationID: conversationID,
+                    turnID: TurnID(),
+                    generation: 2
+                ),
+                route: .typedPi
+            )
+        }
+        _ = await (first, second)
+        #expect(await audit.openAudits().count == 2)
+
+        await audit.setTerminalFailures(1)
+        await fixture.controller.shutdown()
+
+        #expect(await audit.openAudits().count == 1)
+        #expect(await audit.outcomes == [.succeeded])
+
+        await audit.setTerminalFailures(0)
+        await fixture.controller.shutdown()
+        #expect(await audit.openAudits().isEmpty)
+        #expect(await audit.outcomes == [.succeeded, .succeeded])
+    }
+
+    @Test
     func routesTypedPiThroughTheBroker() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
@@ -590,6 +735,80 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func providerApprovalUpgradeFailureRecoversATruthfulDecline() async throws {
+        let audit = CapabilityAuditProbe(requireApprovalFailures: 2)
+        let fixture = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        let requestEnvelope = ReasoningRequest(
+            conversationID: ConversationID(),
+            turnID: TurnID(),
+            generation: 1,
+            context: [],
+            userText: "Use the provider tool"
+        )
+        _ = try await fixture.controller.prepareRequest(
+            requestEnvelope,
+            providerProfileID: fixture.profileID,
+            kind: .codexOAuth
+        )
+        let callbacks = fixture.controller.capturedProviderCallbacks()
+        let capabilityID = try CapabilityID(
+            source: .providerNative,
+            serverID: "codex",
+            toolName: "command-execution"
+        )
+        let started = CodexCapabilityActivity(
+            threadID: "approval-upgrade-thread",
+            turnID: "approval-upgrade-turn",
+            itemID: "approval-upgrade-item",
+            capabilityID: capabilityID,
+            phase: .started,
+            outcome: nil,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        )
+        await callbacks.activity(started)
+        let approval = CodexProviderApproval(
+            responseID: .string("approval-upgrade-response"),
+            itemID: started.itemID,
+            approvalID: nil,
+            threadID: started.threadID,
+            turnID: started.turnID!,
+            kind: .commandExecution,
+            request: try providerApprovalRequest(capabilityID: capabilityID),
+            availableDecisions: ["accept", "decline"],
+            toolUserInputQuestionID: nil
+        )
+
+        #expect(await callbacks.approvalDetails(approval) == .decline)
+        #expect(fixture.controller.pendingApproval == nil)
+        #expect(await audit.requireApprovalAttempts == 2)
+        #expect(await audit.approvalRequests == [false])
+        #expect(await audit.terminalRows == 0)
+        await callbacks.activity(CodexCapabilityActivity(
+            threadID: started.threadID,
+            turnID: started.turnID,
+            itemID: started.itemID,
+            capabilityID: capabilityID,
+            phase: .terminal,
+            outcome: .failed,
+            summary: started.summary,
+            visibility: .opaqueProviderActivity
+        ))
+
+        await fixture.controller.shutdown()
+
+        #expect(await audit.requireApprovalAttempts == 3)
+        #expect(await audit.approvalRequests == [true])
+        #expect(await audit.decisions == [.decline])
+        #expect(await audit.outcomes == [.declined])
+        #expect(await audit.openAudits().isEmpty)
+    }
+
+    @Test
     func providerCallbacksCapturedForAnOldTurnCannotAttachToANewTurn() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         let first = ReasoningRequest(
@@ -650,6 +869,71 @@ struct CapabilityControllerTests {
             turnID: second.turnID,
             generation: second.generation
         )
+    }
+
+    @Test(arguments: [false, true])
+    func shutdownRejectsPreviouslyCapturedProviderCallbacks(
+        isVoice: Bool
+    ) async throws {
+        let authorityBox = CapabilityProviderCallbackAuthorityBox()
+        let fixture = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            providerCallbackAuthorityBox: authorityBox
+        )
+        if isVoice {
+            try await fixture.controller.prepareLiveVoice(
+                providerProfileID: fixture.profileID
+            )
+            fixture.controller.admitVoiceAssociation(sessionID: UUID())
+        } else {
+            _ = try await fixture.controller.prepareRequest(
+                ReasoningRequest(
+                    conversationID: ConversationID(),
+                    turnID: TurnID(),
+                    generation: 1,
+                    context: [],
+                    userText: "Typed provider turn"
+                ),
+                providerProfileID: fixture.profileID,
+                kind: .codexOAuth
+            )
+        }
+        let callbacks = fixture.controller.capturedProviderCallbacks()
+        #expect(authorityBox.current() != nil)
+
+        await fixture.controller.shutdown()
+        #expect(authorityBox.current() == nil)
+
+        let capabilityID = try CapabilityID(
+            source: .providerNative,
+            serverID: "codex",
+            toolName: "web-search"
+        )
+        await callbacks.activity(CodexCapabilityActivity(
+            threadID: "shutdown-activity-\(isVoice)",
+            turnID: "shutdown-turn-\(isVoice)",
+            itemID: "shutdown-item-\(isVoice)",
+            capabilityID: capabilityID,
+            phase: .terminal,
+            outcome: .succeeded,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        ))
+        let approval = try providerApproval(
+            id: "shutdown-approval-\(isVoice)",
+            capabilityID: capabilityID
+        )
+        let callback = Task {
+            await callbacks.approvalDetails(approval)
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        let wasPresented = fixture.controller.pendingApproval != nil
+        if wasPresented { fixture.controller.resolveApproval(.decline) }
+
+        #expect(await callback.value == .decline)
+        #expect(wasPresented == false)
+        #expect(await fixture.audit.beginRows == 0)
     }
 
     @Test
@@ -884,6 +1168,81 @@ struct CapabilityControllerTests {
         #expect(await secondTask.value == .decline)
         #expect(fixture.controller.pendingApprovalCount == 0)
         #expect(fixture.controller.pendingApproval == nil)
+    }
+
+    @Test
+    func closingApprovalSurfacePreservesLaterProviderCallbacks() async throws {
+        let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
+        let request = ReasoningRequest(
+            conversationID: ConversationID(),
+            turnID: TurnID(),
+            generation: 1,
+            context: [],
+            userText: "Use provider capabilities"
+        )
+        _ = try await fixture.controller.prepareRequest(
+            request,
+            providerProfileID: fixture.profileID,
+            kind: .codexOAuth
+        )
+        let callbacks = fixture.controller.capturedProviderCallbacks()
+        let capabilityID = try CapabilityID(
+            source: .providerNative,
+            serverID: "codex",
+            toolName: "command-execution"
+        )
+        let dismissedApproval = try providerApproval(
+            id: "dismissed-surface",
+            capabilityID: capabilityID
+        )
+        let dismissedDecision = Task {
+            await callbacks.approvalDetails(dismissedApproval)
+        }
+        _ = try await waitForApproval(fixture.controller)
+
+        fixture.controller.declinePendingApprovals(for: .close)
+        #expect(await dismissedDecision.value == .decline)
+
+        let activity = CodexCapabilityActivity(
+            threadID: "after-dismiss-thread",
+            turnID: "after-dismiss-turn",
+            itemID: "after-dismiss-item",
+            capabilityID: capabilityID,
+            phase: .terminal,
+            outcome: .succeeded,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        )
+        await callbacks.activity(activity)
+
+        let laterApproval = try providerApproval(
+            id: "after-dismiss-approval",
+            capabilityID: capabilityID
+        )
+        let laterDecision = Task {
+            await callbacks.approvalDetails(laterApproval)
+        }
+        _ = try await waitForApproval(fixture.controller)
+        fixture.controller.resolveApproval(.allowOnce)
+        #expect(await laterDecision.value == .allowOnce)
+        await callbacks.activity(CodexCapabilityActivity(
+            threadID: laterApproval.threadID,
+            turnID: laterApproval.turnID,
+            itemID: laterApproval.itemID,
+            capabilityID: capabilityID,
+            phase: .terminal,
+            outcome: .succeeded,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        ))
+
+        #expect(await fixture.audit.outcomes == [
+            .declined, .succeeded, .succeeded,
+        ])
+        await fixture.controller.finishTypedAssociation(
+            turnID: request.turnID,
+            generation: request.generation
+        )
     }
 
     @Test
@@ -1128,6 +1487,82 @@ struct CapabilityControllerTests {
             await fixture.audit.terminalObservedAt.first
         )
         #expect(startedAt < terminalObservedAt)
+    }
+
+    @Test
+    func providerStartedActivityPersistsBeginBeforeTerminal() async throws {
+        let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
+        await fixture.controller.start()
+        fixture.controller.admitTypedAssociation(
+            .typed(
+                conversationID: ConversationID(),
+                turnID: TurnID(),
+                generation: 1
+            ),
+            providerProfileID: fixture.profileID
+        )
+        await fixture.controller.recordProviderActivity(CodexCapabilityActivity(
+            threadID: "durable-start-thread",
+            turnID: "durable-start-turn",
+            itemID: "durable-start-item",
+            capabilityID: try CapabilityID(
+                source: .providerNative,
+                serverID: "codex",
+                toolName: "web-search"
+            ),
+            phase: .started,
+            outcome: nil,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        ))
+
+        #expect(await fixture.audit.beginRows == 1)
+        #expect(await fixture.audit.terminalRows == 0)
+    }
+
+    @Test
+    func restartCancelsDurableProviderStartWithoutATerminalEvent() async throws {
+        let audit = CapabilityAuditProbe()
+        let first = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await first.controller.start()
+        first.controller.admitTypedAssociation(
+            .typed(
+                conversationID: ConversationID(),
+                turnID: TurnID(),
+                generation: 1
+            ),
+            providerProfileID: first.profileID
+        )
+        await first.controller.recordProviderActivity(CodexCapabilityActivity(
+            threadID: "crashed-provider-thread",
+            turnID: "crashed-provider-turn",
+            itemID: "crashed-provider-item",
+            capabilityID: try CapabilityID(
+                source: .providerNative,
+                serverID: "codex",
+                toolName: "web-search"
+            ),
+            phase: .started,
+            outcome: nil,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        ))
+        #expect(await audit.openAudits().count == 1)
+
+        let restarted = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await restarted.controller.start()
+
+        #expect(await audit.openAudits().isEmpty)
+        #expect(await audit.outcomes == [.cancelled])
+        #expect(await audit.terminalRows == 1)
     }
 
     @Test
@@ -1511,6 +1946,7 @@ private func makeFixture(
     approvalTimeout: Duration = .seconds(1),
     trustedParent: URL? = nil,
     bridgeBox: CapabilityBridgeSessionBox? = nil,
+    providerCallbackAuthorityBox: CapabilityProviderCallbackAuthorityBox? = nil,
     sessionDelay: Duration? = nil,
     audit suppliedAudit: CapabilityAuditProbe? = nil,
     confirmationAnnouncer: @escaping @MainActor @Sendable (String) -> Void = {
@@ -1550,6 +1986,7 @@ private func makeFixture(
         approvalTimeout: approvalTimeout,
         trustedParent: trustedParent,
         bridgeBox: bridgeBox,
+        providerCallbackAuthorityBox: providerCallbackAuthorityBox,
         confirmationAnnouncer: confirmationAnnouncer
     )
     return ControllerFixture(
@@ -1723,12 +2160,20 @@ private actor CapabilityAuditProbe {
     private(set) var terminalObservedAt: [Date] = []
     private(set) var outcomes: [CapabilityTerminalOutcome] = []
     private(set) var beginAttempts = 0
+    private(set) var requireApprovalAttempts = 0
     private(set) var terminalAttempts = 0
     private var beginFailures: Int
+    private var requireApprovalFailures: Int
     private var terminalFailures: Int
+    private var durableRows: [CapabilityCallID: CapabilityAuditRecord] = [:]
 
-    init(beginFailures: Int = 0, terminalFailures: Int = 0) {
+    init(
+        beginFailures: Int = 0,
+        requireApprovalFailures: Int = 0,
+        terminalFailures: Int = 0
+    ) {
         self.beginFailures = beginFailures
+        self.requireApprovalFailures = requireApprovalFailures
         self.terminalFailures = terminalFailures
     }
 
@@ -1738,11 +2183,23 @@ private actor CapabilityAuditProbe {
 
     nonisolated func dependencies() -> CapabilityPersistenceDependencies {
         CapabilityPersistenceDependencies(
+            loadOpenAudits: { [self] in await openAudits() },
             beginAudit: { [self] record in try await recordBegin(record) },
-            terminalizeAudit: { [self] _, outcome, decision in
-                try await recordTerminal(outcome, decision: decision)
+            requireApproval: { [self] id, policy in
+                try await requireApproval(id, policy: policy)
+            },
+            terminalizeAudit: { [self] id, outcome, decision in
+                try await recordTerminal(
+                    id,
+                    outcome: outcome,
+                    decision: decision
+                )
             }
         )
+    }
+
+    func openAudits() -> [CapabilityAuditRecord] {
+        durableRows.values.filter { $0.terminalOutcome == nil }
     }
 
     private func recordBegin(_ record: CapabilityAuditRecord) throws {
@@ -1751,19 +2208,100 @@ private actor CapabilityAuditProbe {
             beginFailures -= 1
             throw CapabilityAuditProbeError.persistenceUnavailable
         }
+        if let existing = durableRows[record.id] {
+            guard existing == record else {
+                throw CapabilityAuditProbeError.invalidAudit
+            }
+            return
+        }
         beginRows += 1
+        durableRows[record.id] = record
         records.append(record)
         approvalRequests.append(record.approvalRequested)
     }
 
+    private func requireApproval(
+        _ id: CapabilityCallID,
+        policy: CapabilityPolicy
+    ) throws {
+        requireApprovalAttempts += 1
+        if requireApprovalFailures > 0 {
+            requireApprovalFailures -= 1
+            throw CapabilityAuditProbeError.persistenceUnavailable
+        }
+        guard let record = durableRows[id],
+              record.terminalOutcome == nil
+        else { throw CapabilityAuditProbeError.invalidAudit }
+        if record.approvalRequested {
+            guard record.effectivePolicy == policy
+            else { throw CapabilityAuditProbeError.invalidAudit }
+            return
+        }
+        let updated = CapabilityAuditRecord(
+            id: record.id,
+            conversationID: record.conversationID,
+            turnID: record.turnID,
+            voiceSessionID: record.voiceSessionID,
+            source: record.source,
+            serverID: record.serverID,
+            toolName: record.toolName,
+            startedAt: record.startedAt,
+            terminalAt: nil,
+            effectivePolicy: policy,
+            approvalRequested: true,
+            approvalDecision: nil,
+            terminalOutcome: nil,
+            summary: record.summary,
+            visibility: record.visibility
+        )
+        durableRows[id] = updated
+        if let index = records.firstIndex(where: { $0.id == id }) {
+            records[index] = updated
+        }
+        if let index = records.firstIndex(where: { $0.id == id }) {
+            approvalRequests[index] = true
+        }
+    }
+
     private func recordTerminal(
-        _ outcome: CapabilityTerminalOutcome,
+        _ id: CapabilityCallID,
+        outcome: CapabilityTerminalOutcome,
         decision: CapabilityApprovalDecision?
     ) throws {
         terminalAttempts += 1
         if terminalFailures > 0 {
             terminalFailures -= 1
             throw CapabilityAuditProbeError.persistenceUnavailable
+        }
+        guard let record = durableRows[id] else {
+            throw CapabilityAuditProbeError.invalidAudit
+        }
+        if let existing = record.terminalOutcome {
+            guard existing == outcome,
+                  record.approvalDecision == decision
+            else { throw CapabilityAuditProbeError.invalidAudit }
+            return
+        }
+        let terminal = CapabilityAuditRecord(
+            id: record.id,
+            conversationID: record.conversationID,
+            turnID: record.turnID,
+            voiceSessionID: record.voiceSessionID,
+            source: record.source,
+            serverID: record.serverID,
+            toolName: record.toolName,
+            startedAt: record.startedAt,
+            terminalAt: Date(),
+            effectivePolicy: record.effectivePolicy,
+            approvalRequested: record.approvalRequested,
+            approvalDecision: decision,
+            terminalOutcome: outcome,
+            summary: record.summary,
+            visibility: record.visibility
+        )
+        durableRows[id] = terminal
+        if let index = records.firstIndex(where: { $0.id == id }) {
+            records[index] = terminal
         }
         terminalRows += 1
         outcomes.append(outcome)
@@ -1801,6 +2339,7 @@ private actor ProviderProjectionProbe {
 
 private enum CapabilityAuditProbeError: Error {
     case persistenceUnavailable
+    case invalidAudit
 }
 
 private actor ApprovalEchoGateway: ReasoningGateway {

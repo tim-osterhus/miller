@@ -749,6 +749,43 @@ public actor SQLiteCapabilityRepository {
         }
     }
 
+    public func requireAuditApproval(
+        id: CapabilityCallID,
+        effectivePolicy: CapabilityPolicy
+    ) throws {
+        try preflightWrite()
+        try database.transaction {
+            let rows = try database.query(
+                """
+                SELECT effective_policy, approval_requested, terminal_outcome
+                FROM capability_audit WHERE id = ?
+                """,
+                bindings: [.text(Self.id(id.rawValue))]
+            )
+            guard let row = rows.first,
+                  let existingPolicy = Self.string(row[0]),
+                  let approvalRequested = Self.bool(row[1]),
+                  Self.string(row[2]) == nil
+            else { throw CapabilityStorageError.invalidAudit }
+            if approvalRequested {
+                guard existingPolicy == effectivePolicy.rawValue
+                else { throw CapabilityStorageError.invalidAudit }
+                return
+            }
+            try database.execute(
+                """
+                UPDATE capability_audit
+                SET effective_policy = ?, approval_requested = 1
+                WHERE id = ? AND terminal_outcome IS NULL
+                """,
+                bindings: [
+                    .text(effectivePolicy.rawValue),
+                    .text(Self.id(id.rawValue)),
+                ]
+            )
+        }
+    }
+
     public func audit(id: CapabilityCallID) throws -> CapabilityAuditRecord? {
         try database.query(
             "\(Self.auditSelect) WHERE id = ?",
