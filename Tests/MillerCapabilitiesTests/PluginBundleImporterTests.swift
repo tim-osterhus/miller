@@ -79,17 +79,68 @@ struct PluginBundleImporterTests {
     }
 
     @Test
+    func importsProductionMetadataAndSurfacesOperationalReviewRequirements() throws {
+        let root = try pluginRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeJSON(
+            ["name": "production-shaped"],
+            to: root.appending(path: ".codex-plugin/plugin.json")
+        )
+        try writeJSON([
+            "mcpServers": [
+                "widgets": [
+                    "type": "stdio",
+                    "title": "Data Analytics",
+                    "description": "Renders charts.",
+                    "icons": [[
+                        "src": "./assets/icon.svg",
+                        "mimeType": "image/svg+xml",
+                        "sizes": ["24x24"],
+                    ]],
+                    "note": "Local component metadata.",
+                    "cwd": ".",
+                    "command": "node",
+                    "args": ["./mcp/server.cjs", "--stdio"],
+                ],
+                "github": [
+                    "type": "http",
+                    "url": "https://api.example.com/mcp/",
+                    "bearer_token_env_var": "GITHUB_PAT_TOKEN",
+                ],
+            ],
+        ], to: root.appending(path: ".mcp.json"))
+
+        let imported = try PluginBundleImporter().importBundle(at: root)
+
+        #expect(imported.mcpDrafts.map(\.id) == ["github", "widgets"])
+        #expect(imported.mcpDrafts[0].reviewRequirements == [
+            "Bearer authentication from GITHUB_PAT_TOKEN was not imported; add an Authorization header secret manually.",
+        ])
+        #expect(imported.mcpDrafts[1].reviewRequirements == [
+            "Working-directory metadata was not imported; verify command paths manually.",
+        ])
+    }
+
+    @Test
     func rejectsMalformedOrUnsupportedMCPSemantics() throws {
         let cases: [[String: Any]] = [
             ["command": "/usr/bin/true", "args": "--stdio"],
             ["command": "/usr/bin/true", "env": ["TOKEN": 42]],
             ["command": "/usr/bin/true", "env": ["TOKEN": "literal-secret"]],
             ["command": "/usr/bin/true", "env_vars": "TOKEN"],
-            ["command": "/usr/bin/true", "cwd": "relative/path"],
+            ["command": "/usr/bin/true", "cwd": 42],
             ["url": "https://example.com/mcp", "bearer_token_env_var": 42],
-            ["url": "https://example.com/mcp", "bearer_token_env_var": "TOKEN"],
             ["url": "https://example.com/mcp", "headers": ["X-Test": "value"]],
             ["url": "https://example.com/mcp", "endpoint": "https://other.example/mcp"],
+            ["url": "https://example.com/mcp", "type": "stdio"],
+            ["command": "/usr/bin/true", "type": "http"],
+            ["command": "/usr/bin/true", "title": String(repeating: "x", count: 257)],
+            ["command": "/usr/bin/true", "description": String(repeating: "x", count: 4_097)],
+            ["command": "/usr/bin/true", "note": String(repeating: "x", count: 4_097)],
+            ["command": "/usr/bin/true", "cwd": String(repeating: "x", count: 4_097)],
+            ["command": "/usr/bin/true", "icons": "icon.svg"],
+            ["command": "/usr/bin/true", "icons": [["src": "icon.svg", "unknown": true]]],
+            ["command": "/usr/bin/true", "icons": [["src": String(repeating: "x", count: 2_049)]]],
         ]
         for server in cases {
             let root = try pluginRoot()

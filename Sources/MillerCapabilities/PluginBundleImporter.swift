@@ -25,6 +25,7 @@ public struct PluginMCPDraft: Equatable, Sendable {
     public let endpoint: String?
     public let relativeExecutablePath: String?
     public let unresolvedSecrets: [String]
+    public let reviewRequirements: [String]
     public let enabled: Bool
 }
 
@@ -237,6 +238,8 @@ public struct PluginBundleImporter: Sendable {
             else { throw PluginBundleImportError.invalidBundle }
             let supportedFields: Set<String> = [
                 "command", "args", "env", "env_vars", "url", "endpoint",
+                "type", "title", "description", "icons", "note", "cwd",
+                "bearer_token_env_var",
             ]
             guard Set(value.keys).isSubset(of: supportedFields) else {
                 throw PluginBundleImportError.invalidBundle
@@ -251,6 +254,34 @@ public struct PluginBundleImporter: Sendable {
             guard (rawCommand == nil) != (endpoint == nil) else {
                 throw PluginBundleImportError.invalidBundle
             }
+            let declaredType = try optionalBoundedString(
+                value, key: "type", maximumBytes: 32
+            )
+            if rawCommand != nil {
+                guard declaredType == nil || declaredType == "stdio" else {
+                    throw PluginBundleImportError.invalidBundle
+                }
+            } else {
+                guard declaredType == nil || declaredType == "http" else {
+                    throw PluginBundleImportError.invalidBundle
+                }
+            }
+            _ = try optionalBoundedString(value, key: "title", maximumBytes: 256)
+            _ = try optionalBoundedString(
+                value, key: "description", maximumBytes: 4_096
+            )
+            _ = try optionalBoundedString(value, key: "note", maximumBytes: 4_096)
+            try validateIcons(value["icons"])
+            let workingDirectory = try optionalBoundedString(
+                value, key: "cwd", maximumBytes: 4_096
+            )
+            let bearerEnvironment = try optionalBoundedString(
+                value, key: "bearer_token_env_var", maximumBytes: 256
+            )
+            guard workingDirectory == nil || rawCommand != nil,
+                  bearerEnvironment == nil || endpoint != nil,
+                  bearerEnvironment.map(validEnvironmentName) ?? true
+            else { throw PluginBundleImportError.invalidBundle }
             var relative: String?
             var command = rawCommand
             if let rawCommand, !rawCommand.hasPrefix("/") {
@@ -306,11 +337,25 @@ public struct PluginBundleImporter: Sendable {
             else { throw PluginBundleImportError.invalidBundle }
             let unresolved = Set(environment.keys)
                 .union(inheritedEnvironment).sorted()
+            var reviewRequirements: [String] = []
+            if workingDirectory != nil {
+                reviewRequirements.append(
+                    "Working-directory metadata was not imported; verify command paths manually."
+                )
+            }
+            if let bearerEnvironment {
+                reviewRequirements.append(
+                    "Bearer authentication from \(bearerEnvironment) was not imported; "
+                        + "add an Authorization header secret manually."
+                )
+            }
             _ = root
             drafts.append(.init(
                 id: id, command: command, arguments: arguments,
                 endpoint: endpoint, relativeExecutablePath: relative,
-                unresolvedSecrets: unresolved, enabled: false
+                unresolvedSecrets: unresolved,
+                reviewRequirements: reviewRequirements,
+                enabled: false
             ))
         }
         return drafts
@@ -324,6 +369,37 @@ public struct PluginBundleImporter: Sendable {
               string.utf8.count <= 4_096, !string.contains("\0")
         else { throw PluginBundleImportError.invalidBundle }
         return string
+    }
+
+    private func optionalBoundedString(
+        _ object: [String: Any], key: String, maximumBytes: Int
+    ) throws -> String? {
+        guard let value = object[key] else { return nil }
+        guard let string = value as? String, !string.isEmpty,
+              string.utf8.count <= maximumBytes, !string.contains("\0")
+        else { throw PluginBundleImportError.invalidBundle }
+        return string
+    }
+
+    private func validateIcons(_ raw: Any?) throws {
+        guard let raw else { return }
+        guard let icons = raw as? [[String: Any]], icons.count <= 16 else {
+            throw PluginBundleImportError.invalidBundle
+        }
+        for icon in icons {
+            guard Set(icon.keys).isSubset(of: ["src", "mimeType", "sizes"]),
+                  let source = icon["src"] as? String, !source.isEmpty,
+                  source.utf8.count <= 2_048, !source.contains("\0")
+            else { throw PluginBundleImportError.invalidBundle }
+            _ = try optionalBoundedString(icon, key: "mimeType", maximumBytes: 128)
+            if let rawSizes = icon["sizes"] {
+                guard let sizes = rawSizes as? [String], sizes.count <= 16,
+                      sizes.allSatisfy({
+                          !$0.isEmpty && $0.utf8.count <= 64 && !$0.contains("\0")
+                      })
+                else { throw PluginBundleImportError.invalidBundle }
+            }
+        }
     }
 
     private func validEnvironmentName(_ value: String) -> Bool {

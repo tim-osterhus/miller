@@ -1343,6 +1343,11 @@ final class CapabilityController: ObservableObject {
             if !draft.unresolvedSecrets.isEmpty {
                 labels.append("unresolved secrets: \(draft.unresolvedSecrets.joined(separator: ","))")
             }
+            if !draft.reviewRequirements.isEmpty {
+                labels.append(
+                    "owner review: \(draft.reviewRequirements.joined(separator: " "))"
+                )
+            }
             return labels.joined(separator: " — ")
         }.joined(separator: "; ")
         let apps = snapshot.apps.map { "\($0.name) (Codex only)" }

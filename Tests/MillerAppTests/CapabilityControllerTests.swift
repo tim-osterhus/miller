@@ -3295,7 +3295,7 @@ struct CapabilityControllerTests {
         ).write(to: bundle.appendingPathComponent(".codex-plugin/plugin.json"))
         try JSONSerialization.data(withJSONObject: [
             "mcpServers": [
-                componentID: ["command": "/usr/bin/true"],
+                componentID: ["command": "/usr/bin/true", "cwd": "."],
             ],
         ], options: [.sortedKeys]).write(to: bundle.appendingPathComponent(".mcp.json"))
         let repository = try SQLiteCapabilityRepository(
@@ -3311,9 +3311,13 @@ struct CapabilityControllerTests {
         try await controller.importPluginFromSettings(at: bundle)
         let snapshot = try await controller.settingsSnapshot(providerNames: [:])
         let server = try #require(snapshot.servers.first?.server)
+        let plugin = try #require(snapshot.plugins.first)
         #expect(server.id.utf8.count <= 96)
         #expect(!server.id.contains("."))
         #expect(server.displayName.utf8.count <= 128)
+        #expect(plugin.supportedComponentSummary.contains(
+            "Working-directory metadata was not imported; verify command paths manually."
+        ))
 
         await controller.start()
         #expect(await controller.diagnosticsSnapshot().controllerState == "Ready")
