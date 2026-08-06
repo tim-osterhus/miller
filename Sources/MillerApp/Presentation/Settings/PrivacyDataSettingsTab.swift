@@ -237,25 +237,30 @@ final class PrivacyDataSettingsModel: ObservableObject {
         defer { isBusy = false }
         let result = await dependencies.reset()
         resetResults = result.roots
-        guard result.failures.isEmpty else {
-            status = "Reset incomplete; review Diagnostics."
-            return
-        }
+        var wakeResetSucceeded = false
         do {
             try await dependencies.resetWakePreferences()
+            wakeResetSucceeded = true
             resetResults.append(.init(
                 root: "preferences.wake.reset",
                 succeeded: true
             ))
-            transcriptSavingEnabled = true
-            nextSessionSavingEnabled = true
-            storageUsage = try await dependencies.storageUsage()
-            status = "Reset completed; secure erasure is not claimed."
         } catch {
             resetResults.append(.init(
                 root: "preferences.wake.reset",
                 succeeded: false
             ))
+        }
+        guard result.failures.isEmpty, wakeResetSucceeded else {
+            status = "Reset incomplete; review Diagnostics."
+            return
+        }
+        do {
+            transcriptSavingEnabled = true
+            nextSessionSavingEnabled = true
+            storageUsage = try await dependencies.storageUsage()
+            status = "Reset completed; secure erasure is not claimed."
+        } catch {
             status = "Reset incomplete; review Diagnostics."
         }
     }

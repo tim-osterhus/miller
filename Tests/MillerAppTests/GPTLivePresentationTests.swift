@@ -1969,6 +1969,35 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func voiceHistoryDeletionRejectsDelayedEventsFromAClosedSession() async throws {
+        let voice = StaleLiveSessionEventProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: await voice.dependencies()
+        )
+
+        let session = Task { await model.startLiveVoice() }
+        try await waitUntil { await voice.sessionCount == 1 }
+        await voice.emit(.sessionAdmitted(id: UUID()), from: 0)
+        await voice.emit(.state(.listening), from: 0)
+        await voice.emit(.state(.closed), from: 0)
+        await voice.finish(session: 0)
+        await session.value
+
+        await model.deleteAllVoiceHistory()
+        let deletedVoiceState = model.voiceState
+        await voice.emit(
+            .transcriptDone(role: .assistant, text: "deleted transcript"),
+            from: 0
+        )
+        await voice.emit(.failed(code: "stale_failure"), from: 0)
+
+        #expect(model.liveTranscriptTurns.isEmpty)
+        #expect(model.liveVoiceFailureCode == nil)
+        #expect(model.voiceState == deletedVoiceState)
+    }
+
+    @Test
     func startupFailuresExposeOnlyActionableSanitizedClasses() async {
         await assertSanitizedLiveStartFailure(
             CodexAppServerClientError.timeout,

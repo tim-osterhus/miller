@@ -352,6 +352,7 @@ final class AppPresentationModel: ObservableObject {
     private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
     @Published private var voiceHistoryDeletionPending = false
+    @Published private var voiceHistoryExportPending = false
     private var capabilitySubscriptions = Set<AnyCancellable>()
 
     private struct PendingLiveTranscriptCleanup {
@@ -878,6 +879,8 @@ final class AppPresentationModel: ObservableObject {
     ) async -> ResetResult {
         let generation = beginProviderMutation()
         let projectionGeneration = nextConversationProjectionGeneration()
+        voiceHistoryGeneration &+= 1
+        nextLiveVoiceEventGeneration()
         defer { providerMutationPending = false }
         let result = await operation()
         clearPresentationAfterReset(
@@ -977,6 +980,7 @@ final class AppPresentationModel: ObservableObject {
         from start: Date? = nil,
         through end: Date? = nil
     ) async {
+        guard canBeginVoiceHistoryRead else { return }
         let generation = voiceHistoryGeneration
         do {
             let sessions = try await voiceHistory.sessions(start, end)
@@ -991,6 +995,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func prepareVoiceHistoryAttachment(sessionIDs: [UUID]) async {
+        guard canBeginVoiceHistoryRead else { return }
         voiceHistoryGeneration &+= 1
         let generation = voiceHistoryGeneration
         do {
@@ -1010,6 +1015,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func prepareVoiceHistoryAttachment(from start: Date, through end: Date) async {
+        guard canBeginVoiceHistoryRead else { return }
         voiceHistoryGeneration &+= 1
         let generation = voiceHistoryGeneration
         do {
@@ -1035,8 +1041,9 @@ final class AppPresentationModel: ObservableObject {
 
     func exportVoiceHistory(sessionIDs: [UUID], to url: URL) async {
         do {
-            let projection = try await checkedProjection(sessionIDs: sessionIDs)
-            try VoiceHistoryExportDocument.write(projection, to: url)
+            try await performVoiceHistoryExport(to: url) {
+                try await self.checkedProjection(sessionIDs: sessionIDs)
+            }
             voiceHistoryStatus = "Voice history exported."
         } catch {
             voiceHistoryStatus = "Voice history export failed."
@@ -1045,14 +1052,25 @@ final class AppPresentationModel: ObservableObject {
 
     func exportVoiceHistory(from start: Date, through end: Date, to url: URL) async {
         do {
-            let sessions = try await voiceHistory.sessions(start, end)
-            let projection = try await checkedProjection(
-                sessionIDs: sessions.map(\.id)
-            )
-            try VoiceHistoryExportDocument.write(projection, to: url)
+            try await performVoiceHistoryExport(to: url) {
+                let sessions = try await self.voiceHistory.sessions(start, end)
+                return try await self.checkedProjection(
+                    sessionIDs: sessions.map(\.id)
+                )
+            }
             voiceHistoryStatus = "Voice history exported."
         } catch {
             voiceHistoryStatus = "Voice history export failed."
+        }
+    }
+
+    func exportAllVoiceHistoryFromSettings(to url: URL) async throws {
+        try await performVoiceHistoryExport(to: url) {
+            let sessions = try await self.voiceHistory.sessions(nil, nil)
+            guard !sessions.isEmpty else { return [] }
+            return try await self.checkedProjection(
+                sessionIDs: sessions.map(\.id)
+            )
         }
     }
 
@@ -1062,10 +1080,10 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         defer { voiceHistoryDeletionPending = false }
-        voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteSession(id)
             clearPendingVoiceHistory(ifItContains: [id])
+            voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
             voiceHistoryStatus = "Voice history deletion failed."
@@ -1078,11 +1096,11 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         defer { voiceHistoryDeletionPending = false }
-        voiceHistoryGeneration &+= 1
         do {
             let deleted = try await voiceHistory.sessions(start, end).map(\.id)
             try await voiceHistory.deleteRange(start, end)
             clearPendingVoiceHistory(ifItContains: deleted)
+            voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
             voiceHistoryStatus = "Voice history deletion failed."
@@ -1095,10 +1113,10 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         defer { voiceHistoryDeletionPending = false }
-        voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteAll()
             pendingVoiceHistoryAttachment = nil
+            voiceHistoryDeletionPending = false
             await refreshVoiceHistory()
         } catch {
             voiceHistoryStatus = "Voice history deletion failed."
@@ -1110,9 +1128,9 @@ final class AppPresentationModel: ObservableObject {
             throw VoiceHistoryMutationError.busy
         }
         defer { voiceHistoryDeletionPending = false }
-        voiceHistoryGeneration &+= 1
         try await voiceHistory.deleteAll()
         pendingVoiceHistoryAttachment = nil
+        voiceHistoryDeletionPending = false
         await refreshVoiceHistory()
     }
 
@@ -1127,7 +1145,35 @@ final class AppPresentationModel: ObservableObject {
               !capabilitySettingsBusy
         else { return false }
         voiceHistoryDeletionPending = true
+        voiceHistoryGeneration &+= 1
+        nextLiveVoiceEventGeneration()
         return true
+    }
+
+    private var canBeginVoiceHistoryRead: Bool {
+        !voiceHistoryDeletionPending
+            && !providerMutationPending
+            && !capabilitySettingsBusy
+    }
+
+    private func performVoiceHistoryExport(
+        to url: URL,
+        projection: () async throws -> [VoiceHistoryExportSession]
+    ) async throws {
+        guard canBeginVoiceHistoryRead, !voiceHistoryExportPending,
+              !isActiveTurn, !voiceState.isActive,
+              !typedSubmissionPending, !liveVoiceStartPending,
+              !liveVoiceCleanupPending
+        else { throw VoiceHistoryMutationError.busy }
+        voiceHistoryExportPending = true
+        let generation = voiceHistoryGeneration
+        defer { voiceHistoryExportPending = false }
+        let value = try await projection()
+        guard generation == voiceHistoryGeneration,
+              !voiceHistoryDeletionPending,
+              !providerMutationPending
+        else { throw VoiceHistoryMutationError.busy }
+        try VoiceHistoryExportDocument.write(value, to: url)
     }
 
     private func preparedVoiceHistoryAttachment(
@@ -2574,11 +2620,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         value, for: .nextVoiceSessionSavingEnabled
                     )
                 },
-                exportVoiceHistory: { [voiceHistoryRepository] url in
-                    let sessions = try await voiceHistoryRepository.sessions()
-                    let projection = try await voiceHistoryRepository
-                        .exportProjection(sessionIDs: sessions.map(\.id))
-                    try VoiceHistoryExportDocument.write(projection, to: url)
+                exportVoiceHistory: { [model] url in
+                    try await model.exportAllVoiceHistoryFromSettings(to: url)
                 },
                 deleteVoiceHistory: { [model] in
                     try await model.deleteAllVoiceHistoryFromSettings()
@@ -2668,7 +2711,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         ],
                         cacheURLs: [cacheURL]
                     )
-                    let failure = await MainActor.run { model.errorCode }
+                    let appFailure = await MainActor.run { model.errorCode }
+                    let failure = DiagnosticsSettingsSnapshot.composedFailure(
+                        appFailure: appFailure,
+                        capabilityFailure: capabilityDiagnostics.sanitizedLastFailure
+                    )
                     return DiagnosticsSettingsSnapshot(
                         componentVersions: [
                             "Miller": Bundle.main.object(

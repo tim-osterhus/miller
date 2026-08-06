@@ -173,8 +173,9 @@ struct PrivacyDataSettingsTests {
         #expect(model.status == "Reset incomplete; review Diagnostics.")
         #expect(model.resetResults == [
             .init(root: "managed", succeeded: false),
+            .init(root: "preferences.wake.reset", succeeded: true),
         ])
-        #expect(await recorder.wakePreferenceResets == 0)
+        #expect(await recorder.wakePreferenceResets == 1)
     }
 
 

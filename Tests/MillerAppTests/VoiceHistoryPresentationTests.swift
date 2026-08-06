@@ -261,6 +261,115 @@ struct VoiceHistoryPresentationTests {
         #expect(model.voiceHistoryStatus == nil)
     }
 
+    @Test(arguments: VoiceHistoryExportInterference.allCases)
+    func destructiveHistoryOperationInvalidatesSuspendedExport(
+        interference: VoiceHistoryExportInterference
+    ) async {
+        let sessionID = UUID()
+        let projection = historyExport(id: sessionID, text: "must not escape")
+        let history = SuspendedVoiceHistoryExportProbe(
+            session: projection.session,
+            projection: projection
+        )
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: history.dependencies()
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-stale-export-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        let export = Task {
+            await model.exportVoiceHistory(sessionIDs: [sessionID], to: destination)
+        }
+        await history.waitUntilExportRequested()
+
+        switch interference {
+        case .deletion:
+            await model.deleteAllVoiceHistory()
+        case .reset:
+            _ = await model.performManagedPrivacyReset {
+                await history.deleteForReset()
+                return .init(roots: [.init(root: "voice_history", succeeded: true)])
+            }
+        }
+        await history.resumeExport()
+        await export.value
+
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        #expect(model.voiceHistoryStatus == "Voice history export failed.")
+    }
+
+    @Test
+    func suspendedExportReservationRejectsASecondSettingsExport() async throws {
+        let sessionID = UUID()
+        let projection = historyExport(id: sessionID, text: "one export")
+        let history = SuspendedVoiceHistoryExportProbe(
+            session: projection.session,
+            projection: projection
+        )
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: history.dependencies()
+        )
+        let firstDestination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-first-export-\(UUID().uuidString).json")
+        let secondDestination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-second-export-\(UUID().uuidString).json")
+        defer {
+            try? FileManager.default.removeItem(at: firstDestination)
+            try? FileManager.default.removeItem(at: secondDestination)
+        }
+
+        let first = Task {
+            await model.exportVoiceHistory(
+                sessionIDs: [sessionID], to: firstDestination
+            )
+        }
+        await history.waitUntilExportRequested()
+
+        await #expect(throws: VoiceHistoryMutationError.busy) {
+            try await model.exportAllVoiceHistoryFromSettings(to: secondDestination)
+        }
+        #expect(await history.exportRequestCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: secondDestination.path))
+
+        await history.resumeExport()
+        await first.value
+        #expect(FileManager.default.fileExists(atPath: firstDestination.path))
+    }
+
+    @Test
+    func suspendedDeletionRejectsNewHistoryReadsAttachmentsAndExports() async {
+        let history = SuspendedVoiceHistoryDeletionProbe()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: history.dependencies()
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-blocked-export-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        let deletion = Task { await model.deleteAllVoiceHistory() }
+        #expect(await history.waitUntilRequested())
+
+        await model.refreshVoiceHistory()
+        await model.prepareVoiceHistoryAttachment(sessionIDs: [UUID()])
+        await model.prepareVoiceHistoryAttachment(
+            from: .distantPast, through: .distantFuture
+        )
+        await model.exportVoiceHistory(sessionIDs: [UUID()], to: destination)
+
+        #expect(await history.readCount == 0)
+        #expect(await history.attachmentCount == 0)
+        #expect(await history.exportCount == 0)
+        #expect(model.pendingVoiceHistoryAttachment == nil)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+
+        await history.resume()
+        await deletion.value
+    }
+
     @Test
     func capabilityMaintenanceBusyStateFencesPresentationAdmission() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -557,6 +666,11 @@ enum VoiceHistoryStaleFailureInterference: CaseIterable, Sendable {
     case deletion
 }
 
+enum VoiceHistoryExportInterference: CaseIterable, Sendable {
+    case deletion
+    case reset
+}
+
 private enum VoiceHistoryProjectionTestError: Error {
     case projectedFailure
 }
@@ -644,16 +758,22 @@ private actor SuspendedVoiceHistoryDeletionProbe {
     private var continuation: CheckedContinuation<Void, Never>?
     private var requestWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var requestCount = 0
+    private(set) var readCount = 0
+    private(set) var attachmentCount = 0
+    private(set) var exportCount = 0
 
     nonisolated func dependencies() -> VoiceHistoryDependencies {
         .init(
-            sessions: { _, _ in [] }, exportProjection: { _ in [] },
-            attachmentProjection: { _, _ in .init(
-                sessionIDs: [], entries: [], hasMore: false
-            ) },
-            rangeAttachmentProjection: { _, _, _ in .init(
-                sessionIDs: [], entries: [], hasMore: false
-            ) },
+            sessions: { [self] _, _ in await recordRead(); return [] },
+            exportProjection: { [self] _ in await recordExport(); return [] },
+            attachmentProjection: { [self] _, _ in
+                await recordAttachment()
+                return .init(sessionIDs: [], entries: [], hasMore: false)
+            },
+            rangeAttachmentProjection: { [self] _, _, _ in
+                await recordAttachment()
+                return .init(sessionIDs: [], entries: [], hasMore: false)
+            },
             deleteSession: { _ in }, deleteRange: { _, _ in },
             deleteAll: { [self] in await suspend() }
         )
@@ -682,6 +802,74 @@ private actor SuspendedVoiceHistoryDeletionProbe {
 
     func resume() {
         continuation?.resume()
+        continuation = nil
+    }
+
+    private func recordRead() { readCount += 1 }
+    private func recordAttachment() { attachmentCount += 1 }
+    private func recordExport() { exportCount += 1 }
+}
+
+private actor SuspendedVoiceHistoryExportProbe {
+    private let session: VoiceHistorySession
+    private let projection: VoiceHistoryExportSession
+    private var continuation: CheckedContinuation<
+        [VoiceHistoryExportSession], Never
+    >?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var exportRequested = false
+    private var deleted = false
+    private(set) var exportRequestCount = 0
+
+    init(session: VoiceHistorySession, projection: VoiceHistoryExportSession) {
+        self.session = session
+        self.projection = projection
+    }
+
+    nonisolated func dependencies() -> VoiceHistoryDependencies {
+        .init(
+            sessions: { [self] _, _ in await sessions() },
+            exportProjection: { [self] _ in await suspendExport() },
+            attachmentProjection: { _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            rangeAttachmentProjection: { _, _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            deleteSession: { [self] _ in await deleteForReset() },
+            deleteRange: { [self] _, _ in await deleteForReset() },
+            deleteAll: { [self] in await deleteForReset() }
+        )
+    }
+
+    private func sessions() -> [VoiceHistorySession] {
+        deleted ? [] : [session]
+    }
+
+    private func suspendExport() async -> [VoiceHistoryExportSession] {
+        exportRequestCount += 1
+        exportRequested = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilExportRequested() async {
+        if exportRequested { return }
+        await withCheckedContinuation { continuation in
+            if exportRequested {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func deleteForReset() { deleted = true }
+
+    func resumeExport() {
+        continuation?.resume(returning: [projection])
         continuation = nil
     }
 }

@@ -134,6 +134,26 @@ struct CapabilitySettingsTests {
             .value.hasSuffix("(partial)") == true)
         #expect(snapshot.rows.last?.value == "Unavailable")
     }
+
+    @Test
+    func diagnosticsComposeAppAndCapabilityFailuresDeterministically() {
+        #expect(DiagnosticsSettingsSnapshot.composedFailure(
+            appFailure: nil, capabilityFailure: nil
+        ) == nil)
+        #expect(DiagnosticsSettingsSnapshot.composedFailure(
+            appFailure: "provider_unavailable", capabilityFailure: nil
+        ) == "provider_unavailable")
+        #expect(DiagnosticsSettingsSnapshot.composedFailure(
+            appFailure: nil, capabilityFailure: "startup_failed"
+        ) == "capability=startup_failed")
+        #expect(DiagnosticsSettingsSnapshot.composedFailure(
+            appFailure: "provider_unavailable",
+            capabilityFailure: "adapter_unavailable"
+        ) == "app=provider_unavailable;capability=adapter_unavailable")
+        #expect(DiagnosticsSettingsSnapshot.composedFailure(
+            appFailure: "private payload!", capabilityFailure: nil
+        ) == "unknown_failure")
+    }
 }
 
 private actor CapabilitySettingsRecorder {

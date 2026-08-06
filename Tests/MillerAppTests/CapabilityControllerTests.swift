@@ -3,13 +3,245 @@ import MillerCapabilities
 import MillerCore
 import MillerGateway
 @testable import MillerLive
-import MillerStorage
+@testable import MillerStorage
 import Testing
 @testable import MillerApp
 
 @Suite(.serialized)
 @MainActor
 struct CapabilityControllerTests {
+    @Test @MainActor
+    func concurrentStartsShareOneStartupAttempt() async {
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() }
+        )
+
+        let first = Task { await controller.start() }
+        #expect(await waitForConfigurationRequest(loading))
+        let second = Task { await controller.start() }
+        await yieldForScheduling()
+
+        #expect(await loading.requestCount == 1)
+        await loading.resolveAllAndFuture(with: .init(servers: [], toolPolicies: [:]))
+        await first.value
+        await second.value
+        #expect(await controller.diagnosticsSnapshot().controllerState == "Ready")
+    }
+
+    @Test @MainActor
+    func suspendedStartupRejectsSettingsMutation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-start-settings-fence-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() },
+            settingsRepository: repository
+        )
+
+        let startup = Task { await controller.start() }
+        #expect(await waitForConfigurationRequest(loading))
+        let mutation = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.setServerPolicyFromSettings(
+                    .fullyTrusted, serverID: server.id
+                )
+                return nil
+            } catch {
+                return error
+            }
+        }
+        await yieldForScheduling()
+
+        #expect(await loading.requestCount == 1)
+        await loading.resolveAllAndFuture(with: .init(servers: [], toolPolicies: [:]))
+        await startup.value
+        #expect(await mutation.value as? CapabilityControllerError == .settingsBusy)
+        #expect(try await repository.server(id: server.id)?.defaultPolicy
+            == .askBeforeChanges)
+    }
+
+    @Test @MainActor
+    func suspendedStartupRejectsManagedResetWithoutInvokingDeletion() async {
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() }
+        )
+        let deletion = AsyncCompletionProbe()
+
+        let startup = Task { await controller.start() }
+        #expect(await waitForConfigurationRequest(loading))
+        let result = await controller.performManagedReset {
+            await deletion.markComplete()
+            return .init(roots: [])
+        }
+
+        #expect(result.failures.map(\.root) == ["capabilities.runtime_idle"])
+        #expect(!(await deletion.isComplete))
+        await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
+        await startup.value
+    }
+
+    @Test @MainActor
+    func shutdownWaitsForSuspendedStartupAndPreventsPublication() async {
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() }
+        )
+        let shutdownCompletion = AsyncCompletionProbe()
+
+        let startup = Task { await controller.start() }
+        #expect(await waitForConfigurationRequest(loading))
+        let shutdown = Task {
+            await controller.shutdown()
+            await shutdownCompletion.markComplete()
+        }
+        await yieldForScheduling()
+
+        #expect(!(await shutdownCompletion.isComplete))
+        await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
+        await startup.value
+        await shutdown.value
+        #expect(await shutdownCompletion.isComplete)
+        #expect(await controller.diagnosticsSnapshot().broker == nil)
+    }
+
+    @Test(arguments: StartupCandidateOutcome.allCases) @MainActor
+    func shutdownMakesSuspendedStartupCandidateStaleWithoutTouchingNextBroker(
+        outcome: StartupCandidateOutcome
+    ) async throws {
+        let profileID = UUID()
+        let tool = MCPDiscoveredTool(
+            name: "ping", displayName: "Ping", summary: "Ping",
+            inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+            readOnlyHint: true
+        )
+        let first = SuspendedStartupSessionProbe(serverID: "startup")
+        let second = CapabilitySessionProbe(serverID: "startup", tool: tool)
+        let factory = StartupSessionFactoryProbe(first: first, second: second)
+        let configuration = try MCPServerConfiguration(
+            id: "startup", displayName: "Startup",
+            transport: .stdio(executable: "/usr/bin/true", arguments: []),
+            enabled: true, providerProfileIDs: [profileID]
+        )
+        let controller = CapabilityController(
+            loadConfiguration: {
+                .init(servers: [configuration], toolPolicies: [:])
+            },
+            sessionFactory: { _ in try await factory.make() }
+        )
+
+        let startup = Task { await controller.start() }
+        #expect(await waitForStartupSessionRequest(first))
+        let shutdown = Task { await controller.shutdown() }
+        await yieldForScheduling()
+
+        await first.resolve(outcome, tool: tool)
+        await startup.value
+        await shutdown.value
+
+        #expect(await first.disconnectCount == 1)
+        #expect(await controller.diagnosticsSnapshot().broker == nil)
+
+        await controller.start()
+        #expect(await factory.requestCount == 2)
+        #expect(await second.disconnectCount == 0)
+        #expect(await controller.diagnosticsSnapshot().broker?.state == .ready)
+        await controller.shutdown()
+    }
+
+    @Test
+    func diagnosticsExposeBoundedSanitizedStartupFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-startup-diagnostics-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let loader = FailFirstCapabilityConfigurationLoad()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            settingsRepository: repository
+        )
+
+        await controller.start()
+        let failed = await controller.diagnosticsSnapshot()
+        #expect(failed.sanitizedLastFailure == "capability_startup_failed")
+        #expect(failed.sanitizedLastFailure?.utf8.count ?? 0 <= 64)
+
+        try await controller.reloadLocalConfiguration()
+        let recovered = await controller.diagnosticsSnapshot()
+        #expect(recovered.controllerState == "Ready")
+        #expect(recovered.sanitizedLastFailure == nil)
+    }
+
+    @Test
+    func diagnosticsExposeSanitizedBrokerAndAdapterFailures() async throws {
+        let profileID = UUID()
+        let session = FailingCapabilitySessionProbe(serverID: "broken")
+        let controller = CapabilityController(
+            loadConfiguration: {
+                .init(servers: [try MCPServerConfiguration(
+                    id: "broken", displayName: "Broken",
+                    transport: .stdio(executable: "/usr/bin/true", arguments: []),
+                    enabled: true, providerProfileIDs: [profileID]
+                )], toolPolicies: [:])
+            },
+            sessionFactory: { _ in session }
+        )
+
+        await controller.start()
+        let brokerFailure = await controller.diagnosticsSnapshot()
+        #expect(brokerFailure.sanitizedLastFailure == "capability_broker_failed")
+
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-adapter-failure-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let adapterController = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            trustedParent: parent
+        )
+        let adapterFailure = await adapterController.diagnosticsSnapshot()
+        #expect(adapterFailure.sanitizedLastFailure == "capability_adapter_failed")
+
+        let lease = CapabilityRPCRuntime.managedRoot(in: parent)
+            .appending(path: CapabilityRPCRuntime.processLeaseName)
+        try FileManager.default.createDirectory(
+            at: lease.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("\(ProcessInfo.processInfo.processIdentifier)\n".utf8).write(to: lease)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: lease.path
+        )
+        let adapterRecovered = await adapterController.diagnosticsSnapshot()
+        #expect(adapterRecovered.adapterProcessState == .leasePIDAliveUnverified)
+        #expect(adapterRecovered.sanitizedLastFailure == nil)
+
+        let failedLoader = FailFirstCapabilityConfigurationLoad()
+        let startupAndAdapterController = CapabilityController(
+            loadConfiguration: { try await failedLoader.load() },
+            trustedParent: FileManager.default.temporaryDirectory.appendingPathComponent(
+                "miller-adapter-precedence-\(UUID().uuidString)", isDirectory: true
+            )
+        )
+        await startupAndAdapterController.start()
+        #expect(await startupAndAdapterController.diagnosticsSnapshot()
+            .sanitizedLastFailure == "capability_startup_failed")
+    }
+
     @Test
     func beginAuditFailurePreventsToolExecution() async throws {
         let audit = CapabilityAuditProbe(beginFailures: 1)
@@ -2374,6 +2606,78 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func keychainRecoveryAttemptsEveryCapturedReferenceAfterOneRestoreFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-secret-recovery-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let seed = try SQLiteCapabilityRepository(path: path)
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await seed.saveServer(server)
+        let firstReference = UUID()
+        let secondReference = UUID()
+        let firstBinding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "FIRST_TOKEN", credentialReference: firstReference
+        )
+        let secondBinding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "SECOND_TOKEN", credentialReference: secondReference
+        )
+        try await seed.saveSecretBinding(firstBinding)
+        try await seed.saveSecretBinding(secondBinding)
+        let secrets = CapabilitySettingsSecretProbe(
+            values: [firstReference: "old-first", secondReference: "old-second"],
+            failFirstOldStore: true
+        )
+        let loader = FailFirstCapabilityConfigurationLoad()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loader.load() },
+            settingsRepository: seed,
+            settingsSecrets: secrets.dependencies
+        )
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = server.id
+        draft.displayName = server.displayName
+        draft.executable = "/usr/bin/true"
+        draft.createdAt = server.createdAt
+        draft.secrets = [
+            .init(
+                id: firstBinding.id, kind: .environment,
+                name: firstBinding.name, value: "new-first",
+                existingReference: firstReference
+            ),
+            .init(
+                id: secondBinding.id, kind: .environment,
+                name: secondBinding.name, value: "new-second",
+                existingReference: secondReference
+            ),
+            .init(kind: .environment, name: "THIRD_TOKEN", value: "new-third"),
+        ]
+        let validated = try draft.validated(mode: .edit(originalID: server.id))
+        let thirdReference = try #require(
+            validated.secrets.first(where: { $0.name == "THIRD_TOKEN" })?
+                .credentialReference
+        )
+
+        await #expect(throws: CapabilitySettingsMutationError.recoveryFailed) {
+            try await controller.saveServerSettings(validated)
+        }
+
+        #expect(await secrets.attemptedStore(firstReference, value: "old-first"))
+        #expect(await secrets.attemptedStore(secondReference, value: "old-second"))
+        #expect(await secrets.attemptedDelete(thirdReference))
+        #expect(await secrets.value(thirdReference) == nil)
+        let firstValue = await secrets.value(firstReference)
+        let secondValue = await secrets.value(secondReference)
+        let restoredOldValues = [firstValue, secondValue]
+            .compactMap { $0 }.filter { $0.hasPrefix("old-") }
+        #expect(restoredOldValues.count == 1)
+    }
+
+    @Test
     func createAndMaterialEditRequireSuccessfulQualificationBeforeEnablement() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "miller-settings-qualification-\(UUID().uuidString)", isDirectory: true
@@ -2549,6 +2853,119 @@ struct CapabilityControllerTests {
         #expect(try await repository.enabledProviderProfileIDs(
             serverID: current.id
         ) == [profile.id])
+    }
+
+    @Test
+    func missingServerAndToolWritesFailBeforeRollbackAndKeepRuntimeHealthy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-preflight-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: repository
+        )
+
+        await #expect(throws: CapabilityStorageError.serverNotFound) {
+            try await controller.setProviderEnabledFromSettings(
+                false, serverID: "missing", providerProfileID: UUID()
+            )
+        }
+        await #expect(throws: CapabilityStorageError.toolNotFound) {
+            try await controller.setToolPolicyFromSettings(
+                .fullyTrusted,
+                toolID: CapabilityID(
+                    source: .millerMCP,
+                    serverID: server.id,
+                    toolName: "missing"
+                )
+            )
+        }
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_settings_failed")
+
+        await controller.start()
+        #expect(await controller.diagnosticsSnapshot().controllerState == "Ready")
+    }
+
+    @Test
+    func uncommittedPolicyWriteFailureDoesNotAttemptRollbackOrPoisonRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-uncommitted-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let seed = try SQLiteCapabilityRepository(path: path)
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await seed.saveServer(server)
+        await seed.close()
+        let failing = try SQLiteCapabilityRepository(
+            path: path,
+            simulatedWriteFailure: .storageFull
+        )
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: failing
+        )
+
+        await #expect(throws: SQLiteError.storageFull) {
+            try await controller.setServerPolicyFromSettings(
+                .fullyTrusted, serverID: server.id
+            )
+        }
+        #expect(await controller.diagnosticsSnapshot().sanitizedLastFailure
+            == "capability_settings_failed")
+
+        await controller.start()
+        #expect(await controller.diagnosticsSnapshot().controllerState == "Ready")
+    }
+
+    @Test
+    func connectionActivationRejectsEmptyCompatibleProviderSetAndKeepsServerDisabled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-empty-providers-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(
+            policy: .askBeforeChanges, enabled: false
+        )
+        try await repository.saveServer(server)
+        let session = CapabilitySessionProbe(
+            serverID: server.id,
+            tool: .init(
+                name: "lookup", displayName: "Lookup", summary: "Lookup",
+                inputSchemaJSON: Data("{}".utf8), readOnlyHint: true
+            )
+        )
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            sessionFactory: { _ in session },
+            settingsRepository: repository
+        )
+
+        await #expect(throws: CapabilityControllerError.providerMismatch) {
+            try await controller.testAndEnableServer(
+                serverID: server.id,
+                compatibleProviderProfileIDs: []
+            )
+        }
+
+        #expect(try await repository.server(id: server.id)?.enabled == false)
+        #expect(try await repository.enabledProviderProfileIDs(
+            serverID: server.id
+        ).isEmpty)
+        #expect(try await repository.catalog(serverID: server.id).isEmpty)
     }
 
     @Test
@@ -3058,17 +3475,24 @@ private enum CapabilitySettingsSecretProbeError: Error {
 private actor CapabilitySettingsSecretProbe {
     private var values: [UUID: String]
     private var shouldFailDelete = false
+    private var shouldFailFirstOldStore: Bool
+    private var storeAttempts: [(UUID, String)] = []
+    private var deleteAttempts: [UUID] = []
     private(set) var mutationCount = 0
 
-    init(values: [UUID: String] = [:]) {
+    init(
+        values: [UUID: String] = [:],
+        failFirstOldStore: Bool = false
+    ) {
         self.values = values
+        shouldFailFirstOldStore = failFirstOldStore
     }
 
     nonisolated var dependencies: CapabilitySettingsSecretDependencies {
         .init(
             load: { [self] reference in await value(reference) },
             store: { [self] reference, value in
-                await setValue(value, for: reference)
+                try await storeValue(value, for: reference)
             },
             delete: { [self] reference in try await deleteValue(reference) }
         )
@@ -3081,10 +3505,29 @@ private actor CapabilitySettingsSecretProbe {
         values[reference] = value
     }
 
+    func attemptedStore(_ reference: UUID, value: String) -> Bool {
+        storeAttempts.contains { $0.0 == reference && $0.1 == value }
+    }
+
+    func attemptedDelete(_ reference: UUID) -> Bool {
+        deleteAttempts.contains(reference)
+    }
+
     func failNextDelete() { shouldFailDelete = true }
+
+    private func storeValue(_ value: String, for reference: UUID) throws {
+        mutationCount += 1
+        storeAttempts.append((reference, value))
+        if shouldFailFirstOldStore, value.hasPrefix("old-") {
+            shouldFailFirstOldStore = false
+            throw CapabilitySettingsSecretProbeError.injected
+        }
+        values[reference] = value
+    }
 
     private func deleteValue(_ reference: UUID) throws {
         mutationCount += 1
+        deleteAttempts.append(reference)
         if shouldFailDelete {
             shouldFailDelete = false
             throw CapabilitySettingsSecretProbeError.injected
@@ -3098,9 +3541,11 @@ private actor SuspendedRuntimeConfigurationProbe {
         CheckedContinuation<CapabilityRuntimeConfiguration, any Error>
     ] = []
     private(set) var requestCount = 0
+    private var futureConfiguration: CapabilityRuntimeConfiguration?
 
     func load() async throws -> CapabilityRuntimeConfiguration {
         requestCount += 1
+        if let futureConfiguration { return futureConfiguration }
         return try await withCheckedThrowingContinuation { continuation in
             continuations.append(continuation)
         }
@@ -3111,6 +3556,81 @@ private actor SuspendedRuntimeConfigurationProbe {
         continuations.removeAll()
         for continuation in pending {
             continuation.resume(returning: configuration)
+        }
+    }
+
+    func resolveAllAndFuture(with configuration: CapabilityRuntimeConfiguration) {
+        futureConfiguration = configuration
+        resolveAll(with: configuration)
+    }
+}
+
+enum StartupCandidateOutcome: CaseIterable, Sendable {
+    case success
+    case failure
+}
+
+private actor SuspendedStartupSessionProbe: MCPClientSessionProtocol {
+    nonisolated let serverID: String
+    private var continuation: CheckedContinuation<
+        [MCPDiscoveredTool], any Error
+    >?
+    private(set) var requestCount = 0
+    private(set) var disconnectCount = 0
+
+    init(serverID: String) {
+        self.serverID = serverID
+    }
+
+    func listTools() async throws -> [MCPDiscoveredTool] {
+        requestCount += 1
+        return try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    func callTool(
+        name _: String,
+        argumentsJSON _: Data
+    ) throws -> MCPToolCallResult {
+        throw MCPClientSessionError.connectionClosed
+    }
+
+    func disconnect() {
+        disconnectCount += 1
+    }
+
+    func resolve(
+        _ outcome: StartupCandidateOutcome,
+        tool: MCPDiscoveredTool
+    ) {
+        switch outcome {
+        case .success:
+            continuation?.resume(returning: [tool])
+        case .failure:
+            continuation?.resume(throwing: MCPClientSessionError.connectionClosed)
+        }
+        continuation = nil
+    }
+}
+
+private actor StartupSessionFactoryProbe {
+    private let first: SuspendedStartupSessionProbe
+    private let second: CapabilitySessionProbe
+    private(set) var requestCount = 0
+
+    init(
+        first: SuspendedStartupSessionProbe,
+        second: CapabilitySessionProbe
+    ) {
+        self.first = first
+        self.second = second
+    }
+
+    func make() throws -> any MCPClientSessionProtocol {
+        requestCount += 1
+        switch requestCount {
+        case 1: return first
+        case 2: return second
+        default: throw MCPClientSessionError.connectionClosed
         }
     }
 }
@@ -3187,11 +3707,25 @@ private func waitForConfigurationRequest(
     _ probe: SuspendedRuntimeConfigurationProbe,
     minimum: Int = 1
 ) async -> Bool {
-    for _ in 0..<1_000 {
+    for _ in 0..<10_000 {
         if await probe.requestCount >= minimum { return true }
         await Task.yield()
     }
     return false
+}
+
+private func waitForStartupSessionRequest(
+    _ probe: SuspendedStartupSessionProbe
+) async -> Bool {
+    for _ in 0..<10_000 {
+        if await probe.requestCount > 0 { return true }
+        await Task.yield()
+    }
+    return false
+}
+
+private func yieldForScheduling() async {
+    for _ in 0..<100 { await Task.yield() }
 }
 
 private struct ControllerFixture {
@@ -3391,6 +3925,7 @@ private actor CapabilitySessionProbe: MCPClientSessionProtocol {
     private let tool: MCPDiscoveredTool
     private let delay: Duration?
     private(set) var calls = 0
+    private(set) var disconnectCount = 0
 
     init(serverID: String, tool: MCPDiscoveredTool, delay: Duration? = nil) {
         self.serverID = serverID
@@ -3411,6 +3946,27 @@ private actor CapabilitySessionProbe: MCPClientSessionProtocol {
             contentJSON: Data(#"{"content":[{"type":"text","text":"safe"}]}"#.utf8),
             isError: false
         )
+    }
+
+    func disconnect() { disconnectCount += 1 }
+}
+
+private actor FailingCapabilitySessionProbe: MCPClientSessionProtocol {
+    nonisolated let serverID: String
+
+    init(serverID: String) {
+        self.serverID = serverID
+    }
+
+    func listTools() throws -> [MCPDiscoveredTool] {
+        throw MCPClientSessionError.connectionClosed
+    }
+
+    func callTool(
+        name _: String,
+        argumentsJSON _: Data
+    ) throws -> MCPToolCallResult {
+        throw MCPClientSessionError.connectionClosed
     }
 
     func disconnect() {}

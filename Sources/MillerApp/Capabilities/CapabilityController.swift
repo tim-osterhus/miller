@@ -70,6 +70,7 @@ struct CapabilityControllerDiagnostics: Equatable, Sendable {
     let broker: CapabilityBrokerLifecycleSnapshot?
     let bridgeRPCServerRunning: Bool
     let adapterProcessState: CapabilityAdapterProcessState
+    let sanitizedLastFailure: String?
 }
 
 @MainActor
@@ -348,6 +349,10 @@ final class CapabilityController: ObservableObject {
         let kind: PreparationKind
     }
 
+    private struct StartupReservation: Equatable {
+        let generation: UInt64
+    }
+
     @Published private(set) var pendingApproval: CapabilityApprovalPresentation?
     @Published private(set) var activityRows: [CapabilityActivityRow] = []
     @Published private(set) var liveVoiceConfirmationMessage: String?
@@ -379,6 +384,7 @@ final class CapabilityController: ObservableObject {
     private var providerProjection: CapabilityProviderProjectionDependencies?
     private var providerProjectionGeneration: UInt64 = 0
     private var startupError: Error?
+    private var sanitizedLastFailure: String?
     private var pendingQueue: [PendingApproval] = []
     private var activePending: PendingApproval?
     private var approvalDecisions: [CapabilityCallID: CapabilityApprovalDecision] = [:]
@@ -410,6 +416,9 @@ final class CapabilityController: ObservableObject {
     private var maintenanceOwner: UUID?
     private var maintenanceWaiters: [CheckedContinuation<Void, Never>] = []
     private var preparationReservation: PreparationReservation?
+    private var startupGeneration: UInt64 = 0
+    private var startupReservation: StartupReservation?
+    private var startupWaiters: [CheckedContinuation<Void, Never>] = []
 
     private var maintenanceInProgress: Bool { maintenanceOwner != nil }
 
@@ -534,11 +543,31 @@ final class CapabilityController: ObservableObject {
     }
 
     func start() async {
+        await start(allowDuringAuthorityMutation: false)
+    }
+
+    private func start(allowDuringAuthorityMutation: Bool) async {
         guard broker == nil, startupError == nil else { return }
+        if startupReservation != nil {
+            await waitForStartup()
+            return
+        }
+        guard allowDuringAuthorityMutation
+                || (!settingsMutationInProgress && !maintenanceInProgress)
+        else { return }
+        startupGeneration &+= 1
+        let reservation = StartupReservation(generation: startupGeneration)
+        startupReservation = reservation
+        await performStartup(reservation)
+        finishStartup(reservation)
+    }
+
+    private func performStartup(_ reservation: StartupReservation) async {
+        var candidate: CapabilityBroker?
         do {
             let configuration = try await loadConfiguration()
             try await recoverDurableNonterminalAudits()
-            let broker = try CapabilityBroker(
+            let built = try CapabilityBroker(
                 configurations: configuration.servers,
                 toolPolicies: configuration.toolPolicies,
                 credentialResolver: credentialResolver,
@@ -551,7 +580,25 @@ final class CapabilityController: ObservableObject {
                     await self?.recordLifecycle(event)
                 }
             )
-            self.broker = broker
+            candidate = built
+            let catalog = await built.refresh()
+            if let settingsRepository {
+                try await Self.persist(
+                    catalog: catalog,
+                    repository: settingsRepository,
+                    serverIDs: Set(configuration.servers.map(\.id)),
+                    attemptedServerIDs: Set(configuration.servers.compactMap {
+                        $0.enabled && !$0.providerProfileIDs.isEmpty ? $0.id : nil
+                    })
+                )
+            }
+            guard startupReservation == reservation,
+                  startupGeneration == reservation.generation
+            else {
+                await built.disconnectAll()
+                return
+            }
+            broker = built
             serverDisplayNames = Dictionary(
                 uniqueKeysWithValues: configuration.servers.map {
                     ($0.id, $0.displayName)
@@ -563,26 +610,39 @@ final class CapabilityController: ObservableObject {
                 }
             )
             toolPolicies = configuration.toolPolicies
-            let catalog = await broker.refresh()
-            if let settingsRepository {
-                try await Self.persist(
-                    catalog: catalog,
-                    repository: settingsRepository,
-                    serverIDs: Set(configuration.servers.map(\.id)),
-                    attemptedServerIDs: Set(configuration.servers.compactMap {
-                        $0.enabled && !$0.providerProfileIDs.isEmpty ? $0.id : nil
-                    })
-                )
-            }
             descriptors = Dictionary(
                 uniqueKeysWithValues: catalog.descriptors.map { ($0.id, $0) }
             )
+            sanitizedLastFailure = catalog.staleServerIDs.isEmpty
+                ? nil : "capability_broker_failed"
         } catch {
-            await broker?.disconnectAll()
-            broker = nil
+            await candidate?.disconnectAll()
+            guard startupReservation == reservation,
+                  startupGeneration == reservation.generation
+            else { return }
             descriptors.removeAll()
             startupError = error
+            sanitizedLastFailure = "capability_startup_failed"
         }
+    }
+
+    private func waitForStartup() async {
+        guard startupReservation != nil else { return }
+        await withCheckedContinuation { continuation in
+            guard startupReservation != nil else {
+                continuation.resume()
+                return
+            }
+            startupWaiters.append(continuation)
+        }
+    }
+
+    private func finishStartup(_ reservation: StartupReservation) {
+        guard startupReservation == reservation else { return }
+        startupReservation = nil
+        let waiters = startupWaiters
+        startupWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 
     private func recoverDurableNonterminalAudits() async throws {
@@ -603,6 +663,10 @@ final class CapabilityController: ObservableObject {
         maintenanceOwner = owner
         settingsBusy = true
         await waitForSettingsMutation()
+        if startupReservation != nil {
+            startupGeneration &+= 1
+        }
+        await waitForStartup()
         await shutdownRuntime()
         finishMaintenance(owner: owner)
     }
@@ -652,7 +716,8 @@ final class CapabilityController: ObservableObject {
     }
 
     private var runtimeAuthorityIsIdle: Bool {
-        preparationReservation == nil
+        startupReservation == nil
+            && preparationReservation == nil
             && activeTypedAssociation == nil
             && activeVoiceAssociation == nil
             && pendingApprovalCount == 0
@@ -1131,14 +1196,23 @@ final class CapabilityController: ObservableObject {
     }
 
     func diagnosticsSnapshot() async -> CapabilityControllerDiagnostics {
-        CapabilityControllerDiagnostics(
+        let adapterState = trustedParent.map(Self.adapterProcessState)
+            ?? .unavailable
+        if trustedParent != nil, adapterState == .noReachableLeasePID {
+            if sanitizedLastFailure == nil {
+                sanitizedLastFailure = "capability_adapter_failed"
+            }
+        } else if sanitizedLastFailure == "capability_adapter_failed" {
+            sanitizedLastFailure = nil
+        }
+        return CapabilityControllerDiagnostics(
             controllerState: startupError == nil
                 ? (broker == nil ? "Not started" : "Ready")
                 : "Unavailable",
             broker: await broker?.lifecycleSnapshot(),
             bridgeRPCServerRunning: rpcServer != nil,
-            adapterProcessState: trustedParent.map(Self.adapterProcessState)
-                ?? .unavailable
+            adapterProcessState: adapterState,
+            sanitizedLastFailure: sanitizedLastFailure
         )
     }
 
@@ -1289,22 +1363,33 @@ final class CapabilityController: ObservableObject {
         let repository = try settingsRepositoryOrThrow()
         try beginSettingsMutation()
         defer { finishSettingsMutation() }
+        guard let server = try await repository.server(id: serverID) else {
+            sanitizedLastFailure = "capability_settings_failed"
+            throw CapabilityStorageError.serverNotFound
+        }
         if enabled {
-            guard let server = try await repository.server(id: serverID),
-                  server.enabled, server.staleState == .current
-            else { throw CapabilityControllerError.serverQualificationRequired }
+            guard server.enabled, server.staleState == .current else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw CapabilityControllerError.serverQualificationRequired
+            }
         }
         let previous = Set(try await repository.enabledProviderProfileIDs(
             serverID: serverID
         ))
+        var committed = false
         do {
             try await repository.setProviderEnabled(
                 enabled,
                 serverID: serverID,
                 providerProfileID: providerProfileID
             )
+            committed = true
             try await reloadRuntimeAuthority()
         } catch {
+            guard committed else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw error
+            }
             do {
                 try await restoreProviderSettings(
                     previous, serverID: serverID, repository: repository
@@ -1314,6 +1399,7 @@ final class CapabilityController: ObservableObject {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
+            sanitizedLastFailure = "capability_settings_failed"
             throw error
         }
     }
@@ -1345,14 +1431,20 @@ final class CapabilityController: ObservableObject {
             createdAt: previous.createdAt,
             updatedAt: Date()
         )
+        var committed = false
         do {
             try await repository.replaceServerConfiguration(
                 server: updated,
                 secretBindings: bindings,
                 enabledProviderProfileIDs: providerIDs
             )
+            committed = true
             try await reloadRuntimeAuthority()
         } catch {
+            guard committed else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw error
+            }
             do {
                 try await repository.replaceServerConfiguration(
                     server: previous,
@@ -1364,6 +1456,7 @@ final class CapabilityController: ObservableObject {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
+            sanitizedLastFailure = "capability_settings_failed"
             throw error
         }
     }
@@ -1377,15 +1470,27 @@ final class CapabilityController: ObservableObject {
         defer { finishSettingsMutation() }
         let identity = toolID.rawValue.split(separator: "/", maxSplits: 2)
         guard identity.count == 3 else {
+            sanitizedLastFailure = "capability_settings_failed"
             throw CapabilityStorageError.toolNotFound
         }
         let serverID = String(identity[1])
-        let previous = try await repository.catalog(serverID: serverID)
-            .first(where: { $0.descriptor.id == toolID })?.policyOverride
+        guard let record = try await repository.catalog(serverID: serverID)
+            .first(where: { $0.descriptor.id == toolID })
+        else {
+            sanitizedLastFailure = "capability_settings_failed"
+            throw CapabilityStorageError.toolNotFound
+        }
+        let previous = record.policyOverride
+        var committed = false
         do {
             try await repository.setPolicyOverride(policy, toolID: toolID)
+            committed = true
             try await reloadRuntimeAuthority()
         } catch {
+            guard committed else {
+                sanitizedLastFailure = "capability_settings_failed"
+                throw error
+            }
             do {
                 try await repository.setPolicyOverride(previous, toolID: toolID)
                 try await reloadRuntimeAuthority()
@@ -1393,6 +1498,7 @@ final class CapabilityController: ObservableObject {
                 await leaveRuntimeUnavailable()
                 throw CapabilitySettingsMutationError.recoveryFailed
             }
+            sanitizedLastFailure = "capability_settings_failed"
             throw error
         }
     }
@@ -1404,7 +1510,12 @@ final class CapabilityController: ObservableObject {
         let repository = try settingsRepositoryOrThrow()
         try beginSettingsMutation()
         defer { finishSettingsMutation() }
+        guard !compatibleProviderProfileIDs.isEmpty else {
+            sanitizedLastFailure = "capability_settings_failed"
+            throw CapabilityControllerError.providerMismatch
+        }
         guard let previous = try await repository.server(id: serverID) else {
+            sanitizedLastFailure = "capability_settings_failed"
             throw CapabilityStorageError.serverNotFound
         }
         let bindings = try await repository.secretBindings(serverID: serverID)
@@ -1504,13 +1615,14 @@ final class CapabilityController: ObservableObject {
         serverPolicies.removeAll()
         toolPolicies.removeAll()
         startupError = nil
-        await start()
+        await start(allowDuringAuthorityMutation: true)
         if let startupError { throw startupError }
         await reconcileProviderProjection()
     }
 
     private func beginSettingsMutation() throws {
         guard !settingsMutationInProgress, !maintenanceInProgress,
+              startupReservation == nil,
               preparationReservation == nil,
               activeTypedAssociation == nil,
               activeVoiceAssociation == nil,
@@ -1595,14 +1707,24 @@ final class CapabilityController: ObservableObject {
     }
 
     private func restoreSecrets(_ snapshot: [UUID: StoredSecret]) async throws {
-        for (reference, value) in snapshot {
-            switch value {
-            case .value(let value):
-                try await settingsSecrets.store(reference, value)
-            case .absent:
-                try await settingsSecrets.delete(reference)
+        var failed = false
+        for reference in snapshot.keys.sorted(by: {
+            $0.uuidString < $1.uuidString
+        }) {
+            do {
+                switch snapshot[reference] {
+                case .value(let value):
+                    try await settingsSecrets.store(reference, value)
+                case .absent:
+                    try await settingsSecrets.delete(reference)
+                case nil:
+                    break
+                }
+            } catch {
+                failed = true
             }
         }
+        if failed { throw CapabilitySettingsMutationError.recoveryFailed }
     }
 
     private func restoreProviderSettings(
@@ -1637,6 +1759,7 @@ final class CapabilityController: ObservableObject {
         broker = nil
         descriptors.removeAll()
         startupError = CapabilitySettingsMutationError.recoveryFailed
+        sanitizedLastFailure = "capability_settings_failed"
     }
 
     func configureProviderProjection(

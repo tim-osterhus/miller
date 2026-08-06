@@ -43,6 +43,36 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
         ]
     }
 
+    static func composedFailure(
+        appFailure: String?,
+        capabilityFailure: String?
+    ) -> String? {
+        let app = boundedFailureCode(appFailure)
+        let capability = boundedFailureCode(capabilityFailure)
+        switch (app, capability) {
+        case (nil, nil): return nil
+        case let (app?, nil): return app
+        case let (nil, capability?): return "capability=\(capability)"
+        case let (app?, capability?):
+            return "app=\(app);capability=\(capability)"
+        }
+    }
+
+    private static func boundedFailureCode(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty, normalized.utf8.count <= 64,
+              normalized.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII
+                      && ((97...122).contains(scalar.value)
+                          || (48...57).contains(scalar.value)
+                          || scalar == "_" || scalar == "-")
+              })
+        else { return "unknown_failure" }
+        return normalized
+    }
+
     static let unavailable = Self(
         componentVersions: ["Miller": "Unknown"],
         sanitizedLastFailure: nil,
