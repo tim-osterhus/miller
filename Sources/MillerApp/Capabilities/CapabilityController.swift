@@ -44,6 +44,10 @@ struct CapabilityProviderCallbackAuthority: Equatable, Sendable {
     let isVoice: Bool
 }
 
+struct CapabilityVoicePreparation: Equatable, Sendable {
+    fileprivate let token: UUID
+}
+
 struct CapabilityControllerDiagnostics: Equatable, Sendable {
     let controllerState: String
     let broker: CapabilityBrokerLifecycleSnapshot?
@@ -317,6 +321,16 @@ final class CapabilityController: ObservableObject {
         case value(String)
     }
 
+    private enum PreparationKind: Equatable {
+        case typed(turnID: TurnID, generation: Int)
+        case voice
+    }
+
+    private struct PreparationReservation: Equatable {
+        let token: UUID
+        let kind: PreparationKind
+    }
+
     @Published private(set) var pendingApproval: CapabilityApprovalPresentation?
     @Published private(set) var activityRows: [CapabilityActivityRow] = []
     @Published private(set) var liveVoiceConfirmationMessage: String?
@@ -374,6 +388,7 @@ final class CapabilityController: ObservableObject {
     private var approvalCanAllowOnce: [CapabilityCallID: Bool] = [:]
     private var completedProviderCallKeys = Set<String>()
     private var settingsMutationInProgress = false
+    private var preparationReservation: PreparationReservation?
 
     init(
         loadConfiguration: @escaping @Sendable () async throws
@@ -555,6 +570,7 @@ final class CapabilityController: ObservableObject {
     }
 
     func shutdown() async {
+        preparationReservation = nil
         declinePendingApprovals(for: .interrupt)
         await finalizeProviderActivities()
         await recoverPendingTerminalAuditsBestEffort()
@@ -682,13 +698,16 @@ final class CapabilityController: ObservableObject {
     func admitTypedAssociation(
         _ association: CapabilityAssociation,
         providerProfileID: UUID
-    ) {
-        guard !settingsMutationInProgress else { return }
+    ) throws {
+        guard !settingsMutationInProgress else {
+            throw CapabilityControllerError.settingsBusy
+        }
         activeTypedAssociation = association
         activeProviderProfileID = providerProfileID
     }
 
     func cancelTypedAssociation(turnID: TurnID, generation: Int) async {
+        releasePreparation(kind: .typed(turnID: turnID, generation: generation))
         markTypedGenerationCancelled(Self.typedKey(turnID, generation))
         if case .typed(_, let activeTurn, let activeGeneration) = activeTypedAssociation,
            activeTurn == turnID, activeGeneration == generation {
@@ -700,6 +719,7 @@ final class CapabilityController: ObservableObject {
     }
 
     func finishTypedAssociation(turnID: TurnID, generation: Int) async {
+        releasePreparation(kind: .typed(turnID: turnID, generation: generation))
         if case .typed(_, let activeTurn, let activeGeneration) = activeTypedAssociation,
            activeTurn == turnID, activeGeneration == generation {
             activeTypedAssociation = nil
@@ -708,24 +728,46 @@ final class CapabilityController: ObservableObject {
         await stopBridge()
     }
 
-    func admitVoiceAssociation(sessionID: UUID) {
-        guard !settingsMutationInProgress else { return }
-        activeVoiceAssociation = .voice(sessionID: sessionID, generation: 1)
-    }
-
-    func prepareLiveVoice(providerProfileID: UUID) async throws {
+    func admitVoiceAssociation(
+        sessionID: UUID,
+        preparation: CapabilityVoicePreparation
+    ) throws {
         guard !settingsMutationInProgress else {
             throw CapabilityControllerError.settingsBusy
         }
-        await finalizeProviderActivities()
-        activeProviderProfileID = providerProfileID
-        try await prepareBridge(
-            providerProfileID: providerProfileID,
-            isVoice: true
+        let reservation = PreparationReservation(
+            token: preparation.token,
+            kind: .voice
         )
+        try validatePreparation(reservation)
+        activeVoiceAssociation = .voice(sessionID: sessionID, generation: 1)
+        releasePreparation(reservation)
+    }
+
+    func prepareLiveVoice(
+        providerProfileID: UUID
+    ) async throws -> CapabilityVoicePreparation {
+        let reservation = try beginPreparation(kind: .voice)
+        do {
+            await finalizeProviderActivities()
+            try Task.checkCancellation()
+            try validatePreparation(reservation)
+            activeProviderProfileID = providerProfileID
+            try await prepareBridge(
+                providerProfileID: providerProfileID,
+                isVoice: true
+            )
+            try Task.checkCancellation()
+            try validatePreparation(reservation)
+            return CapabilityVoicePreparation(token: reservation.token)
+        } catch {
+            releasePreparation(reservation)
+            throw error
+        }
     }
 
     func finishLiveVoice() async {
+        releasePreparation(kind: .voice)
         declinePendingApprovals(for: .close)
         activeVoiceAssociation = nil
         await finalizeProviderActivities()
@@ -1311,6 +1353,7 @@ final class CapabilityController: ObservableObject {
 
     private func beginSettingsMutation() throws {
         guard !settingsMutationInProgress,
+              preparationReservation == nil,
               activeTypedAssociation == nil,
               activeVoiceAssociation == nil,
               pendingApprovalCount == 0,
@@ -1318,6 +1361,35 @@ final class CapabilityController: ObservableObject {
               callContexts.isEmpty
         else { throw CapabilityControllerError.settingsBusy }
         settingsMutationInProgress = true
+    }
+
+    private func beginPreparation(
+        kind: PreparationKind
+    ) throws -> PreparationReservation {
+        guard !settingsMutationInProgress, preparationReservation == nil else {
+            throw CapabilityControllerError.settingsBusy
+        }
+        let reservation = PreparationReservation(token: UUID(), kind: kind)
+        preparationReservation = reservation
+        return reservation
+    }
+
+    private func validatePreparation(
+        _ reservation: PreparationReservation
+    ) throws {
+        guard preparationReservation == reservation else {
+            throw CapabilityControllerError.staleGeneration
+        }
+    }
+
+    private func releasePreparation(_ reservation: PreparationReservation) {
+        guard preparationReservation == reservation else { return }
+        preparationReservation = nil
+    }
+
+    private func releasePreparation(kind: PreparationKind) {
+        guard preparationReservation?.kind == kind else { return }
+        preparationReservation = nil
     }
 
     private func settingsRepositoryOrThrow() throws -> SQLiteCapabilityRepository {
@@ -1539,29 +1611,46 @@ final class CapabilityController: ObservableObject {
         providerProfileID: UUID,
         kind: ProviderKind
     ) async throws -> ReasoningRequest {
-        guard !settingsMutationInProgress else {
-            throw CapabilityControllerError.settingsBusy
-        }
-        await finalizeProviderActivities()
         let association = CapabilityAssociation.typed(
             conversationID: request.conversationID,
             turnID: request.turnID,
             generation: request.generation
         )
-        if kind == .codexOAuth {
-            try await prepareBridge(
-                providerProfileID: providerProfileID,
-                isVoice: false
+        let reservation = try beginPreparation(
+            kind: .typed(turnID: request.turnID, generation: request.generation)
+        )
+        let capabilityCatalog: CapabilityCatalogSnapshot
+        do {
+            await finalizeProviderActivities()
+            try Task.checkCancellation()
+            try validatePreparation(reservation)
+            if kind == .codexOAuth {
+                try await prepareBridge(
+                    providerProfileID: providerProfileID,
+                    isVoice: false
+                )
+                try Task.checkCancellation()
+                try validatePreparation(reservation)
+            }
+            capabilityCatalog = await catalog(providerProfileID: providerProfileID)
+            try Task.checkCancellation()
+            try validatePreparation(reservation)
+            try admitTypedAssociation(
+                association,
+                providerProfileID: providerProfileID
             )
+            releasePreparation(reservation)
+        } catch {
+            releasePreparation(reservation)
+            throw error
         }
-        admitTypedAssociation(association, providerProfileID: providerProfileID)
         return ReasoningRequest(
             conversationID: request.conversationID,
             turnID: request.turnID,
             generation: request.generation,
             context: request.context,
             userText: request.userText,
-            capabilityCatalog: await catalog(providerProfileID: providerProfileID),
+            capabilityCatalog: capabilityCatalog,
             voiceHistoryAttachment: request.voiceHistoryAttachment
         )
     }

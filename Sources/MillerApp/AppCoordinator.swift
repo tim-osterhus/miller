@@ -341,6 +341,7 @@ final class AppPresentationModel: ObservableObject {
     @Published private var liveVoiceAvailability: LiveVoiceState
     private var liveVoiceAvailabilityGeneration: UInt64 = 0
     private var liveVoiceEventGeneration: UInt64 = 0
+    private var pendingVoiceCapabilityPreparation: CapabilityVoicePreparation?
     private var providerSnapshotGeneration: UInt64 = 0
     private var conversationProjectionGeneration: UInt64 = 0
     private var voiceHistoryGeneration: UInt64 = 0
@@ -1092,10 +1093,10 @@ final class AppPresentationModel: ObservableObject {
             guard let profileID = providerProfiles.first(where: \.isSelected)?.id
             else { return }
             do {
-                try await capabilityController.prepareLiveVoice(
-                    providerProfileID: profileID
-                )
+                pendingVoiceCapabilityPreparation = try await capabilityController
+                    .prepareLiveVoice(providerProfileID: profileID)
             } catch {
+                pendingVoiceCapabilityPreparation = nil
                 voiceState = .failed
                 liveVoiceFailureCode = "capability_bridge_unavailable"
                 return
@@ -1115,6 +1116,7 @@ final class AppPresentationModel: ObservableObject {
                 await self?.applyLiveEvent(event, generation: eventGeneration)
             }
         } catch {
+            pendingVoiceCapabilityPreparation = nil
             await capabilityController?.finishLiveVoice()
             voiceState = .failed
             liveVoiceFailureCode = Self.liveFailureCode(error)
@@ -1225,6 +1227,7 @@ final class AppPresentationModel: ObservableObject {
         let waiters = liveVoiceCleanupWaiters
         liveVoiceCleanupWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+        pendingVoiceCapabilityPreparation = nil
         await capabilityController?.finishLiveVoice()
     }
 
@@ -1240,12 +1243,30 @@ final class AppPresentationModel: ObservableObject {
         switch event {
         case let .sessionAdmitted(id):
             do {
+                if let capabilityController {
+                    guard let preparation = pendingVoiceCapabilityPreparation else {
+                        throw CapabilityControllerError.staleGeneration
+                    }
+                    try capabilityController.admitVoiceAssociation(
+                        sessionID: id,
+                        preparation: preparation
+                    )
+                    pendingVoiceCapabilityPreparation = nil
+                }
+            } catch {
+                pendingVoiceCapabilityPreparation = nil
+                voiceState = .failed
+                liveVoiceFailureCode = "capability_bridge_unavailable"
+                await capabilityController?.finishLiveVoice()
+                Task { [liveVoice] in await liveVoice.end() }
+                return
+            }
+            do {
                 try await liveTranscriptRecorder.begin(
                     sessionID: id,
                     conversationID: nil,
                     activationSource: pendingVoiceActivationSource
                 )
-                capabilityController?.admitVoiceAssociation(sessionID: id)
             } catch {
                 presentTranscriptPersistenceFailure()
             }

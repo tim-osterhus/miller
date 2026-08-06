@@ -342,10 +342,13 @@ struct CapabilityControllerTests {
         )
         await fixture.controller.start()
         if isLiveVoice {
-            try await fixture.controller.prepareLiveVoice(
+            let preparation = try await fixture.controller.prepareLiveVoice(
                 providerProfileID: fixture.profileID
             )
-            fixture.controller.admitVoiceAssociation(sessionID: UUID())
+            try fixture.controller.admitVoiceAssociation(
+                sessionID: UUID(),
+                preparation: preparation
+            )
         } else {
             let request = ReasoningRequest(
                 conversationID: ConversationID(),
@@ -459,10 +462,13 @@ struct CapabilityControllerTests {
             bridgeBox: bridgeBox,
             sessionDelay: .milliseconds(100)
         )
-        try await fixture.controller.prepareLiveVoice(
+        let preparation = try await fixture.controller.prepareLiveVoice(
             providerProfileID: fixture.profileID
         )
-        fixture.controller.admitVoiceAssociation(sessionID: UUID())
+        try fixture.controller.admitVoiceAssociation(
+            sessionID: UUID(),
+            preparation: preparation
+        )
         let callID = CapabilityCallID()
         let call = Task {
             try await bridgeClient(bridgeBox).call(
@@ -644,7 +650,7 @@ struct CapabilityControllerTests {
     func providerApprovalWithoutAcceptCannotBeAllowedByTheUI() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -882,10 +888,13 @@ struct CapabilityControllerTests {
             providerCallbackAuthorityBox: authorityBox
         )
         if isVoice {
-            try await fixture.controller.prepareLiveVoice(
+            let preparation = try await fixture.controller.prepareLiveVoice(
                 providerProfileID: fixture.profileID
             )
-            fixture.controller.admitVoiceAssociation(sessionID: UUID())
+            try fixture.controller.admitVoiceAssociation(
+                sessionID: UUID(),
+                preparation: preparation
+            )
         } else {
             _ = try await fixture.controller.prepareRequest(
                 ReasoningRequest(
@@ -1001,12 +1010,15 @@ struct CapabilityControllerTests {
     @Test
     func liveProviderCallbacksAuditOnlyTheAdmittedVoiceSession() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
-        try await fixture.controller.prepareLiveVoice(
+        let firstPreparation = try await fixture.controller.prepareLiveVoice(
             providerProfileID: fixture.profileID
         )
         let callbacks = fixture.controller.capturedProviderCallbacks()
         let sessionID = UUID()
-        fixture.controller.admitVoiceAssociation(sessionID: sessionID)
+        try fixture.controller.admitVoiceAssociation(
+            sessionID: sessionID,
+            preparation: firstPreparation
+        )
         let activity = CodexCapabilityActivity(
             threadID: "voice-thread",
             turnID: "voice-turn",
@@ -1026,10 +1038,13 @@ struct CapabilityControllerTests {
         #expect(await fixture.audit.records.map(\.voiceSessionID) == [sessionID])
         await fixture.controller.finishLiveVoice()
 
-        try await fixture.controller.prepareLiveVoice(
+        let secondPreparation = try await fixture.controller.prepareLiveVoice(
             providerProfileID: fixture.profileID
         )
-        fixture.controller.admitVoiceAssociation(sessionID: UUID())
+        try fixture.controller.admitVoiceAssociation(
+            sessionID: UUID(),
+            preparation: secondPreparation
+        )
         await callbacks.activity(activity)
         #expect(await fixture.audit.beginRows == 1)
         await fixture.controller.finishLiveVoice()
@@ -1307,7 +1322,7 @@ struct CapabilityControllerTests {
         await fixture.controller.start()
         let conversationID = ConversationID()
         let turnID = TurnID()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(conversationID: conversationID, turnID: turnID, generation: 12),
             providerProfileID: fixture.profileID
         )
@@ -1358,7 +1373,7 @@ struct CapabilityControllerTests {
     func opaqueProviderTerminalActivityAuditsExactlyOnceWithoutInventedApproval() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1399,7 +1414,7 @@ struct CapabilityControllerTests {
             audit: audit
         )
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1446,7 +1461,7 @@ struct CapabilityControllerTests {
     func providerAuditRetainsTheFirstSeenStartTimestamp() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1493,7 +1508,7 @@ struct CapabilityControllerTests {
     func providerStartedActivityPersistsBeginBeforeTerminal() async throws {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1529,7 +1544,7 @@ struct CapabilityControllerTests {
             audit: audit
         )
         await first.controller.start()
-        first.controller.admitTypedAssociation(
+        try first.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1571,7 +1586,7 @@ struct CapabilityControllerTests {
         await fixture.controller.start()
         let conversationID = ConversationID()
         let turnID = TurnID()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: conversationID,
                 turnID: turnID,
@@ -1642,7 +1657,7 @@ struct CapabilityControllerTests {
             audit: audit
         )
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1699,7 +1714,7 @@ struct CapabilityControllerTests {
         )
         await fixture.controller.start()
         let turnID = TurnID()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: turnID,
@@ -1743,7 +1758,7 @@ struct CapabilityControllerTests {
             audit: audit
         )
         await fixture.controller.start()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: TurnID(),
@@ -1801,7 +1816,7 @@ struct CapabilityControllerTests {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
         let turnID = TurnID()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: turnID,
@@ -1839,7 +1854,7 @@ struct CapabilityControllerTests {
         let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
         await fixture.controller.start()
         let turnID = TurnID()
-        fixture.controller.admitTypedAssociation(
+        try fixture.controller.admitTypedAssociation(
             .typed(
                 conversationID: ConversationID(),
                 turnID: turnID,
@@ -2090,7 +2105,7 @@ struct CapabilityControllerTests {
         let association = CapabilityAssociation.typed(
             conversationID: ConversationID(), turnID: TurnID(), generation: 1
         )
-        controller.admitTypedAssociation(association, providerProfileID: profileID)
+        try controller.admitTypedAssociation(association, providerProfileID: profileID)
 
         await #expect(throws: CapabilityControllerError.settingsBusy) {
             try await controller.setServerPolicyFromSettings(
@@ -2110,6 +2125,144 @@ struct CapabilityControllerTests {
             )
         }
         #expect(await session.calls == 0)
+    }
+
+    @Test
+    func suspendedTypedPreparationReservesAuthorityAgainstSettingsMutation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-typed-preparation-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() },
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+        let request = ReasoningRequest(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 1,
+            context: [], userText: "Prepare"
+        )
+        let preparation = Task { @MainActor in
+            try await controller.prepareRequest(
+                request, providerProfileID: UUID(), kind: .codexOAuth
+            )
+        }
+        #expect(await waitForConfigurationRequest(loading))
+        let mutation = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.setServerPolicyFromSettings(
+                    .fullyTrusted, serverID: server.id
+                )
+                return nil
+            } catch {
+                return error
+            }
+        }
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(await loading.requestCount == 1)
+        await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
+        _ = try await preparation.value
+        #expect(await mutation.value as? CapabilityControllerError == .settingsBusy)
+        await #expect(throws: CapabilityControllerError.settingsBusy) {
+            try await controller.setServerPolicyFromSettings(
+                .fullyTrusted, serverID: server.id
+            )
+        }
+    }
+
+    @Test
+    func suspendedVoicePreparationReservesAuthorityUntilSessionAdmission() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-voice-preparation-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() },
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+        let preparation = Task { @MainActor in
+            try await controller.prepareLiveVoice(providerProfileID: UUID())
+        }
+        #expect(await waitForConfigurationRequest(loading))
+        let mutation = Task { @MainActor () -> (any Error)? in
+            do {
+                try await controller.setServerPolicyFromSettings(
+                    .fullyTrusted, serverID: server.id
+                )
+                return nil
+            } catch {
+                return error
+            }
+        }
+        try await Task.sleep(for: .milliseconds(30))
+
+        #expect(await loading.requestCount == 1)
+        await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
+        let voicePreparation = try await preparation.value
+        #expect(await mutation.value as? CapabilityControllerError == .settingsBusy)
+        try controller.admitVoiceAssociation(
+            sessionID: UUID(),
+            preparation: voicePreparation
+        )
+        await #expect(throws: CapabilityControllerError.settingsBusy) {
+            try await controller.setServerPolicyFromSettings(
+                .fullyTrusted, serverID: server.id
+            )
+        }
+    }
+
+    @Test
+    func cancelledSuspendedPreparationReleasesItsReservation() async throws {
+        let loading = SuspendedRuntimeConfigurationProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await loading.load() }
+        )
+        let firstRequest = ReasoningRequest(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 1,
+            context: [], userText: "First"
+        )
+        let firstPreparation = Task { @MainActor in
+            try await controller.prepareRequest(
+                firstRequest, providerProfileID: UUID(), kind: .codexOAuth
+            )
+        }
+        #expect(await waitForConfigurationRequest(loading))
+        firstPreparation.cancel()
+        await loading.resolveAll(with: .init(servers: [], toolPolicies: [:]))
+        await #expect(throws: CancellationError.self) {
+            _ = try await firstPreparation.value
+        }
+
+        let secondRequest = ReasoningRequest(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 2,
+            context: [], userText: "Second"
+        )
+        let secondPreparation = Task { @MainActor in
+            try await controller.prepareRequest(
+                secondRequest, providerProfileID: UUID(), kind: .codexOAuth
+            )
+        }
+        _ = try await secondPreparation.value
+        await controller.finishTypedAssociation(
+            turnID: secondRequest.turnID,
+            generation: secondRequest.generation
+        )
     }
 
     @Test
@@ -2161,7 +2314,7 @@ struct CapabilityControllerTests {
         let association = CapabilityAssociation.typed(
             conversationID: ConversationID(), turnID: TurnID(), generation: 1
         )
-        controller.admitTypedAssociation(association, providerProfileID: profileID)
+        try controller.admitTypedAssociation(association, providerProfileID: profileID)
         _ = try await controller.execute(
             callID: CapabilityCallID(),
             capabilityID: CapabilityID(
@@ -2365,6 +2518,39 @@ private actor CapabilitySettingsSecretProbe {
         }
         values[reference] = nil
     }
+}
+
+private actor SuspendedRuntimeConfigurationProbe {
+    private var continuations: [
+        CheckedContinuation<CapabilityRuntimeConfiguration, any Error>
+    ] = []
+    private(set) var requestCount = 0
+
+    func load() async throws -> CapabilityRuntimeConfiguration {
+        requestCount += 1
+        return try await withCheckedThrowingContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func resolveAll(with configuration: CapabilityRuntimeConfiguration) {
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending {
+            continuation.resume(returning: configuration)
+        }
+    }
+}
+
+private func waitForConfigurationRequest(
+    _ probe: SuspendedRuntimeConfigurationProbe,
+    minimum: Int = 1
+) async -> Bool {
+    for _ in 0..<1_000 {
+        if await probe.requestCount >= minimum { return true }
+        await Task.yield()
+    }
+    return false
 }
 
 private struct ControllerFixture {
