@@ -2,10 +2,123 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-vendor_root="$repo_root/.build/vendor/wakeword"
+canonical_vendor_root="$repo_root/.build/vendor/wakeword"
+vendor_root="$canonical_vendor_root"
+if [[ "${MILLER_WAKEWORD_BOOTSTRAP_TESTING:-0}" == "1" ]]; then
+  vendor_root="${MILLER_WAKEWORD_VENDOR_ROOT:-}"
+  [[ "$vendor_root" == "/private/tmp/miller-wakeword-test-${EUID}-"*/wakeword ]] || {
+    print -u2 "refusing unsafe wakeword test vendor override"
+    exit 1
+  }
+  test_parent="${vendor_root:h}"
+  [[ -d "$test_parent" && ! -L "$test_parent" && \
+     "$(stat -f '%u' "$test_parent")" == "$EUID" && \
+     "$(stat -f '%Lp' "$test_parent")" == "700" ]] || {
+    print -u2 "refusing unsafe wakeword test parent"
+    exit 1
+  }
+elif [[ -n "${MILLER_WAKEWORD_VENDOR_ROOT:-}" ]]; then
+  print -u2 "wakeword vendor override is test-only"
+  exit 1
+fi
 downloads="$vendor_root/downloads"
 extracted="$vendor_root/extracted"
 locked="$vendor_root/locked"
+staging="$vendor_root/locked-staging"
+
+reject_symlink_paths() {
+  local candidate
+  for candidate in "$@"; do
+    [[ ! -L "$candidate" ]] || {
+      print -u2 "refusing symbolic-link wakeword path: $candidate"
+      return 1
+    }
+  done
+}
+
+reject_tree_symlinks() {
+  local root="$1"
+  reject_symlink_paths "$root" || return 1
+  [[ ! -e "$root" ]] && return 0
+  if find -P "$root" -type l -print -quit | grep -q .; then
+    print -u2 "refusing symbolic link beneath wakeword path: $root"
+    return 1
+  fi
+}
+
+run_safety_self_test() {
+  typeset -g wakeword_bootstrap_self_test_root
+  wakeword_bootstrap_self_test_root="$(mktemp -d "/private/tmp/miller-wakeword-test-${EUID}-XXXXXX")"
+  chmod 700 "$wakeword_bootstrap_self_test_root"
+  local test_root="$wakeword_bootstrap_self_test_root"
+  local mutation_target="$test_root/mutation-target"
+  mkdir "$mutation_target"
+  print -n "unchanged" > "$mutation_target/marker"
+
+  cleanup_wakeword_self_test() {
+    [[ "$wakeword_bootstrap_self_test_root" == "/private/tmp/miller-wakeword-test-${EUID}-"* && \
+       -d "$wakeword_bootstrap_self_test_root" && \
+       ! -L "$wakeword_bootstrap_self_test_root" ]] || return 1
+    find -P "$wakeword_bootstrap_self_test_root" -depth -delete
+  }
+  trap cleanup_wakeword_self_test EXIT
+
+  ln -s "$mutation_target" "$test_root/wakeword"
+  if env \
+      MILLER_WAKEWORD_BOOTSTRAP_TESTING=1 \
+      MILLER_WAKEWORD_VENDOR_ROOT="$test_root/wakeword" \
+      "$0" >/dev/null 2>&1; then
+    print -u2 "bootstrap accepted a symbolic-link internal root"
+    exit 1
+  fi
+  [[ "$(<"$mutation_target/marker")" == "unchanged" ]] || {
+    print -u2 "bootstrap mutated an internal-root symlink target"
+    exit 1
+  }
+  unlink "$test_root/wakeword"
+
+  mkdir -p "$test_root/wakeword/downloads"
+  ln -s "$mutation_target" "$test_root/wakeword/extracted"
+  if env \
+      MILLER_WAKEWORD_BOOTSTRAP_TESTING=1 \
+      MILLER_WAKEWORD_VENDOR_ROOT="$test_root/wakeword" \
+      "$0" >/dev/null 2>&1; then
+    print -u2 "bootstrap accepted a symbolic-link internal staging root"
+    exit 1
+  fi
+  [[ "$(<"$mutation_target/marker")" == "unchanged" ]] || {
+    print -u2 "bootstrap mutated an internal staging symlink target"
+    exit 1
+  }
+  unlink "$test_root/wakeword/extracted"
+
+  mkdir -p \
+    "$test_root/wakeword/extracted" \
+    "$test_root/wakeword/locked"
+  ln -s "$mutation_target/marker" \
+    "$test_root/wakeword/downloads/sherpa.tar.bz2.partial"
+  if env \
+      MILLER_WAKEWORD_BOOTSTRAP_TESTING=1 \
+      MILLER_WAKEWORD_VENDOR_ROOT="$test_root/wakeword" \
+      "$0" >/dev/null 2>&1; then
+    print -u2 "bootstrap accepted a symbolic-link partial download"
+    exit 1
+  fi
+  [[ "$(<"$mutation_target/marker")" == "unchanged" ]] || {
+    print -u2 "bootstrap mutated a partial-download symlink target"
+    exit 1
+  }
+  print "wakeword bootstrap symlink safety verified"
+}
+
+if [[ "$#" == 1 && "$1" == "--self-test-safety" ]]; then
+  run_safety_self_test
+  exit 0
+fi
+[[ "$#" == 0 ]] || {
+  print -u2 "usage: $0 [--self-test-safety]"
+  exit 64
+}
 
 sherpa_url="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-macos-xcframework-static.tar.bz2"
 model_url="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2"
@@ -17,12 +130,17 @@ typeset -A archive_hashes=(
   onnx.zip 4752fa848d9d36143e3942537ff71736d2e581ce192a528482f7edd8d02c9ebf
 )
 
-[[ "$vendor_root" == "$repo_root/.build/vendor/wakeword" ]] || exit 1
-[[ ! -L "$repo_root/.build" && ! -L "$repo_root/.build/vendor" && \
-   ! -L "$vendor_root" ]] || {
-  print -u2 "refusing symbolic-link wakeword vendor root"
-  exit 1
-}
+if [[ "$vendor_root" == "$canonical_vendor_root" ]]; then
+  reject_symlink_paths \
+    "$repo_root/.build" \
+    "$repo_root/.build/vendor" || exit 1
+fi
+reject_symlink_paths \
+  "$vendor_root" "$downloads" "$extracted" "$locked" "$staging" || exit 1
+reject_tree_symlinks "$downloads" || exit 1
+reject_tree_symlinks "$extracted" || exit 1
+reject_tree_symlinks "$locked" || exit 1
+reject_tree_symlinks "$staging" || exit 1
 
 # The three compressed archives total less than 45 MiB. Extraction, staging,
 # and Swift compilation remain under a conservative 1 GiB peak allowance.
@@ -40,22 +158,39 @@ fetch() {
   local url="$1"
   local destination="$2"
   local expected="$3"
-  if [[ -f "$destination" ]] && \
+  reject_symlink_paths "$downloads" "$destination" || exit 1
+  if [[ -f "$destination" && ! -L "$destination" ]] && \
      [[ "$(shasum -a 256 "$destination" | awk '{print $1}')" == "$expected" ]]; then
     return
   fi
-  [[ ! -e "$destination" || (-f "$destination" && ! -L "$destination") ]] || {
-    print -u2 "refusing unsafe archive path: $destination"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || {
+      print -u2 "refusing unsafe archive path: $destination"
+      exit 1
+    }
+    unlink "$destination"
+  fi
+  local partial="$destination.partial"
+  reject_symlink_paths "$partial" || exit 1
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    [[ -f "$partial" && ! -L "$partial" ]] || {
+      print -u2 "refusing unsafe partial archive path: $partial"
+      exit 1
+    }
+    unlink "$partial"
+  fi
+  curl -fL --retry 3 --output "$partial" "$url"
+  [[ -f "$partial" && ! -L "$partial" ]] || {
+    print -u2 "download did not produce a regular partial archive"
     exit 1
   }
-  curl -fL --retry 3 --output "$destination.partial" "$url"
-  local actual="$(shasum -a 256 "$destination.partial" | awk '{print $1}')"
+  local actual="$(shasum -a 256 "$partial" | awk '{print $1}')"
   [[ "$actual" == "$expected" ]] || {
-    unlink "$destination.partial"
+    unlink "$partial"
     print -u2 "archive hash mismatch: ${destination:t}"
     exit 1
   }
-  mv "$destination.partial" "$destination"
+  mv "$partial" "$destination"
 }
 
 fetch "$sherpa_url" "$downloads/sherpa.tar.bz2" "$archive_hashes[sherpa.tar.bz2]"
@@ -72,8 +207,17 @@ safe_tar_extract() {
     print -u2 "unsafe tar archive: ${archive:t}"
     exit 1
   }
+  tar -tvf "$archive" | awk '
+    substr($1, 1, 1) == "l" || substr($1, 1, 1) == "h" { bad = 1 }
+    END { exit bad }
+  ' || {
+    print -u2 "tar archive contains links: ${archive:t}"
+    exit 1
+  }
+  reject_symlink_paths "$extracted" "$destination" || exit 1
   mkdir -p "$destination"
   tar -xf "$archive" -C "$destination"
+  reject_tree_symlinks "$destination" || exit 1
 }
 
 safe_zip_extract() {
@@ -86,10 +230,20 @@ safe_zip_extract() {
     print -u2 "unsafe zip archive: ${archive:t}"
     exit 1
   }
+  zipinfo -l "$archive" | awk '
+    substr($1, 1, 1) == "l" { bad = 1 }
+    END { exit bad }
+  ' || {
+    print -u2 "zip archive contains symbolic links: ${archive:t}"
+    exit 1
+  }
+  reject_symlink_paths "$extracted" "$destination" || exit 1
   mkdir -p "$destination"
   unzip -q "$archive" -d "$destination"
+  reject_tree_symlinks "$destination" || exit 1
 }
 
+reject_tree_symlinks "$extracted" || exit 1
 find -P "$extracted" -depth -delete 2>/dev/null || true
 mkdir -p "$extracted"
 safe_tar_extract "$downloads/sherpa.tar.bz2" "$extracted/sherpa"
@@ -117,7 +271,7 @@ joiner="$(one_file "$extracted/model" joiner-epoch-12-avg-2-chunk-16-left-64.int
 bpe="$(one_file "$extracted/model" bpe.model)"
 tokens="$(one_file "$extracted/model" tokens.txt)"
 
-staging="$vendor_root/locked-staging"
+reject_tree_symlinks "$staging" || exit 1
 find -P "$staging" -depth -delete 2>/dev/null || true
 mkdir -p \
   "$staging/include/sherpa-onnx/c-api" \
@@ -133,12 +287,15 @@ cp "$joiner" "$staging/model/joiner.onnx"
 cp "$bpe" "$staging/model/bpe.model"
 cp "$tokens" "$staging/model/tokens.txt"
 
+reject_tree_symlinks "$locked" || exit 1
 find -P "$locked" -depth -delete 2>/dev/null || true
 mv "$staging" "$locked"
 chmod -R u=rwX,go=rX "$locked"
 
 # Archives and full extraction trees are transient qualification inputs. Only
 # the explicitly staged arm64 build inputs survive a successful bootstrap.
+reject_tree_symlinks "$downloads" || exit 1
+reject_tree_symlinks "$extracted" || exit 1
 find -P "$downloads" -depth -delete
 find -P "$extracted" -depth -delete
 

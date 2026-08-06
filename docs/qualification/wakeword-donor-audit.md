@@ -27,14 +27,13 @@ uncommitted-worktree, or other Cortana file is an approved source donor.
 The immutable donor selection was checked with:
 
 ```text
-git diff --quiet 8f4af867c575c089f45a8df4768663a521f88203 \
-  8f4af867c575c089f45a8df4768663a521f88203 -- Cortana/WakeWord
+git diff --quiet 8f4af867c575c089f45a8df4768663a521f88203 -- Cortana/WakeWord
 exit status: 0
 ```
 
-This comparison deliberately uses the approved commit as both endpoints. It
-confirms that the copied source set is anchored to one immutable Git tree
-without reading or making any claim about the donor's current working tree.
+This comparison checked the donor's current `Cortana/WakeWord` subtree against
+the approved immutable commit and found no divergence at audit time. Donor
+source bytes were still read only from the pinned commit with `git show`.
 
 VoiceInk was neither inspected nor used. No VoiceInk source, path, installed
 application, generated artifact, or metadata was consulted.
@@ -70,3 +69,12 @@ left `19,948,830,720` bytes free, and proved the vendor root absent. A
 subsequent ordinary focused test completed without recreating the vendor root,
 proving that non-wake tests do not download wakeword inputs. The existing
 `.artifacts/release/Miller.app` and running Miller process were preserved.
+
+The review repair added deterministic `--self-test-safety` probes to both the
+bootstrap and verifier. They reject vendor-root, nested staging-root,
+locked-root, and partial-download symlinks while proving their targets remain
+unchanged. The real pinned bootstrap and verifier then passed, as did all 813
+Swift tests, all 49 gateway tests, and the seven-test ordinary no-download
+wakeword run. The final repair cleanup again removed the vendor inputs and all
+ordinary build/cache roots while preserving the release app and running
+process.
