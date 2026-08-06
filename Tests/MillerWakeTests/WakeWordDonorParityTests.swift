@@ -191,6 +191,61 @@ struct WakeWordDonorParityTests {
     }
 
     @Test @MainActor
+    func newestEnableWaitsForSupersededStartupAndReconcilesMonitoring() async {
+        let recorder = GatedRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe() }
+        )
+
+        let firstEnable = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+        await recorder.waitForStartRequest(count: 1)
+        let newestEnable = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+
+        recorder.releaseStart()
+        await recorder.waitForStartRequest(count: 2)
+        recorder.releaseStart()
+        await firstEnable.value
+        await newestEnable.value
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.isWakeMonitoring)
+        #expect(recorder.startCount == 2)
+        #expect(recorder.stopCount == 1)
+    }
+
+    @Test @MainActor
+    func newestEnableWaitsForSupersededStopAndReconcilesMonitoring() async {
+        let recorder = GatedStopRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe() }
+        )
+        await controller.setEnabled(true)
+
+        let disable = Task { @MainActor in
+            await controller.setEnabled(false)
+        }
+        await recorder.waitForStopRequest()
+        let newestEnable = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+
+        recorder.releaseStop()
+        await disable.value
+        await newestEnable.value
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.isWakeMonitoring)
+        #expect(recorder.startCount == 2)
+        #expect(recorder.stopCount == 1)
+    }
+
+    @Test @MainActor
     func detectorFailureReleasesCaptureBeforePublishingUnavailable() async {
         let recorder = RecorderProbe()
         let detector = DetectorProbe(process: { _ in
@@ -397,18 +452,18 @@ private final class RecorderProbe: WakeWordCaptureOwning {
 private final class GatedRecorderProbe: WakeWordCaptureOwning {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
     private(set) var isWakeMonitoring = false
+    private(set) var startCount = 0
     private(set) var stopCount = 0
-    private var startRequested = false
-    private var startWaiters = [CheckedContinuation<Void, Never>]()
-    private var startGate: CheckedContinuation<Void, Never>?
+    private var startWaiters = [(Int, CheckedContinuation<Void, Never>)]()
+    private var startGates = [CheckedContinuation<Void, Never>]()
 
     func startWakeMonitoring() async throws -> UUID {
-        startRequested = true
-        let waiters = startWaiters
-        startWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        startCount += 1
+        let ready = startWaiters.filter { $0.0 <= startCount }
+        startWaiters.removeAll { $0.0 <= startCount }
+        ready.forEach { $0.1.resume() }
         await withCheckedContinuation { continuation in
-            startGate = continuation
+            startGates.append(continuation)
         }
         isWakeMonitoring = true
         return UUID()
@@ -420,16 +475,57 @@ private final class GatedRecorderProbe: WakeWordCaptureOwning {
         stopCount += 1
     }
 
-    func waitForStartRequest() async {
-        guard !startRequested else { return }
+    func waitForStartRequest(count: Int = 1) async {
+        guard startCount < count else { return }
         await withCheckedContinuation { continuation in
-            startWaiters.append(continuation)
+            startWaiters.append((count, continuation))
         }
     }
 
     func releaseStart() {
-        startGate?.resume()
-        startGate = nil
+        guard !startGates.isEmpty else { return }
+        startGates.removeFirst().resume()
+    }
+}
+
+@MainActor
+private final class GatedStopRecorderProbe: WakeWordCaptureOwning {
+    var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    private(set) var isWakeMonitoring = false
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private var stopRequested = false
+    private var stopWaiters = [CheckedContinuation<Void, Never>]()
+    private var stopGate: CheckedContinuation<Void, Never>?
+
+    func startWakeMonitoring() async throws -> UUID {
+        startCount += 1
+        isWakeMonitoring = true
+        return UUID()
+    }
+
+    func stopWakeMonitoring() async {
+        stopRequested = true
+        let waiters = stopWaiters
+        stopWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            stopGate = continuation
+        }
+        isWakeMonitoring = false
+        stopCount += 1
+    }
+
+    func waitForStopRequest() async {
+        guard !stopRequested else { return }
+        await withCheckedContinuation { continuation in
+            stopWaiters.append(continuation)
+        }
+    }
+
+    func releaseStop() {
+        stopGate?.resume()
+        stopGate = nil
     }
 }
 

@@ -29,6 +29,8 @@ public final class WakeWordProductionController: ObservableObject {
     private var monitoringSessionID: UUID?
     private var sampleCallbackEpoch: UInt64?
     private var lifecycleEpoch: UInt64 = 0
+    private var activeLifecycleEpochs = Set<UInt64>()
+    private var lifecycleWaiters = [LifecycleWaiter]()
     private var startupEpoch: UInt64?
     private var startupWaiters = [CheckedContinuation<Void, Never>]()
     private var isEnabled = false
@@ -61,8 +63,13 @@ public final class WakeWordProductionController: ObservableObject {
             return
         }
         let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
         isEnabled = enabled
         if enabled {
+            await waitForEarlierLifecycleOperations(operationEpoch)
+            guard acceptsLifecycleOperation(operationEpoch), isEnabled else {
+                return
+            }
             await startMonitoringIfEligible(operationEpoch: operationEpoch)
         } else {
             await stop(
@@ -78,6 +85,7 @@ public final class WakeWordProductionController: ObservableObject {
         if case .unavailable(let reason) = state {
             isEnabled = false
             let operationEpoch = beginLifecycleOperation()
+            defer { finishLifecycleOperation(operationEpoch) }
             await stop(
                 disable: true,
                 shutDownDetector: false,
@@ -96,6 +104,7 @@ public final class WakeWordProductionController: ObservableObject {
     public func applyDetectorTuningFromSettings() async throws -> WakeWordState {
         guard isEnabled else { return state }
         let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
         await stop(
             disable: false,
             shutDownDetector: true,
@@ -112,6 +121,7 @@ public final class WakeWordProductionController: ObservableObject {
     public func suspend(_ reason: WakeWordSuspensionReason) async {
         guard isEnabled else { return }
         let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
         coordinator?.suspend(reason)
         state = .suspended(reason)
         clearSampleCallback()
@@ -131,6 +141,7 @@ public final class WakeWordProductionController: ObservableObject {
 
     public func shutdown() async -> Bool {
         let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
         isEnabled = false
         await stop(
             disable: true,
@@ -192,6 +203,7 @@ public final class WakeWordProductionController: ObservableObject {
                   isEnabled,
                   self.coordinator === coordinator,
                   coordinator.accepts(generation) else {
+                settleSupersededStartup(coordinator)
                 clearSampleCallback(ifOwnedBy: operationEpoch)
                 if recorder.isWakeMonitoring {
                     await recorder.stopWakeMonitoring()
@@ -204,6 +216,7 @@ public final class WakeWordProductionController: ObservableObject {
                   self.coordinator === coordinator,
                   coordinator.accepts(generation),
                   coordinator.currentState() == .monitoring else {
+                settleSupersededStartup(coordinator)
                 clearSampleCallback(ifOwnedBy: operationEpoch)
                 monitoringSessionID = nil
                 if recorder.isWakeMonitoring {
@@ -268,6 +281,7 @@ public final class WakeWordProductionController: ObservableObject {
             return
         }
         let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
         clearSampleCallback(ifOwnedBy: callbackEpoch)
         monitoringSessionID = nil
         eventCoordinator.shutdown()
@@ -299,13 +313,31 @@ public final class WakeWordProductionController: ObservableObject {
         }
         if recorder.isWakeMonitoring {
             await recorder.stopWakeMonitoring()
-            guard acceptsLifecycleOperation(operationEpoch) else { return }
+            guard acceptsLifecycleOperation(operationEpoch) else {
+                settleSupersededStop(
+                    disable: disable,
+                    shutDownDetector: shutDownDetector
+                )
+                return
+            }
         }
         await waitForStartupToSettle()
-        guard acceptsLifecycleOperation(operationEpoch) else { return }
+        guard acceptsLifecycleOperation(operationEpoch) else {
+            settleSupersededStop(
+                disable: disable,
+                shutDownDetector: shutDownDetector
+            )
+            return
+        }
         if recorder.isWakeMonitoring {
             await recorder.stopWakeMonitoring()
-            guard acceptsLifecycleOperation(operationEpoch) else { return }
+            guard acceptsLifecycleOperation(operationEpoch) else {
+                settleSupersededStop(
+                    disable: disable,
+                    shutDownDetector: shutDownDetector
+                )
+                return
+            }
         }
 
         if disable, !shutDownDetector {
@@ -318,7 +350,35 @@ public final class WakeWordProductionController: ObservableObject {
 
     private func beginLifecycleOperation() -> UInt64 {
         lifecycleEpoch &+= 1
+        activeLifecycleEpochs.insert(lifecycleEpoch)
         return lifecycleEpoch
+    }
+
+    private func finishLifecycleOperation(_ operationEpoch: UInt64) {
+        activeLifecycleEpochs.remove(operationEpoch)
+        let ready = lifecycleWaiters.filter { waiter in
+            !activeLifecycleEpochs.contains { $0 < waiter.operationEpoch }
+        }
+        lifecycleWaiters.removeAll { waiter in
+            !activeLifecycleEpochs.contains { $0 < waiter.operationEpoch }
+        }
+        ready.forEach { $0.continuation.resume() }
+    }
+
+    private func waitForEarlierLifecycleOperations(
+        _ operationEpoch: UInt64
+    ) async {
+        guard activeLifecycleEpochs.contains(where: { $0 < operationEpoch }) else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            lifecycleWaiters.append(
+                LifecycleWaiter(
+                    operationEpoch: operationEpoch,
+                    continuation: continuation
+                )
+            )
+        }
     }
 
     private func acceptsLifecycleOperation(_ candidate: UInt64) -> Bool {
@@ -353,6 +413,27 @@ public final class WakeWordProductionController: ObservableObject {
         recorder.onSamples = nil
         sampleCallbackEpoch = nil
     }
+
+    private func settleSupersededStop(
+        disable: Bool,
+        shutDownDetector: Bool
+    ) {
+        if disable, !shutDownDetector {
+            coordinator?.finishStopping()
+        }
+    }
+
+    private func settleSupersededStartup(
+        _ eventCoordinator: WakeWordCoordinator
+    ) {
+        guard eventCoordinator.currentState() == .starting else { return }
+        eventCoordinator.suspend(.foregroundSession)
+    }
+}
+
+private struct LifecycleWaiter {
+    let operationEpoch: UInt64
+    let continuation: CheckedContinuation<Void, Never>
 }
 
 private enum WakeWordProductionError: LocalizedError {
