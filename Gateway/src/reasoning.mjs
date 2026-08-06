@@ -103,7 +103,15 @@ export class ReasoningOperation {
           continue;
         }
         if (round.toolCalls.length === 0) break;
-        const results = await Promise.all(round.toolCalls.map((call) => this.waitForTool(call)));
+        const waits = round.toolCalls.map((call) => this.waitForTool(call));
+        let results;
+        try {
+          results = await Promise.all(waits);
+        } catch (error) {
+          await this.settlePendingTools("cancelled", error);
+          await Promise.allSettled(waits);
+          throw error;
+        }
         if (round.assistantMessage) context.messages.push(round.assistantMessage);
         for (let index = 0; index < round.toolCalls.length; index += 1) {
           context.messages.push(toolResultMessage(round.toolCalls[index], results[index]));
@@ -121,6 +129,7 @@ export class ReasoningOperation {
         this.send("reasoning.completed");
       }
     } catch (error) {
+      await this.settlePendingTools("cancelled", error);
       if (this.controller.signal.aborted && this.controller.signal.reason !== "response_limit") {
         this.send("reasoning.stopped");
       } else {
@@ -130,11 +139,7 @@ export class ReasoningOperation {
       }
     } finally {
       clearTimeout(timer);
-      for (const pending of this.pendingTools.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error("operation_ended"));
-      }
-      this.pendingTools.clear();
+      await this.settlePendingTools("cancelled", new Error("operation_ended"));
     }
   }
 
@@ -148,17 +153,25 @@ export class ReasoningOperation {
     let usage;
     let assistantMessage;
     const toolCalls = [];
+    const bufferedText = [];
+    let bufferedCharacters = 0;
     for await (const event of stream) {
       if (event.type === "text_delta") {
         const pieces = splitScalars(event.delta, MAXIMUM_DELTA_CHARACTERS);
         for (const text of pieces) {
-          this.responseCharacters += Array.from(text).length;
-          if (this.responseCharacters > MAXIMUM_RESPONSE_CHARACTERS) {
+          const characters = Array.from(text).length;
+          if (this.responseCharacters + bufferedCharacters + characters > MAXIMUM_RESPONSE_CHARACTERS) {
             this.controller.abort("response_limit");
             throw new Error("response_limit");
           }
-          this.send("reasoning.text_delta", { ordinal, text });
-          ordinal += 1;
+          if (toolsAvailable) {
+            bufferedText.push(text);
+            bufferedCharacters += characters;
+          } else {
+            this.responseCharacters += characters;
+            this.send("reasoning.text_delta", { ordinal, text });
+            ordinal += 1;
+          }
         }
       } else if (event.type === "toolcall_end") {
         toolCalls.push(this.admitToolCall(event.toolCall));
@@ -166,12 +179,17 @@ export class ReasoningOperation {
         usage = event.message?.usage;
         assistantMessage = event.message;
       } else if (event.type === "error") {
-        const message = event.error?.errorMessage ?? "provider_failure";
-        if (toolsAvailable && /tools?_unsupported|tools?.*not supported/i.test(message)) {
+        if (toolsAvailable && isToolsUnsupportedError(event.error)) {
           return { ordinal, usage, assistantMessage, toolCalls: [], toolsUnsupported: true };
         }
+        const message = providerErrorMessage(event.error);
         throw new Error(message);
       }
+    }
+    for (const text of bufferedText) {
+      this.responseCharacters += Array.from(text).length;
+      this.send("reasoning.text_delta", { ordinal, text });
+      ordinal += 1;
     }
     return { ordinal, usage, assistantMessage, toolCalls, toolsUnsupported: false };
   }
@@ -202,33 +220,42 @@ export class ReasoningOperation {
   }
 
   waitForTool(call) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingTools.delete(call.callID);
-        this.send("reasoning.tool_event", {
-          call_id: call.callID,
-          capability_id: call.capabilityID,
-          status: "timed_out",
-        });
-        reject(new Error("tool_timeout"));
-      }, this.toolTimeoutMilliseconds);
-      this.pendingTools.set(call.callID, { call, resolve, reject, timer });
-      try {
-        this.send("reasoning.tool_call", {
-          call_id: call.callID,
-          capability_id: call.capabilityID,
-          arguments: call.arguments,
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        this.pendingTools.delete(call.callID);
-        reject(error);
-      }
+    let resolvePending;
+    let rejectPending;
+    const promise = new Promise((resolve, reject) => {
+      resolvePending = resolve;
+      rejectPending = reject;
     });
+    const timer = setTimeout(() => {
+      this.pendingTools.delete(call.callID);
+      this.send("reasoning.tool_event", {
+        call_id: call.callID,
+        capability_id: call.capabilityID,
+        status: "timed_out",
+      });
+      rejectPending(new Error("tool_timeout"));
+    }, this.toolTimeoutMilliseconds);
+    this.pendingTools.set(call.callID, {
+      call, resolve: resolvePending, reject: rejectPending, timer, promise,
+    });
+    try {
+      this.send("reasoning.tool_call", {
+        call_id: call.callID,
+        capability_id: call.capabilityID,
+        arguments: call.arguments,
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      this.pendingTools.delete(call.callID);
+      rejectPending(error);
+    }
+    return promise;
   }
 
   terminatePendingTools(status, error) {
-    for (const pending of this.pendingTools.values()) {
+    const pendingTools = [...this.pendingTools.values()];
+    this.pendingTools.clear();
+    for (const pending of pendingTools) {
       clearTimeout(pending.timer);
       this.send("reasoning.tool_event", {
         call_id: pending.call.callID,
@@ -237,7 +264,11 @@ export class ReasoningOperation {
       });
       pending.reject(error);
     }
-    this.pendingTools.clear();
+    return pendingTools.map((pending) => pending.promise);
+  }
+
+  async settlePendingTools(status, error) {
+    await Promise.allSettled(this.terminatePendingTools(status, error));
   }
 
   send(type, payload = {}) {
@@ -294,8 +325,32 @@ export function mapProviderError(error) {
   if (/\b404\b|model_not_found|unsupported_model/i.test(message)) return "unsupported_model";
   if (/abort/i.test(message)) return "provider_unavailable";
   if (/response_limit/.test(message)) return "response_limit";
+  if (/tool_timeout|capability_timeout/.test(message)) return "capability_timeout";
   if (/fetch|network|connect|socket|timeout/i.test(message)) return "network_unavailable";
   return "provider_unavailable";
+}
+
+function providerErrorMessage(error) {
+  for (const value of [error?.errorMessage, error?.message, error?.error?.message]) {
+    if (typeof value === "string" && value.length > 0) return value.slice(0, 1_024);
+  }
+  return "provider_failure";
+}
+
+function isToolsUnsupportedError(error) {
+  const code = [error?.code, error?.type, error?.error?.code]
+    .find((value) => typeof value === "string") ?? "";
+  const message = providerErrorMessage(error);
+  if (/^(tools?_unsupported|unsupported_tools?|tool_choice_unsupported|unsupported_tool_calls)$/i.test(code)) {
+    return true;
+  }
+  if (/^(tools?_unsupported|unsupported_tools?|tool_choice_unsupported|unsupported_tool_calls)$/i.test(message)) {
+    return true;
+  }
+  const mentionsTools = /\b(tools?|functions?|function calling|tool_choice)\b/i.test(message);
+  const unsupported = /\b(unsupported|not supported|does not support|unavailable)\b/i.test(message);
+  return mentionsTools && unsupported
+    && (code === "" || /unsupported|invalid_request/i.test(code));
 }
 
 function splitScalars(text, size) {

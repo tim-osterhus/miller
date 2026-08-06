@@ -189,6 +189,10 @@ private enum CoreDomainChecks {
     }
 
     static func unknownFailuresUseTheGenericAllowlistedPair() throws {
+        let timeout = MillerFailure(code: "capability_timeout")
+        try require(timeout.code == "capability_timeout", "Tool timeout must remain explicit")
+        try require(timeout.message == "A tool timed out. Try again.", "Tool timeout must be sanitized")
+
         var turn = acceptedTurn()
         try turn.apply(
             .failed(

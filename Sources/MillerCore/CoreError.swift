@@ -35,6 +35,8 @@ public struct MillerFailure: Codable, Equatable, Sendable {
             ("network_unavailable", "The network is unavailable. Try again.")
         case "provider_unavailable":
             ("provider_unavailable", "The provider is unavailable. Try again.")
+        case "capability_timeout":
+            ("capability_timeout", "A tool timed out. Try again.")
         case "unsupported_model":
             ("unsupported_model", "The selected model is not supported.")
         case "request_too_large":

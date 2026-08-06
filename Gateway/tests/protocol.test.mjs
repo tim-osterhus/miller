@@ -14,7 +14,7 @@ import {
   normalizeProviderProfile,
 } from "../src/providers.mjs";
 import { FrameDecoder, validateGatewayRecord } from "../src/protocol.mjs";
-import { ReasoningOperation } from "../src/reasoning.mjs";
+import { mapProviderError, ReasoningOperation } from "../src/reasoning.mjs";
 import * as strictJSON from "../src/strict-json.mjs";
 
 const { requireClosedObject, strictParse, validateProtocolRecord, validateProtocolSequence } = strictJSON;
@@ -73,6 +73,33 @@ async function* events(values) {
 test("JavaScript protocol validator is available", () => {
   assert.equal(typeof validateProtocolRecord, "function");
   assert.equal(typeof validateProtocolSequence, "function");
+});
+
+test("reasoning failures are closed and empty tool schemas are valid objects", () => {
+  const session_id = crypto.randomUUID();
+  const request_id = crypto.randomUUID();
+  const turn_id = crypto.randomUUID();
+  const failure = {
+    protocol: "miller.gateway", version: 1, type: "reasoning.failed",
+    session_id, request_id, turn_id, generation: 1,
+    error_code: "capability_timeout",
+  };
+  validateGatewayRecord(failure);
+  assert.throws(() => validateGatewayRecord({
+    ...failure, error_code: "dependency_private_timeout",
+  }), /invalid_(?:record|field)/);
+  validateGatewayRecord({
+    protocol: "miller.gateway", version: 1, type: "reasoning.start",
+    session_id, request_id, conversation_id: crypto.randomUUID(), turn_id,
+    generation: 1, provider_profile: {
+      kind: "fake", model: "fake", credential_ref: crypto.randomUUID(),
+    }, context: [], user_text: "fixture", tools: [{
+      capability_id: toolFixture.capability_id,
+      name: toolFixture.name,
+      description: toolFixture.description,
+      input_schema: {},
+    }],
+  });
 });
 
 test("production frame decoder rejects incomplete EOF and oversized input", () => {
@@ -745,6 +772,7 @@ test("tool wait supports timeout, cancellation, malformed args, and unsupported-
     (event) => event.type === "reasoning.tool_event" && event.status === "timed_out",
   ), true);
   assert.equal(timeoutEvents.at(-1).type, "reasoning.failed");
+  assert.equal(timeoutEvents.at(-1).error_code, "capability_timeout");
 
   const cancelRecord = reasoningRecord();
   const cancelEvents = [];
@@ -796,7 +824,11 @@ test("tool wait supports timeout, cancellation, malformed args, and unsupported-
     (_profile, _credential, context) => {
       fallbackRound += 1;
       if (fallbackRound === 1) return events([
-        { type: "error", error: { errorMessage: "tools_unsupported" } },
+        { type: "text_delta", delta: "discarded partial" },
+        { type: "error", error: {
+          code: "unsupported_parameter",
+          message: "The selected model does not support tools.",
+        } },
       ]);
       assert.deepEqual(context.tools, []);
       return events([
@@ -808,5 +840,74 @@ test("tool wait supports timeout, cancellation, malformed args, and unsupported-
   assert.equal(fallbackEvents.filter(
     (event) => event.type === "reasoning.tool_event" && event.status === "tools_unavailable",
   ).length, 1);
+  assert.deepEqual(fallbackEvents.filter(
+    (event) => event.type === "reasoning.text_delta",
+  ).map((event) => event.text), ["ordinary text"]);
   assert.equal(fallbackEvents.at(-1).type, "reasoning.completed");
+});
+
+test("one concurrent tool timeout settles every sibling before reasoning failure", async () => {
+  const emitted = [];
+  const record = reasoningRecord({ tools: [
+    toolFixture,
+    { ...toolFixture, capability_id: "miller_mcp/notes/list", name: "miller_mcp__notes__list" },
+  ] });
+  await new ReasoningOperation(
+    record,
+    { kind: "api_key", key: "synthetic" },
+    (event) => emitted.push(event),
+    () => {},
+    () => events([
+      { type: "toolcall_end", toolCall: {
+        id: "provider-timeout", name: record.tools[0].name, arguments: {},
+      } },
+      { type: "toolcall_end", toolCall: {
+        id: "provider-sibling", name: record.tools[1].name, arguments: {},
+      } },
+      { type: "done", message: { content: [] } },
+    ]),
+    { toolTimeoutMilliseconds: 5 },
+  ).run();
+
+  const calls = emitted.filter((event) => event.type === "reasoning.tool_call");
+  const terminals = emitted.filter((event) => event.type === "reasoning.tool_event");
+  assert.equal(calls.length, 2);
+  assert.equal(terminals.length, 2);
+  assert.deepEqual(new Set(terminals.map((event) => event.call_id)), new Set(calls.map((event) => event.call_id)));
+  assert.deepEqual(terminals.map((event) => event.status).sort(), ["cancelled", "timed_out"]);
+  assert.equal(emitted.at(-1).type, "reasoning.failed");
+  assert.equal(emitted.at(-1).error_code, "capability_timeout");
+  assert.ok(terminals.every((event) => emitted.indexOf(event) < emitted.length - 1));
+  assert.equal(mapProviderError(new Error("tool_timeout")), "capability_timeout");
+});
+
+test("production-shaped unsupported-tool errors are normalized without duplicate partial text", async () => {
+  for (const error of [
+    { errorMessage: "tools_unsupported" },
+    { code: "unsupported_tools", message: "Tools are unavailable for this model" },
+    { code: "unsupported_parameter", message: "tool_choice is not supported" },
+    { type: "invalid_request_error", message: "This model does not support function calling" },
+  ]) {
+    const emitted = [];
+    let round = 0;
+    await new ReasoningOperation(
+      reasoningRecord(),
+      { kind: "api_key", key: "synthetic" },
+      (event) => emitted.push(event),
+      () => {},
+      () => {
+        round += 1;
+        return round === 1
+          ? events([{ type: "text_delta", delta: "private partial" }, { type: "error", error }])
+          : events([{ type: "text_delta", delta: "fallback once" }, { type: "done", message: { content: [] } }]);
+      },
+    ).run();
+    assert.deepEqual(emitted.filter(
+      (event) => event.type === "reasoning.text_delta",
+    ).map((event) => event.text), ["fallback once"]);
+    assert.equal(emitted.filter(
+      (event) => event.type === "reasoning.tool_event" && event.status === "tools_unavailable",
+    ).length, 1);
+    assert.equal(emitted.at(-1).type, "reasoning.completed");
+  }
 });

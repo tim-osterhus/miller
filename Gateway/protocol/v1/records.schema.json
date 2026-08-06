@@ -473,7 +473,18 @@
           "required": ["error_code"],
           "properties": {
             "type": {"const": "reasoning.failed"},
-            "error_code": {"type": "string"}
+            "error_code": {
+              "enum": [
+                "authentication_expired",
+                "network_unavailable",
+                "provider_unavailable",
+                "unsupported_model",
+                "response_limit",
+                "gateway_unavailable",
+                "redirect_refused",
+                "capability_timeout"
+              ]
+            }
           }
         }
       ],

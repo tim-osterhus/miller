@@ -130,6 +130,11 @@ const readinessStatuses = new Set([
   "ready", "refresh_required", "authentication_required", "configuration_invalid",
   "network_unavailable", "provider_unavailable", "unsupported_model", "failed",
 ]);
+const reasoningFailureCodes = new Set([
+  "authentication_expired", "network_unavailable", "provider_unavailable",
+  "unsupported_model", "response_limit", "gateway_unavailable",
+  "redirect_refused", "capability_timeout",
+]);
 const protocolSchemas = {
   "gateway.ready": { request: false, required: { helper_version: "string", supported_protocols: "protocols" } },
   "provider.readiness": { required: { provider_profile: "profile", credential_ref: "uuid" } },
@@ -161,7 +166,7 @@ const protocolSchemas = {
   "reasoning.usage": { required: { turn_id: "uuid", generation: "nonnegative" }, optional: { input_tokens: "nullable-nonnegative", output_tokens: "nullable-nonnegative" } },
   "reasoning.completed": { required: { turn_id: "uuid", generation: "nonnegative" } },
   "reasoning.stopped": { required: { turn_id: "uuid", generation: "nonnegative" } },
-  "reasoning.failed": { required: { turn_id: "uuid", generation: "nonnegative", error_code: "string" } },
+  "reasoning.failed": { required: { turn_id: "uuid", generation: "nonnegative", error_code: "reasoning-failure-code" } },
 };
 
 export function validateProtocolRecord(record) {
@@ -258,6 +263,9 @@ function validateField(value, kind) {
       return;
     case "readiness-status":
       if (!readinessStatuses.has(value)) throw new Error("invalid_field");
+      return;
+    case "reasoning-failure-code":
+      if (!reasoningFailureCodes.has(value)) throw new Error("invalid_field");
       return;
     case "protocols":
       if (!Array.isArray(value) || !value.every(Number.isInteger) || !value.includes(1)) {

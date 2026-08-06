@@ -205,6 +205,7 @@ public struct GatewayRecord: Equatable, Sendable {
         case nonnegativeInteger
         case optionalNonnegativeInteger
         case readinessStatus
+        case reasoningFailureCode
         case stringArray
         case integerArray
         case object
@@ -337,7 +338,7 @@ public struct GatewayRecord: Equatable, Sendable {
         ]),
         "reasoning.failed": .init(required: [
             "turn_id": .uuid, "generation": .nonnegativeInteger,
-            "error_code": .string,
+            "error_code": .reasoningFailureCode,
         ]),
         "reasoning.tool_call": .init(required: [
             "turn_id": .uuid, "generation": .nonnegativeInteger,
@@ -388,6 +389,10 @@ public struct GatewayRecord: Equatable, Sendable {
             guard value >= 0 else { throw GatewayProtocolError.invalidField }
         case let (.readinessStatus, .string(value)):
             guard readinessStatuses.contains(value) else {
+                throw GatewayProtocolError.invalidField
+            }
+        case let (.reasoningFailureCode, .string(value)):
+            guard reasoningFailureCodes.contains(value) else {
                 throw GatewayProtocolError.invalidField
             }
         case let (.capabilityID, .string(value)):
@@ -504,6 +509,17 @@ public struct GatewayRecord: Equatable, Sendable {
         "fake",
     ]
 
+    static let reasoningFailureCodes: Set<String> = [
+        "authentication_expired",
+        "network_unavailable",
+        "provider_unavailable",
+        "unsupported_model",
+        "response_limit",
+        "gateway_unavailable",
+        "redirect_refused",
+        "capability_timeout",
+    ]
+
     static let contextRoles: Set<String> = [
         "user",
         "assistant",
@@ -523,6 +539,7 @@ public struct GatewayRecord: Equatable, Sendable {
         "provider.readiness/provider_profile.kind": providerKinds,
         "reasoning.start/provider_profile.kind": providerKinds,
         "reasoning.start/context[].role": contextRoles,
+        "reasoning.failed/error_code": reasoningFailureCodes,
         "reasoning.tool_result/outcome": toolOutcomes,
         "reasoning.tool_event/status": toolStatuses,
     ]
@@ -588,7 +605,6 @@ public struct GatewayRecord: Equatable, Sendable {
                   let description = fields["description"]?.stringValue,
                   description.utf8.count <= 1_024,
                   case let .object(schema)? = fields["input_schema"],
-                  !schema.isEmpty,
                   capabilityIDs.insert(capabilityID).inserted,
                   names.insert(name).inserted
             else {

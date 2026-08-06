@@ -53,7 +53,7 @@ public struct GatewayToolResult: Sendable, Equatable {
 
 public typealias GatewayToolHandler = @Sendable (
     GatewayToolCall,
-    @escaping @Sendable (ReasoningEvent) -> Void
+    @escaping @Sendable (ReasoningEvent) async -> Void
 ) async throws -> GatewayToolResult
 
 public actor JSONLReasoningGateway: ReasoningGateway {
@@ -95,6 +95,8 @@ public actor JSONLReasoningGateway: ReasoningGateway {
     ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
         let requestID = UUID().uuidString.lowercased()
         let profile = try await selectedProvider()
+        let tools = try Self.toolDefinitions(request.capabilityCatalog)
+        try Self.validateAggregateToolDefinitions(tools)
         var fields: [String: JSONValue] = [
             "conversation_id": .string(request.conversationID.description),
             "turn_id": .string(request.turnID.description),
@@ -104,7 +106,7 @@ public actor JSONLReasoningGateway: ReasoningGateway {
                 .object(["role": .string($0.role.rawValue), "text": .string($0.text)])
             }),
             "user_text": .string(request.userText),
-            "tools": try Self.toolDefinitions(request.capabilityCatalog),
+            "tools": tools,
         ]
         if let attachment = request.voiceHistoryAttachment {
             fields["voice_history_attachment"] = .string(attachment.text)
@@ -265,13 +267,11 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         let result: GatewayToolResult
         do {
             result = try await toolHandler(call) { event in
-                Task {
-                    await self.emitToolEvent(
-                        event,
-                        call: call,
-                        continuation: continuation
-                    )
-                }
+                await self.emitToolEvent(
+                    event,
+                    call: call,
+                    continuation: continuation
+                )
             }
         } catch is CancellationError {
             guard let cancelled = try? GatewayToolResult(outcome: .cancelled) else {
@@ -376,6 +376,23 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         return .array(tools)
     }
 
+    private static func validateAggregateToolDefinitions(
+        _ tools: JSONValue
+    ) throws {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(
+                withJSONObject: tools.foundationValue,
+                options: [.sortedKeys]
+            )
+        } catch {
+            throw GatewayProtocolError.invalidField
+        }
+        guard data.count <= 512 * 1_024 else {
+            throw GatewayProtocolError.recordTooLarge
+        }
+    }
+
     private static func jsonValue(_ data: Data) throws -> JSONValue {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard raw is [String: Any] else {
@@ -386,7 +403,7 @@ public actor JSONLReasoningGateway: ReasoningGateway {
 
     static func unavailableToolHandler(
         _ call: GatewayToolCall,
-        _ emit: @escaping @Sendable (ReasoningEvent) -> Void
+        _ emit: @escaping @Sendable (ReasoningEvent) async -> Void
     ) async throws -> GatewayToolResult {
         try GatewayToolResult(
             outcome: .failed,
@@ -441,6 +458,7 @@ public actor JSONLReasoningGateway: ReasoningGateway {
         "authentication_expired": "Authentication must be refreshed.",
         "network_unavailable": "The network is unavailable.",
         "provider_unavailable": "The reasoning provider is unavailable.",
+        "capability_timeout": "A tool timed out. Try again.",
         "unsupported_model": "The selected model is unavailable for this account.",
         "response_limit": "The response exceeded a safety limit.",
         "gateway_unavailable": "The reasoning helper is unavailable.",

@@ -15,7 +15,7 @@ struct JSONLReasoningGatewayToolTests {
             "capability_id": .string("miller_mcp/notes/lookup"),
             "name": .string("miller_tool_0"),
             "description": .string("Look up a note"),
-            "input_schema": .object(["type": .string("object")]),
+            "input_schema": .object([:]),
         ])
         _ = try GatewayRecord.make(
             type: "reasoning.start",
@@ -158,6 +158,140 @@ struct JSONLReasoningGatewayToolTests {
         #expect(events.contains(.textDelta(ordinal: 0, text: "continued")))
         #expect(events.last == .completed)
         #expect(!String(describing: events).contains("private-result"))
+        await supervisor.shutdown()
+    }
+
+    @Test
+    func synchronousToolLifecycleEventsRemainOrderedBeforeResultAndTerminal() async throws {
+        let fixture = try ToolHelperFixture(mode: "one-call")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(configuration: fixture.configuration)
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile,
+            toolHandler: { call, emit in
+                let policy = CapabilityPolicyResolver().resolve(
+                    serverPolicy: .askBeforeChanges,
+                    readOnlyHint: false
+                ).effectivePolicy
+                let summary = try CapabilitySummary(text: "Ordered fixture")
+                await emit(.capabilityLifecycle(try CapabilityLifecycleEvent(
+                    callID: call.callID,
+                    capabilityID: call.capabilityID,
+                    summary: summary,
+                    state: .started,
+                    outcome: nil,
+                    policy: policy
+                )))
+                await emit(.capabilityApprovalRequested(try CapabilityApprovalRequest(
+                    callID: call.callID,
+                    capabilityID: call.capabilityID,
+                    summary: summary,
+                    policy: policy
+                )))
+                await emit(.capabilityLifecycle(try CapabilityLifecycleEvent(
+                    callID: call.callID,
+                    capabilityID: call.capabilityID,
+                    summary: summary,
+                    state: .running,
+                    outcome: nil,
+                    policy: policy
+                )))
+                return try GatewayToolResult(
+                    outcome: .succeeded,
+                    contentJSON: Data(#"{"value":"private-result"}"#.utf8)
+                )
+            }
+        )
+
+        let events = try await collect(try await gateway.start(toolRequest()))
+        #expect(events.count == 6)
+        #expect(events[0] == .accepted)
+        if case .capabilityLifecycle(let event) = events[1] {
+            #expect(event.state == .started)
+        } else { Issue.record("Missing started lifecycle") }
+        if case .capabilityApprovalRequested = events[2] {
+        } else { Issue.record("Missing approval request") }
+        if case .capabilityLifecycle(let event) = events[3] {
+            #expect(event.state == .running)
+        } else { Issue.record("Missing running lifecycle") }
+        #expect(events[4] == .textDelta(ordinal: 0, text: "continued"))
+        #expect(events[5] == .completed)
+        await supervisor.shutdown()
+    }
+
+    @Test
+    func concurrentToolTimeoutIsTerminalWithoutHelperRestart() async throws {
+        let fixture = try ToolHelperFixture(mode: "concurrent-timeout")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(configuration: fixture.configuration)
+        let probe = SuspendedToolProbe()
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile,
+            toolHandler: { call, emit in
+                try await probe.handle(call, emit: emit)
+            }
+        )
+
+        let events = try await collect(try await gateway.start(toolRequest()))
+        #expect(events == [
+            .accepted,
+            .failed(
+                code: "capability_timeout",
+                message: "A tool timed out. Try again."
+            ),
+        ])
+        #expect(await supervisor.restartCount == 0)
+
+        let ordinary = try await collect(try await gateway.start(toolRequest(
+            capabilityCatalog: .empty
+        )))
+        #expect(ordinary == [
+            .accepted,
+            .textDelta(ordinal: 0, text: "ordinary"),
+            .completed,
+        ])
+        #expect(await supervisor.restartCount == 0)
+        await supervisor.shutdown()
+    }
+
+    @Test
+    func aggregateToolDefinitionsRejectBeforeHelperAndLeaveItHealthy() async throws {
+        let fixture = try ToolHelperFixture(mode: "ordinary")
+        defer { fixture.cleanup() }
+        let supervisor = GatewaySupervisor(configuration: fixture.configuration)
+        let gateway = JSONLReasoningGateway(
+            supervisor: supervisor,
+            selectedProvider: providerProfile
+        )
+        let descriptors = try (0..<600).map { index in
+            try CapabilityDescriptor(
+                id: CapabilityID(rawValue: "miller_mcp/bulk/tool_\(index)"),
+                source: .millerMCP,
+                serverID: "bulk",
+                toolName: "tool_\(index)",
+                displayName: "Tool \(index)",
+                summary: String(repeating: "s", count: 1_024),
+                inputSchemaJSON: Data("{}".utf8),
+                readOnlyHint: true,
+                providerProfileIDs: [],
+                isAvailable: true
+            )
+        }
+        let oversized = toolRequest(
+            capabilityCatalog: try CapabilityCatalogSnapshot(descriptors)
+        )
+
+        await #expect(throws: GatewayProtocolError.recordTooLarge) {
+            _ = try await gateway.start(oversized)
+        }
+        #expect(await supervisor.restartCount == 0)
+        let ordinary = try await collect(try await gateway.start(toolRequest(
+            capabilityCatalog: .empty
+        )))
+        #expect(ordinary.last == .completed)
+        #expect(await supervisor.restartCount == 0)
         await supervisor.shutdown()
     }
 
@@ -331,7 +465,8 @@ struct JSONLReasoningGatewayToolTests {
 
     private func toolRequest(
         turnID: TurnID = TurnID(),
-        generation: Int = 1
+        generation: Int = 1,
+        capabilityCatalog: CapabilityCatalogSnapshot? = nil
     ) -> ReasoningRequest {
         ReasoningRequest(
             conversationID: ConversationID(),
@@ -339,7 +474,7 @@ struct JSONLReasoningGatewayToolTests {
             generation: generation,
             context: [],
             userText: "use tools",
-            capabilityCatalog: try! CapabilityCatalogSnapshot([
+            capabilityCatalog: capabilityCatalog ?? (try! CapabilityCatalogSnapshot([
                 try! CapabilityDescriptor(
                     id: CapabilityID(rawValue: "miller_mcp/notes/lookup"),
                     source: .millerMCP,
@@ -347,7 +482,7 @@ struct JSONLReasoningGatewayToolTests {
                     toolName: "lookup",
                     displayName: "Lookup",
                     summary: "Look up a note",
-                    inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+                    inputSchemaJSON: Data("{}".utf8),
                     readOnlyHint: true,
                     providerProfileIDs: [],
                     isAvailable: true
@@ -364,7 +499,7 @@ struct JSONLReasoningGatewayToolTests {
                     providerProfileIDs: [],
                     isAvailable: true
                 ),
-            ])
+            ]))
         )
     }
 
@@ -410,7 +545,7 @@ private actor ToolProbe {
 
     func handle(
         _ call: GatewayToolCall,
-        emit: @escaping @Sendable (ReasoningEvent) -> Void
+        emit: @escaping @Sendable (ReasoningEvent) async -> Void
     ) async -> GatewayToolResult {
         calls.append(call)
         active += 1
@@ -430,7 +565,7 @@ private actor SuspendedToolProbe {
 
     func handle(
         _ call: GatewayToolCall,
-        emit: @escaping @Sendable (ReasoningEvent) -> Void
+        emit: @escaping @Sendable (ReasoningEvent) async -> Void
     ) async throws -> GatewayToolResult {
         started = true
         while !released {
@@ -493,6 +628,11 @@ private struct ToolHelperFixture {
             const record = JSON.parse(pending.slice(0, newline)); pending = pending.slice(newline + 1);
             if (record.type === "reasoning.start") {
               operation = record; starts += 1; send(base("reasoning.accepted"));
+              if (record.tools.length === 0) {
+                send({...base("reasoning.text_delta"),ordinal:0,text:"ordinary"});
+                send(base("reasoning.completed"));
+                continue;
+              }
               if (mode.startsWith("late-") && starts > 1) {
                 send({...base("reasoning.text_delta"),ordinal:0,text:"fresh generation"});
                 send(base("reasoning.completed"));
@@ -502,6 +642,16 @@ private struct ToolHelperFixture {
                 send({...base("reasoning.tool_event"),call_id:record.request_id,status:"tools_unavailable"});
                 send({...base("reasoning.text_delta"),ordinal:0,text:"ordinary text"});
                 send(base("reasoning.completed"));
+                continue;
+              }
+              if (mode === "concurrent-timeout") {
+                const first = crypto.randomUUID();
+                const second = crypto.randomUUID();
+                send({...base("reasoning.tool_call"),call_id:first,capability_id:record.tools[0].capability_id,arguments:{}});
+                send({...base("reasoning.tool_call"),call_id:second,capability_id:record.tools[1].capability_id,arguments:{}});
+                send({...base("reasoning.tool_event"),call_id:first,capability_id:record.tools[0].capability_id,status:"timed_out"});
+                send({...base("reasoning.tool_event"),call_id:second,capability_id:record.tools[1].capability_id,status:"cancelled"});
+                send({...base("reasoning.failed"),error_code:"capability_timeout"});
                 continue;
               }
               const calls = mode === "two-calls" ? record.tools.slice(0, 2) : record.tools.slice(0, 1);
