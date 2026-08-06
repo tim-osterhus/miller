@@ -276,6 +276,71 @@ struct CodexCapabilityProtocolTests {
     }
 
     @Test
+    func catalogRejectsNormalizedServerIdentityCollisionsAndUsesExactBridgeID() throws {
+        let codec = CodexCapabilityProtocol()
+        let app = CodexAccountApp(
+            id: "Team/A", name: "Team", summary: "Team app",
+            isAccessible: true, isEnabled: true
+        )
+        let installed = CodexInstalledApp(
+            id: "Team/A", isEnabled: true, isCallable: true
+        )
+        let caseCollision = CodexAccountApp(
+            id: "team/a", name: "Other", summary: "Other app",
+            isAccessible: true, isEnabled: true
+        )
+        #expect(throws: CodexCapabilityProtocolError.invalidField) {
+            try codec.projectCatalog(
+                apps: [app, caseCollision], appDetails: [],
+                installedApps: [installed], mcpServers: [],
+                codexProviderProfileID: profileID,
+                existingMillerCapabilities: []
+            )
+        }
+
+        let punctuationCollision = CodexMCPServer(
+            name: "team-a", authStatus: "bearerToken", tools: []
+        )
+        #expect(throws: CodexCapabilityProtocolError.invalidField) {
+            try codec.projectCatalog(
+                apps: [app], appDetails: [], installedApps: [installed],
+                mcpServers: [punctuationCollision],
+                codexProviderProfileID: profileID,
+                existingMillerCapabilities: []
+            )
+        }
+
+        let exactOriginCollision = CodexMCPServer(
+            name: "Team/A", authStatus: "bearerToken", tools: []
+        )
+        #expect(throws: CodexCapabilityProtocolError.invalidField) {
+            try codec.projectCatalog(
+                apps: [app], appDetails: [], installedApps: [installed],
+                mcpServers: [exactOriginCollision],
+                codexProviderProfileID: profileID,
+                existingMillerCapabilities: []
+            )
+        }
+
+        let uppercaseBridge = CodexMCPServer(
+            name: "MILLER-CAPABILITY-BRIDGE", authStatus: "bearerToken",
+            tools: [.init(
+                name: "inspect", title: nil, summary: "Inspect",
+                inputSchemaJSON: Data("{}".utf8)
+            )]
+        )
+        let catalog = try codec.projectCatalog(
+            apps: [], appDetails: [], installedApps: [],
+            mcpServers: [uppercaseBridge],
+            codexProviderProfileID: profileID,
+            existingMillerCapabilities: []
+        )
+        #expect(catalog.descriptors.map(\.id.rawValue) == [
+            "codex_account/miller-capability-bridge/inspect",
+        ])
+    }
+
+    @Test
     func lifecycleProjectionIsSanitizedOpaqueAndIgnoresUnknownFutureItems() throws {
         let codec = CodexCapabilityProtocol(maximumRawItemBytes: 512)
         let started = try codec.decodeActivity(frame([
@@ -403,6 +468,23 @@ struct CodexCapabilityProtocolTests {
                 ]))
             }
         }
+
+        for method in ["item/started", "thread/realtime/itemAdded"] {
+            var params: [String: Any] = [
+                "threadId": "thread-1", "turnId": "turn-1",
+                "item": [
+                    "type": "mcpToolCall", "id": "malformed-call",
+                    "tool": "search", "status": "inProgress",
+                    "arguments": [:] as [String: Any],
+                ] as [String: Any],
+            ]
+            if method == "item/started" { params["startedAtMs"] = 1 }
+            #expect(throws: CodexCapabilityProtocolError.invalidField) {
+                try codec.decodeActivity(frame([
+                    "method": method, "params": params,
+                ]))
+            }
+        }
     }
 
     @Test
@@ -413,7 +495,8 @@ struct CodexCapabilityProtocolTests {
             "method": "item/commandExecution/requestApproval",
             "params": [
                 "threadId": "thread-1", "turnId": "turn-1",
-                "itemId": "command-1", "startedAtMs": 1,
+                "itemId": "command-1", "approvalId": "approval-command-1",
+                "startedAtMs": 1,
                 "command": "do-not-retain --secret", "reason": "Needs access",
             ] as [String: Any],
         ]))
@@ -421,6 +504,7 @@ struct CodexCapabilityProtocolTests {
             Issue.record("Expected provider approval"); return
         }
         #expect(approval.request.policy.requiresApproval)
+        #expect(approval.approvalID == "approval-command-1")
         #expect(approval.request.policy.reason == "provider_approval_required")
         #expect(!approval.request.summary.text.contains("secret"))
 
@@ -443,13 +527,14 @@ struct CodexCapabilityProtocolTests {
             "method": "item/fileChange/requestApproval",
             "params": [
                 "threadId": "thread-1", "turnId": "turn-1",
-                "itemId": "file-1", "startedAtMs": 2,
+                "itemId": "file-1", "approvalId": NSNull(), "startedAtMs": 2,
                 "availableDecisions": ["decline", "cancel"],
             ] as [String: Any],
         ]))
         guard case .approval(let restricted) = declineOnly else {
             Issue.record("Expected restricted approval"); return
         }
+        #expect(restricted.approvalID == nil)
         let restrictedResponse = try object(codec.approvalResponse(
             restricted, decision: .allowOnce
         ))

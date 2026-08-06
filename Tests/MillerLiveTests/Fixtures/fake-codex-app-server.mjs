@@ -46,6 +46,9 @@ let threadId = "thread-1";
 let helperThreadCreated = false;
 let typedTurnId = "typed-turn-1";
 let connectorApprovalResponses = 0;
+let nativeApprovalResponses = 0;
+let inventoryRefreshFloodCount = 0;
+const pendingInventoryRefreshes = new Map();
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
 
 function featureConfigurationIsAdmitted() {
@@ -133,6 +136,65 @@ function connectorApprovalParams(approvalThread, approvalTurn, itemId, variant =
   };
 }
 
+function respondInventoryRequest(request) {
+  if (request.method === "app/list") {
+    if (request.params?.cursor === null) {
+      send({ id: request.id, result: { data: [{
+        id: "gmail", name: "Gmail", description: "Mail",
+        isAccessible: true, isEnabled: true,
+      }], nextCursor: "apps-page-2" } });
+    } else if (request.params?.cursor === "apps-page-2") {
+      send({ id: request.id, result: { data: [{
+        id: "drive", name: "Drive", description: "Files",
+        isAccessible: false, isEnabled: true,
+      }], nextCursor: null } });
+    } else process.exit(49);
+    return;
+  }
+  if (request.method === "app/read") {
+    send({ id: request.id, result: {
+      apps: request.params.appIds.map((appId) => ({
+        id: appId,
+        name: appId === "gmail" ? "Gmail" : "Drive",
+        description: "Synthetic app",
+        toolSummaries: appId === "gmail" ? [{
+          name: "search", title: "Search Gmail",
+          description: "Search messages", isEnabled: true, isReadOnly: true,
+        }] : [],
+      })),
+      missingAppIds: [],
+    } });
+    return;
+  }
+  if (request.method === "app/installed") {
+    send({ id: request.id, result: { apps: [
+      { id: "gmail", enabled: true, callable: true },
+      { id: "drive", enabled: true, callable: false },
+    ] } });
+    return;
+  }
+  if (request.method === "mcpServerStatus/list") {
+    if (request.params?.cursor === null) {
+      send({ id: request.id, result: { data: [{
+        name: "miller-capability-bridge", authStatus: "unsupported",
+        tools: { miller_a13462d74f54f23f_list: {
+          name: "miller_a13462d74f54f23f_list",
+          title: "List events", description: "Duplicate",
+          inputSchema: { type: "object" },
+        } }, resources: [], resourceTemplates: [],
+      }], nextCursor: "mcp-page-2" } });
+    } else if (request.params?.cursor === "mcp-page-2") {
+      send({ id: request.id, result: { data: [{
+        name: "external", authStatus: "bearerToken",
+        tools: { inspect: {
+          name: "inspect", description: "Inspect resource",
+          inputSchema: { type: "object" },
+        } }, resources: [], resourceTemplates: [],
+      }], nextCursor: null } });
+    } else process.exit(50);
+  }
+}
+
 function emitRealtimeStarted() {
   const emittedThread = mode === "wrong-thread" ? "thread-other" : threadId;
   const emittedSession = mode === "upstream-session" ? "session-other" : threadId;
@@ -186,6 +248,17 @@ function emitLifecycle() {
         appContext: { connectorId: "gmail", actionName: "search" },
       },
     });
+  }
+  if (mode === "realtime-capability-malformed") {
+    notify("thread/realtime/itemAdded", {
+      threadId: emittedThread,
+      turnId: "turn-capability-1",
+      item: {
+        type: "mcpToolCall", id: "malformed-capability-1",
+        tool: "search", status: "inProgress", arguments: {},
+      },
+    });
+    return;
   }
   if (mode === "realtime-provider-approval" ||
       mode === "realtime-provider-approval-decline" ||
@@ -309,6 +382,28 @@ lines.on("line", (line) => {
     return;
   }
   const request = JSON.parse(line);
+  if (mode === "typed-capability-inventory-refresh" &&
+      pendingInventoryRefreshes.has(request.id)) {
+    if (!request.result?.accessToken?.startsWith("replacement-token-") ||
+        request.result?.chatgptAccountId !== "account-1") process.exit(53);
+    const pending = pendingInventoryRefreshes.get(request.id);
+    pendingInventoryRefreshes.delete(request.id);
+    respondInventoryRequest(pending);
+    return;
+  }
+  if (mode === "typed-capability-inventory-refresh-flood" &&
+      request.id === `inventory-refresh-flood-${inventoryRefreshFloodCount}`) {
+    if (!request.result?.accessToken?.startsWith("replacement-token-") ||
+        request.result?.chatgptAccountId !== "account-1") process.exit(56);
+    if (inventoryRefreshFloodCount >= 70) return;
+    inventoryRefreshFloodCount += 1;
+    send({
+      id: `inventory-refresh-flood-${inventoryRefreshFloodCount}`,
+      method: "account/chatgptAuthTokens/refresh",
+      params: { reason: "unauthorized", previousAccountId: "account-1" },
+    });
+    return;
+  }
   if ((mode === "realtime-provider-approval" ||
        mode === "realtime-provider-approval-decline" ||
        mode === "realtime-provider-approval-replay") &&
@@ -353,62 +448,33 @@ lines.on("line", (line) => {
       send({ id: request.id, result: { type: "chatgptAuthTokens" } });
       return;
     }
-    if (mode === "typed-capability-inventory" && request.method === "app/list") {
-      if (request.params?.cursor === null) {
-        send({ id: request.id, result: { data: [{
-          id: "gmail", name: "Gmail", description: "Mail",
-          isAccessible: true, isEnabled: true,
-        }], nextCursor: "apps-page-2" } });
-      } else if (request.params?.cursor === "apps-page-2") {
-        send({ id: request.id, result: { data: [{
-          id: "drive", name: "Drive", description: "Files",
-          isAccessible: false, isEnabled: true,
-        }], nextCursor: null } });
-      } else process.exit(49);
-      return;
-    }
-    if (mode === "typed-capability-inventory" && request.method === "app/read") {
-      send({ id: request.id, result: {
-        apps: request.params.appIds.map((appId) => ({
-          id: appId,
-          name: appId === "gmail" ? "Gmail" : "Drive",
-          description: "Synthetic app",
-          toolSummaries: appId === "gmail" ? [{
-            name: "search", title: "Search Gmail",
-            description: "Search messages", isEnabled: true, isReadOnly: true,
-          }] : [],
-        })),
-        missingAppIds: [],
-      } });
-      return;
-    }
-    if (mode === "typed-capability-inventory" && request.method === "app/installed") {
-      send({ id: request.id, result: { apps: [
-        { id: "gmail", enabled: true, callable: true },
-        { id: "drive", enabled: true, callable: false },
-      ] } });
-      return;
-    }
-    if (mode === "typed-capability-inventory" &&
-        request.method === "mcpServerStatus/list") {
-      if (request.params?.cursor === null) {
-        send({ id: request.id, result: { data: [{
-          name: "miller-capability-bridge", authStatus: "unsupported",
-          tools: { miller_a13462d74f54f23f_list: {
-            name: "miller_a13462d74f54f23f_list",
-            title: "List events", description: "Duplicate",
-            inputSchema: { type: "object" },
-          } }, resources: [], resourceTemplates: [],
-        }], nextCursor: "mcp-page-2" } });
-      } else if (request.params?.cursor === "mcp-page-2") {
-        send({ id: request.id, result: { data: [{
-          name: "external", authStatus: "bearerToken",
-          tools: { inspect: {
-            name: "inspect", description: "Inspect resource",
-            inputSchema: { type: "object" },
-          } }, resources: [], resourceTemplates: [],
-        }], nextCursor: null } });
-      } else process.exit(50);
+    if (mode.startsWith("typed-capability-inventory") &&
+        ["app/list", "app/read", "app/installed", "mcpServerStatus/list"]
+          .includes(request.method)) {
+      if (mode === "typed-capability-inventory-hang") {
+        if (pidPath) fs.writeFileSync(pidPath, "inventory-pending\n", { mode: 0o600 });
+        return;
+      }
+      if (mode === "typed-capability-inventory-refresh") {
+        const refreshId = `inventory-refresh-${request.id}`;
+        pendingInventoryRefreshes.set(refreshId, request);
+        send({
+          id: refreshId,
+          method: "account/chatgptAuthTokens/refresh",
+          params: { reason: "unauthorized", previousAccountId: "account-1" },
+        });
+        return;
+      }
+      if (mode === "typed-capability-inventory-refresh-flood") {
+        inventoryRefreshFloodCount = 1;
+        send({
+          id: "inventory-refresh-flood-1",
+          method: "account/chatgptAuthTokens/refresh",
+          params: { reason: "unauthorized", previousAccountId: "account-1" },
+        });
+        return;
+      }
+      respondInventoryRequest(request);
       return;
     }
     if (request.method === "thread/start") {
@@ -547,6 +613,27 @@ lines.on("line", (line) => {
           id: "typed-refresh-1",
           method: "account/chatgptAuthTokens/refresh",
           params: { reason: "unauthorized", previousAccountId: "account-1" },
+        });
+        return;
+      }
+      if (mode === "typed-capability-malformed") {
+        notify("item/started", {
+          threadId, turnId: typedTurnId, startedAtMs: 1,
+          item: {
+            type: "mcpToolCall", id: "malformed-capability-1",
+            tool: "search", status: "inProgress", arguments: {},
+          },
+        });
+        return;
+      }
+      if (mode === "typed-native-approval-distinct-then-replay") {
+        send({
+          id: "native-approval-request-1",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId, turnId: typedTurnId, itemId: "native-command-1",
+            approvalId: "native-approval-a", startedAtMs: 1,
+          },
         });
         return;
       }
@@ -716,6 +803,34 @@ lines.on("line", (line) => {
         turn: { id: typedTurnId, status: "completed", items: [], error: null },
       });
       return;
+    }
+    if (mode === "typed-native-approval-distinct-then-replay" &&
+        request.id?.startsWith("native-approval-request-")) {
+      if (request.result?.decision !== "accept") process.exit(54);
+      nativeApprovalResponses += 1;
+      if (nativeApprovalResponses === 1) {
+        send({
+          id: "native-approval-request-2",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId, turnId: typedTurnId, itemId: "native-command-1",
+            approvalId: "native-approval-b", startedAtMs: 2,
+          },
+        });
+        return;
+      }
+      if (nativeApprovalResponses === 2) {
+        send({
+          id: "native-approval-request-replay",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId, turnId: typedTurnId, itemId: "native-command-1",
+            approvalId: "native-approval-b", startedAtMs: 2,
+          },
+        });
+        return;
+      }
+      process.exit(55);
     }
     if ((mode === "typed-provider-approval" ||
          mode === "typed-provider-approval-decline" ||

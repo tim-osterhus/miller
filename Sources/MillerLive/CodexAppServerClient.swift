@@ -63,12 +63,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private struct ProviderApprovalCallAuthority: Hashable {
         let threadID: String
         let turnID: String
-        let itemID: String
+        let callID: String
 
         init(_ approval: CodexProviderApproval) {
             threadID = approval.threadID
             turnID = approval.turnID
-            itemID = approval.itemID
+            callID = approval.approvalID ?? approval.itemID
         }
     }
     private enum StopAction { case none, send(String, String), cancelStartup, retainUntilAdmission }
@@ -179,7 +179,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
             self.process.cancel()
         }
         defer { watchdog.cancel() }
-        do {
+        return try await withTaskCancellationHandler(operation: {
+            do {
             let wire = CodexCapabilityProtocol()
             let typed = CodexTypedProtocol()
             var currentCredential = credential
@@ -200,7 +201,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 try process.send(try wire.appsListRequest(
                     id: id, cursor: appCursor, limit: 100
                 ))
-                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                let frame = try await awaitCapabilityResponse(
+                    id: id, currentCredential: &currentCredential,
+                    codec: typed, iterator: &iterator
+                )
                 let page = try wire.decodeAppsListResponse(frame, expectedID: id)
                 apps.append(contentsOf: page.items)
                 guard apps.count <= wire.maximumItems else {
@@ -224,7 +228,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 let id = "\(requestID):app-read:\(chunkNumber)"
                 let appIDs = Array(apps[start..<min(start + 100, apps.count)]).map(\.id)
                 try process.send(try wire.appsReadRequest(id: id, appIDs: appIDs))
-                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                let frame = try await awaitCapabilityResponse(
+                    id: id, currentCredential: &currentCredential,
+                    codec: typed, iterator: &iterator
+                )
                 appDetails.append(contentsOf: try wire.decodeAppsReadResponse(
                     frame, expectedID: id
                 ))
@@ -236,7 +243,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
             let installedID = "\(requestID):installed"
             try process.send(try wire.appsInstalledRequest(id: installedID))
             let installedFrame = try await awaitCapabilityResponse(
-                id: installedID, iterator: &iterator
+                id: installedID, currentCredential: &currentCredential,
+                codec: typed, iterator: &iterator
             )
             let installed = try wire.decodeAppsInstalledResponse(
                 installedFrame, expectedID: installedID
@@ -251,7 +259,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 try process.send(try wire.mcpServerStatusListRequest(
                     id: id, cursor: mcpCursor, limit: 100
                 ))
-                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                let frame = try await awaitCapabilityResponse(
+                    id: id, currentCredential: &currentCredential,
+                    codec: typed, iterator: &iterator
+                )
                 let page = try wire.decodeMCPServerStatusResponse(frame, expectedID: id)
                 serverToolCount += page.items.reduce(0) { $0 + $1.tools.count }
                 guard serverToolCount <= wire.maximumItems else {
@@ -282,11 +293,14 @@ public final class CodexAppServerClient: @unchecked Sendable {
             )
             await process.stop(onCleanupPending: onCleanupPending)
             return catalog
-        } catch {
-            await process.stop(onCleanupPending: onCleanupPending)
-            if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
-            throw error
-        }
+            } catch {
+                await process.stop(onCleanupPending: onCleanupPending)
+                if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
+                throw error
+            }
+        }, onCancel: {
+            self.process.cancel()
+        })
     }
 
     public func typedEvents(
@@ -939,6 +953,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     private func awaitCapabilityResponse(
         id: String,
+        currentCredential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
         iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
     ) async throws -> Data {
         var skipped = 0
@@ -948,11 +964,22 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     as? [String: Any]
             else { throw CodexCapabilityProtocolError.malformedJSON }
             if root["id"] as? String == id { return data }
-            if root["id"] != nil {
-                throw CodexCapabilityProtocolError.wrongResponse
-            }
             skipped += 1
             guard skipped <= 64 else {
+                throw CodexCapabilityProtocolError.wrongResponse
+            }
+            if root["method"] as? String == "account/chatgptAuthTokens/refresh" {
+                guard case .credentialRefresh(let refreshID, let previousAccountID)
+                    = try codec.decode(data)
+                else { throw CodexCapabilityProtocolError.wrongResponse }
+                try await refreshCredential(
+                    id: refreshID,
+                    previousAccountID: previousAccountID,
+                    currentCredential: &currentCredential
+                )
+                continue
+            }
+            if root["id"] != nil {
                 throw CodexCapabilityProtocolError.wrongResponse
             }
         }

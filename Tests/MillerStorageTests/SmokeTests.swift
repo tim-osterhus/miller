@@ -525,6 +525,13 @@ struct MillerStorageTests {
                 VALUES ('miller_mcp/legacy/list', 'legacy', 'miller_mcp',
                         'legacy', 'list', 'List', 'List', X'7B7D', 1,
                         1, 'current', NULL, '\(now)');
+            INSERT INTO capability_tools
+                (id, server_id, source, source_server_id, tool_name,
+                 display_name, summary, input_schema_json, read_only_hint,
+                 available, stale_state, content_hash, reconciled_at)
+                VALUES ('codex_account/legacy/search', 'legacy', 'codex_account',
+                        'legacy', 'search', 'Search', 'Search', X'7B7D', 1,
+                        1, 'current', NULL, '\(now)');
             PRAGMA user_version = 3;
             COMMIT;
             """,
@@ -538,12 +545,21 @@ struct MillerStorageTests {
         XCTAssertEqual(
             try database.query(
                 """
-                SELECT accessible, enabled, callable, visibility
+                SELECT id, accessible, enabled, callable, visibility
                 FROM capability_tools
-                WHERE id = 'miller_mcp/legacy/list'
+                ORDER BY id
                 """
             ),
-            [[.integer(1), .integer(1), .integer(1), .text("owner_managed")]]
+            [
+                [
+                    .text("codex_account/legacy/search"), .integer(1), .integer(1),
+                    .integer(1), .text("provider_managed"),
+                ],
+                [
+                    .text("miller_mcp/legacy/list"), .integer(1), .integer(1),
+                    .integer(1), .text("owner_managed"),
+                ],
+            ]
         )
         XCTAssertEqual(
             try database.scalarInt(

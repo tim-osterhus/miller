@@ -393,6 +393,10 @@ enum SQLiteMigrations {
             ALTER TABLE capability_tools
             ADD COLUMN visibility TEXT NOT NULL DEFAULT 'owner_managed'
                 CHECK (visibility IN ('owner_managed', 'provider_managed'));
+
+            UPDATE capability_tools
+            SET visibility = 'provider_managed'
+            WHERE source = 'codex_account';
             """
         ),
     ]

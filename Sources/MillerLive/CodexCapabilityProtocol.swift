@@ -83,6 +83,7 @@ public enum CodexProviderApprovalKind: Equatable, Sendable {
 public struct CodexProviderApproval: Equatable, Sendable {
     public let responseID: JSONRPCRequestID
     public let itemID: String
+    public let approvalID: String?
     public let threadID: String
     public let turnID: String
     public let kind: CodexProviderApprovalKind
@@ -308,6 +309,19 @@ public struct CodexCapabilityProtocol: Sendable {
         else { throw CodexCapabilityProtocolError.catalogTooLarge }
         let appByID = try uniqueMap(apps, key: \.id)
         let installedByID = try uniqueMap(installedApps, key: \.id)
+        var normalizedServerAuthorities: [String: (raw: String, origin: String)] = [:]
+        for (raw, origin) in apps.map({ ($0.id, "app") })
+            + mcpServers.map({ ($0.name, "mcp") })
+        {
+            let normalized = normalizedComponent(raw)
+            if let existing = normalizedServerAuthorities[normalized] {
+                guard existing.raw == raw, existing.origin == origin else {
+                    throw CodexCapabilityProtocolError.invalidField
+                }
+            } else {
+                normalizedServerAuthorities[normalized] = (raw, origin)
+            }
+        }
         var descriptors: [CapabilityDescriptor] = []
         var seen = Set<CapabilityID>()
         let detailAppIDs = Set(appDetails.map(\.appID))
@@ -362,7 +376,7 @@ public struct CodexCapabilityProtocol: Sendable {
             by: \.bridgeProjectedToolName
         )
         for server in mcpServers {
-            if normalizedComponent(server.name) == Self.reservedBridgeServerID {
+            if server.name == Self.reservedBridgeServerID {
                 for tool in server.tools {
                     guard let matches = existingByProjectedName[tool.name],
                           matches.count == 1,
@@ -467,7 +481,7 @@ public struct CodexCapabilityProtocol: Sendable {
             summary = "Opaque Codex web search activity"
         } else {
             guard item["server"] is String, item["tool"] is String else {
-                return .notCapability
+                throw CodexCapabilityProtocolError.invalidField
             }
             let server = try identifier(item, "server")
             let tool = try identifier(item, "tool")
@@ -489,7 +503,7 @@ public struct CodexCapabilityProtocol: Sendable {
             default:
                 break
             }
-            if normalizedComponent(server) == Self.reservedBridgeServerID {
+            if server == Self.reservedBridgeServerID {
                 let matches = existingMillerCapabilities.filter {
                     $0.source == .millerMCP && $0.bridgeProjectedToolName == tool
                 }
@@ -567,6 +581,7 @@ public struct CodexCapabilityProtocol: Sendable {
         let threadID = try identifier(params, "threadId")
         let turnID = try identifier(params, "turnId")
         let itemID = try identifier(params, "itemId")
+        let approvalID = try optionalIdentifier(params, "approvalId")
         _ = try integer64(params, "startedAtMs")
         let kind: CodexProviderApprovalKind
         let toolName: String
@@ -605,6 +620,7 @@ public struct CodexCapabilityProtocol: Sendable {
         return .init(
             responseID: responseID,
             itemID: itemID,
+            approvalID: approvalID,
             threadID: threadID,
             turnID: turnID,
             kind: kind,
@@ -697,6 +713,7 @@ public struct CodexCapabilityProtocol: Sendable {
         return .init(
             responseID: responseID,
             itemID: itemID,
+            approvalID: nil,
             threadID: threadID,
             turnID: turnID,
             kind: .toolUserInput,

@@ -17,6 +17,19 @@ private actor RefreshRecorder {
     }
 }
 
+private actor RotatingRefreshRecorder {
+    private(set) var calls = 0
+
+    func refresh(accountID: String) -> CodexOAuthCredential {
+        calls += 1
+        return .init(
+            accessToken: Data("replacement-token-\(calls)".utf8),
+            accountID: accountID,
+            planType: "plus"
+        )
+    }
+}
+
 private actor CleanupCompletionFlag {
     private(set) var isComplete = false
     private(set) var pendingReports = 0
@@ -126,6 +139,95 @@ struct CodexAppServerClientTests {
     }
 
     @Test
+    func inventoryRefreshesCredentialsAtEveryResponseBoundary() async throws {
+        let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let recorder = RotatingRefreshRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-inventory-refresh"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            refreshProvider: { accountID in
+                await recorder.refresh(accountID: accountID)
+            }
+        )
+
+        let catalog = try await client.inventoryCapabilities(
+            requestID: "inventory-refresh-1",
+            credential: credential,
+            codexProviderProfileID: profileID,
+            existingMillerCapabilities: [],
+            timeout: .seconds(2)
+        )
+
+        #expect(await recorder.calls == 6)
+        #expect(catalog.descriptors.contains {
+            $0.id.rawValue == "codex_account/gmail/search"
+        })
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func inventoryCapsRepeatedCredentialRefreshRequestsAndCleansHelper() async throws {
+        let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let recorder = RotatingRefreshRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-inventory-refresh-flood"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            refreshProvider: { accountID in
+                await recorder.refresh(accountID: accountID)
+            }
+        )
+
+        await #expect(throws: CodexCapabilityProtocolError.wrongResponse) {
+            _ = try await client.inventoryCapabilities(
+                requestID: "inventory-refresh-flood-1",
+                credential: credential,
+                codexProviderProfileID: profileID,
+                existingMillerCapabilities: [],
+                timeout: .seconds(2)
+            )
+        }
+
+        #expect(await recorder.calls == 64)
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func cancellingInventoryPromptlyTerminatesAndCleansHelper() async throws {
+        let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let marker = repository.appendingPathComponent(
+            ".artifacts/inventory-cancel-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-inventory-hang", extraArguments: [marker.path]
+        ))
+        let client = CodexAppServerClient(process: process)
+        let task = Task {
+            try await client.inventoryCapabilities(
+                requestID: "inventory-cancel-1",
+                credential: credential,
+                codexProviderProfileID: profileID,
+                existingMillerCapabilities: [],
+                timeout: .seconds(30)
+            )
+        }
+        try await waitUntil {
+            FileManager.default.fileExists(atPath: marker.path)
+        }
+
+        task.cancel()
+        await #expect(throws: (any Error).self) { try await task.value }
+        try await waitUntil { !process.isRunning }
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
     func typedProviderApprovalUsesInjectedMillerResolverAndResponseChannel() async throws {
         let recorder = CapabilityEventRecorder()
         let process = CodexAppServerProcess(configuration: try configuration(
@@ -223,6 +325,33 @@ struct CodexAppServerClientTests {
     }
 
     @Test
+    func nativeApprovalIdentityUsesApprovalIDAndRejectsExactReplay() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-native-approval-distinct-then-replay"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            resolveProviderApproval: { request in await recorder.approve(request) }
+        )
+
+        await #expect(throws: (any Error).self) {
+            for try await _ in client.typedEvents(
+                requestID: "typed-native-approval-1",
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                context: [],
+                userText: "exercise native approvals",
+                timeout: .seconds(2)
+            ) {}
+        }
+
+        #expect(await recorder.approvals.count == 2)
+        #expect(!process.isRunning)
+    }
+
+    @Test
     func connectorApprovalDeclineUsesInternalDeclineWithoutSessionTrust() async throws {
         for (mode, realtime) in [
             ("typed-provider-approval-decline", false),
@@ -309,6 +438,42 @@ struct CodexAppServerClientTests {
             threadID: identity.threadID,
             reason: "synthetic-complete"
         ))
+    }
+
+    @Test
+    func malformedRecognizedMCPLifecycleFailsClosedInTypedAndRealtime() async throws {
+        for (mode, realtime) in [
+            ("typed-capability-malformed", false),
+            ("realtime-capability-malformed", true),
+        ] {
+            let recorder = CapabilityEventRecorder()
+            let process = CodexAppServerProcess(configuration: try configuration(mode: mode))
+            let client = CodexAppServerClient(
+                process: process,
+                onCapabilityActivity: { activity in await recorder.record(activity) }
+            )
+
+            if realtime {
+                await #expect(throws: (any Error).self) {
+                    _ = try await client.runUntilClosed(
+                        identity: identity, credential: credential,
+                        timeout: .seconds(2)
+                    )
+                }
+            } else {
+                await #expect(throws: (any Error).self) {
+                    for try await _ in client.typedEvents(
+                        requestID: "typed-malformed-capability-1",
+                        credential: credential,
+                        model: "gpt-5.6-terra", cwd: repository.path,
+                        context: [], userText: "malformed capability",
+                        timeout: .seconds(2)
+                    ) {}
+                }
+            }
+            #expect(await recorder.activities.isEmpty)
+            #expect(!process.isRunning)
+        }
     }
 
     @Test
