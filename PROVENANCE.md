@@ -100,6 +100,11 @@ and extraction trees, and verifies the retained bytes again.
   `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-macos-xcframework-static.tar.bz2`
   - Archive SHA-256:
     `8756afb64ef7a1d612040c323e6f2cf707f90e703395413c79c572e37eddd65e`
+  - Exact archive size: `8,941,262` bytes.
+  - Retained C API header SHA-256:
+    `437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4`
+  - Retained C++ API header SHA-256:
+    `431170d7c34bf154761f0d151984a3b8973342444d4f93c7037ea7405313aede`
   - Planned retained library SHA-256:
     `cd6f73e84bb78d5041a085fb388f43d6c66107e6f12e97a39cda6c7ce534b8a6`
   - License: Apache-2.0.
@@ -107,6 +112,7 @@ and extraction trees, and verifies the retained bytes again.
   `https://github.com/csukuangfj/onnxruntime-libs/releases/download/v1.24.4/onnxruntime-osx-arm64-static_lib-1.24.4.zip`
   - Archive SHA-256:
     `4752fa848d9d36143e3942537ff71736d2e581ce192a528482f7edd8d02c9ebf`
+  - Exact archive size: `17,358,514` bytes.
   - Planned retained library SHA-256:
     `9f3e92dd112cd39aa495aec55352f9daaac756c3879bc1b4b3586105c1e85e34`
   - License: MIT.
@@ -114,6 +120,7 @@ and extraction trees, and verifies the retained bytes again.
   `https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2`
   - Archive SHA-256:
     `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`
+  - Exact archive size: `17,626,723` bytes.
   - Planned encoder SHA-256:
     `1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678`
   - Planned decoder SHA-256:

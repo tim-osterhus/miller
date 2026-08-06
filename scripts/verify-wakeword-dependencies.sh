@@ -95,12 +95,52 @@ run_safety_self_test() {
   print "wakeword verifier symlink safety verified"
 }
 
+run_retained_input_self_test() {
+  typeset -g wakeword_retained_self_test_root
+  wakeword_retained_self_test_root="$(mktemp -d "/private/tmp/miller-wakeword-test-${EUID}-XXXXXX")"
+  chmod 700 "$wakeword_retained_self_test_root"
+  local test_root="$wakeword_retained_self_test_root"
+  local test_vendor_root="$test_root/wakeword"
+  local header="include/sherpa-onnx/c-api/c-api.h"
+
+  cleanup_wakeword_retained_self_test() {
+    [[ "$wakeword_retained_self_test_root" == "/private/tmp/miller-wakeword-test-${EUID}-"* && \
+       -d "$wakeword_retained_self_test_root" && \
+       ! -L "$wakeword_retained_self_test_root" ]] || return 1
+    find -P "$wakeword_retained_self_test_root" -depth -delete
+  }
+  trap cleanup_wakeword_retained_self_test EXIT
+
+  mkdir "$test_vendor_root"
+  cp -R "$locked" "$test_vendor_root/locked"
+  print -n "tampered" >> "$test_vendor_root/locked/$header"
+  if env \
+      MILLER_WAKEWORD_VERIFY_TESTING=1 \
+      MILLER_WAKEWORD_VENDOR_ROOT="$test_vendor_root" \
+      "$0" >/dev/null 2>&1; then
+    print -u2 "verifier accepted a tampered retained header"
+    exit 1
+  fi
+
+  cp "$locked/$header" "$test_vendor_root/locked/$header"
+  print -n "unexpected" > "$test_vendor_root/locked/unexpected-input"
+  if env \
+      MILLER_WAKEWORD_VERIFY_TESTING=1 \
+      MILLER_WAKEWORD_VENDOR_ROOT="$test_vendor_root" \
+      "$0" >/dev/null 2>&1; then
+    print -u2 "verifier accepted an extra retained input"
+    exit 1
+  fi
+
+  print "wakeword retained-input integrity verified"
+}
+
 if [[ "$#" == 1 && "$1" == "--self-test-safety" ]]; then
   run_safety_self_test
   exit 0
 fi
-[[ "$#" == 0 || ("$#" == 1 && "$1" == "--if-present") ]] || {
-  print -u2 "usage: $0 [--if-present|--self-test-safety]"
+[[ "$#" == 0 || ("$#" == 1 && ("$1" == "--if-present" || "$1" == "--self-test-retained-inputs")) ]] || {
+  print -u2 "usage: $0 [--if-present|--self-test-safety|--self-test-retained-inputs]"
   exit 64
 }
 
@@ -124,6 +164,8 @@ fi
 }
 
 typeset -A expected_hashes=(
+  include/sherpa-onnx/c-api/c-api.h 437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4
+  include/sherpa-onnx/c-api/cxx-api.h 431170d7c34bf154761f0d151984a3b8973342444d4f93c7037ea7405313aede
   lib/libsherpa-onnx.a cd6f73e84bb78d5041a085fb388f43d6c66107e6f12e97a39cda6c7ce534b8a6
   lib/libonnxruntime.a 9f3e92dd112cd39aa495aec55352f9daaac756c3879bc1b4b3586105c1e85e34
   model/encoder.onnx 1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678
@@ -132,6 +174,18 @@ typeset -A expected_hashes=(
   model/bpe.model c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24
   model/tokens.txt fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53
 )
+
+expected_paths=("${(@ok)expected_hashes}")
+expected_manifest="${(F)expected_paths}"
+actual_manifest="$(cd "$locked" && find -P . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
+[[ "$actual_manifest" == "$expected_manifest" ]] || {
+  print -u2 "wakeword retained-input allowlist mismatch"
+  exit 1
+}
+if find -P "$locked" ! -type d ! -type f -print -quit | grep -q .; then
+  print -u2 "wakeword inputs contain a non-regular filesystem object"
+  exit 1
+fi
 
 for relative expected in ${(kv)expected_hashes}; do
   file="$locked/$relative"
@@ -142,16 +196,6 @@ for relative expected in ${(kv)expected_hashes}; do
   actual="$(shasum -a 256 "$file" | awk '{print $1}')"
   [[ "$actual" == "$expected" ]] || {
     print -u2 "wakeword input hash mismatch: $relative"
-    exit 1
-  }
-done
-
-for header in \
-  include/sherpa-onnx/c-api/c-api.h \
-  include/sherpa-onnx/c-api/cxx-api.h
-do
-  [[ -f "$locked/$header" && ! -L "$locked/$header" ]] || {
-    print -u2 "missing wakeword header: $header"
     exit 1
   }
 done
@@ -170,3 +214,7 @@ lipo -info "$locked/lib/libsherpa-onnx.a" | grep -q 'arm64' || {
 }
 
 print "wakeword dependencies verified"
+
+if [[ "$#" == 1 && "$1" == "--self-test-retained-inputs" ]]; then
+  run_retained_input_self_test
+fi

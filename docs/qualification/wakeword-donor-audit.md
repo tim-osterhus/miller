@@ -49,15 +49,19 @@ audio, models, binary libraries, build products, or tests.
 
 Wakeword archives are fetched only by the explicit bootstrap script into
 `.build/vendor/wakeword/downloads`. Each archive must match its pinned SHA-256
-before extraction. The retained arm64 libraries, headers, model, tokenizer,
-and tokens must match the hashes in `PROVENANCE.md`. Nothing beneath the
-wakeword vendor root is committed.
+and exact byte size before extraction. Downloads are capped at that exact size,
+and failed or partial regular files are removed. The retained arm64 libraries,
+both Sherpa headers, model, tokenizer, and tokens must match the hashes in
+`PROVENANCE.md`. The verifier also requires an exact nine-file allowlist beneath
+the locked root, rejecting extra files, symlinks, and other non-regular objects.
+Nothing beneath the wakeword vendor root is committed.
 
 ## Storage measurements and cleanup
 
 - Free space before the first bootstrap: `21,174,759,424` bytes.
 - Conservative predicted peak: `1,073,741,824` bytes.
-- Three archive sizes: `8,941,262`, `17,626,723`, and `17,358,514` bytes.
+- Exact archive sizes: Sherpa `8,941,262` bytes, ONNX Runtime `17,358,514`
+  bytes, and the keyword model `17,626,723` bytes.
 - First-run observed generated-root consumption: `288,829,440` bytes.
 - Retained locked inputs after transient archives and extraction trees were
   removed: `113,893,376` bytes.
@@ -70,11 +74,14 @@ subsequent ordinary focused test completed without recreating the vendor root,
 proving that non-wake tests do not download wakeword inputs. The existing
 `.artifacts/release/Miller.app` and running Miller process were preserved.
 
-The review repair added deterministic `--self-test-safety` probes to both the
-bootstrap and verifier. They reject vendor-root, nested staging-root,
-locked-root, and partial-download symlinks while proving their targets remain
-unchanged. The real pinned bootstrap and verifier then passed, as did all 813
-Swift tests, all 49 gateway tests, and the seven-test ordinary no-download
-wakeword run. The final repair cleanup again removed the vendor inputs and all
-ordinary build/cache roots while preserving the release app and running
-process.
+The review repair added deterministic safety probes to both the bootstrap and
+verifier. They reject vendor-root, nested staging-root, locked-root, and
+partial-download symlinks while proving their targets remain unchanged. The
+bootstrap additionally proves exact-size local downloads, oversize rejection,
+failure cleanup, and offline behavior. The verifier proves that a tampered
+header and an unexpected retained file are rejected. The real pinned bootstrap
+and verifier then passed, as did all 823 Swift tests, all 49 gateway tests, and
+the 17-test ordinary no-download wakeword run. The repaired dependency cleanup
+reclaimed `127,762,432` bytes from the wakeword and gateway dependency roots.
+The vendor root remained absent after the ordinary test, while the existing
+release app and running process remained intact.

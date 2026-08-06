@@ -83,22 +83,24 @@ public final class WakeWordSettingsController: ObservableObject {
         }
 
         operationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                self.pendingEnabled = nil
-                self.isWorking = false
-            }
-
             do {
                 let nextState = try await operation()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
+                defer {
+                    self.pendingEnabled = nil
+                    self.isWorking = false
+                }
                 self.state = nextState
                 if requestedEnabled {
                     self.isEnabled = true
                     defaults.set(true, forKey: Self.enabledDefaultsKey)
                 }
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
+                defer {
+                    self.pendingEnabled = nil
+                    self.isWorking = false
+                }
                 if requestedEnabled {
                     self.isEnabled = false
                     defaults.set(false, forKey: Self.enabledDefaultsKey)
@@ -144,16 +146,19 @@ public final class WakeWordSettingsController: ObservableObject {
 
         guard isEnabled else { return }
         isWorking = true
+        let operation = applyTuningOperation
         operationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isWorking = false }
             do {
-                self.state = try await self.applyTuningOperation()
+                let state = try await operation()
+                guard !Task.isCancelled, let self else { return }
+                self.state = state
+                self.isWorking = false
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.errorMessage = (error as? LocalizedError)?
                     .errorDescription
                     ?? "Miller could not apply wake sensitivity."
+                self.isWorking = false
             }
         }
     }

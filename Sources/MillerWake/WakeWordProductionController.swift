@@ -3,6 +3,10 @@
 import Combine
 import Foundation
 
+typealias WakeWordEventScheduler = @Sendable (
+    @escaping @MainActor @Sendable () async -> Void
+) -> Void
+
 /// Narrow capture boundary. Task 17 binds this to Miller's concrete audio
 /// owner, preserving the rule that wake listening never opens a second input.
 @MainActor
@@ -20,24 +24,52 @@ public final class WakeWordProductionController: ObservableObject {
 
     private let recorder: any WakeWordCaptureOwning
     private let detectorFactory: @Sendable () throws -> any WakeWordDetecting
+    private let eventScheduler: WakeWordEventScheduler
     private var coordinator: WakeWordCoordinator?
     private var monitoringSessionID: UUID?
+    private var sampleCallbackEpoch: UInt64?
+    private var lifecycleEpoch: UInt64 = 0
+    private var startupEpoch: UInt64?
+    private var startupWaiters = [CheckedContinuation<Void, Never>]()
     private var isEnabled = false
 
-    public init(
+    public convenience init(
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting
     ) {
+        self.init(
+            recorder: recorder,
+            detectorFactory: detectorFactory,
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            }
+        )
+    }
+
+    init(
+        recorder: any WakeWordCaptureOwning,
+        detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
+        eventScheduler: @escaping WakeWordEventScheduler
+    ) {
         self.recorder = recorder
         self.detectorFactory = detectorFactory
+        self.eventScheduler = eventScheduler
     }
 
     public func setEnabled(_ enabled: Bool) async {
+        if enabled, isEnabled, monitoringSessionID != nil {
+            return
+        }
+        let operationEpoch = beginLifecycleOperation()
         isEnabled = enabled
         if enabled {
-            await startMonitoringIfEligible()
+            await startMonitoringIfEligible(operationEpoch: operationEpoch)
         } else {
-            await stop(disable: true, shutDownDetector: false)
+            await stop(
+                disable: true,
+                shutDownDetector: false,
+                operationEpoch: operationEpoch
+            )
         }
     }
 
@@ -45,7 +77,12 @@ public final class WakeWordProductionController: ObservableObject {
         await setEnabled(true)
         if case .unavailable(let reason) = state {
             isEnabled = false
-            await stop(disable: true, shutDownDetector: false)
+            let operationEpoch = beginLifecycleOperation()
+            await stop(
+                disable: true,
+                shutDownDetector: false,
+                operationEpoch: operationEpoch
+            )
             throw WakeWordProductionError.unavailable(reason)
         }
         return state
@@ -58,8 +95,14 @@ public final class WakeWordProductionController: ObservableObject {
 
     public func applyDetectorTuningFromSettings() async throws -> WakeWordState {
         guard isEnabled else { return state }
-        await stop(disable: false, shutDownDetector: true)
-        await startMonitoringIfEligible()
+        let operationEpoch = beginLifecycleOperation()
+        await stop(
+            disable: false,
+            shutDownDetector: true,
+            operationEpoch: operationEpoch
+        )
+        guard acceptsLifecycleOperation(operationEpoch) else { return state }
+        await startMonitoringIfEligible(operationEpoch: operationEpoch)
         if case .unavailable(let reason) = state {
             throw WakeWordProductionError.unavailable(reason)
         }
@@ -68,27 +111,44 @@ public final class WakeWordProductionController: ObservableObject {
 
     public func suspend(_ reason: WakeWordSuspensionReason) async {
         guard isEnabled else { return }
+        let operationEpoch = beginLifecycleOperation()
         coordinator?.suspend(reason)
         state = .suspended(reason)
-        recorder.onSamples = nil
+        clearSampleCallback()
+        monitoringSessionID = nil
         if recorder.isWakeMonitoring {
             await recorder.stopWakeMonitoring()
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
         }
-        monitoringSessionID = nil
+        await waitForStartupToSettle()
+        guard acceptsLifecycleOperation(operationEpoch) else { return }
+        if recorder.isWakeMonitoring {
+            await recorder.stopWakeMonitoring()
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
+        }
+        state = .suspended(reason)
     }
 
     public func shutdown() async -> Bool {
+        let operationEpoch = beginLifecycleOperation()
         isEnabled = false
-        await stop(disable: true, shutDownDetector: true)
+        await stop(
+            disable: true,
+            shutDownDetector: true,
+            operationEpoch: operationEpoch
+        )
         return !recorder.isWakeMonitoring
     }
 
-    private func startMonitoringIfEligible() async {
-        guard isEnabled,
+    private func startMonitoringIfEligible(operationEpoch: UInt64) async {
+        guard acceptsLifecycleOperation(operationEpoch),
+              isEnabled,
               monitoringSessionID == nil,
-              !recorder.isWakeMonitoring else {
+              !recorder.isWakeMonitoring,
+              beginStartup(operationEpoch: operationEpoch) else {
             return
         }
+        defer { finishStartup(operationEpoch: operationEpoch) }
 
         do {
             let coordinator: WakeWordCoordinator
@@ -116,69 +176,182 @@ public final class WakeWordProductionController: ObservableObject {
                     generation: generation
                 )
                 guard !events.isEmpty else { return }
-                Task { @MainActor [weak self] in
-                    self?.handle(events: events)
+                guard let eventScheduler = self?.eventScheduler else { return }
+                eventScheduler { @MainActor [weak self] in
+                    await self?.handle(
+                        events: events,
+                        from: coordinator,
+                        operationEpoch: operationEpoch
+                    )
                 }
             }
+            sampleCallbackEpoch = operationEpoch
 
             let sessionID = try await recorder.startWakeMonitoring()
-            guard isEnabled else {
-                recorder.onSamples = nil
-                await recorder.stopWakeMonitoring()
-                coordinator.suspend(.foregroundSession)
-                state = .suspended(.foregroundSession)
+            guard acceptsLifecycleOperation(operationEpoch),
+                  isEnabled,
+                  self.coordinator === coordinator,
+                  coordinator.accepts(generation) else {
+                clearSampleCallback(ifOwnedBy: operationEpoch)
+                if recorder.isWakeMonitoring {
+                    await recorder.stopWakeMonitoring()
+                }
                 return
             }
             monitoringSessionID = sessionID
             try coordinator.confirmMonitoring(generation: generation)
+            guard acceptsLifecycleOperation(operationEpoch),
+                  self.coordinator === coordinator,
+                  coordinator.accepts(generation),
+                  coordinator.currentState() == .monitoring else {
+                clearSampleCallback(ifOwnedBy: operationEpoch)
+                monitoringSessionID = nil
+                if recorder.isWakeMonitoring {
+                    await recorder.stopWakeMonitoring()
+                }
+                return
+            }
             state = .monitoring
         } catch {
-            recorder.onSamples = nil
+            clearSampleCallback(ifOwnedBy: operationEpoch)
             monitoringSessionID = nil
             if recorder.isWakeMonitoring {
                 await recorder.stopWakeMonitoring()
+                guard acceptsLifecycleOperation(operationEpoch) else { return }
             }
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
             coordinator?.markUnavailable(.capture)
             state = .unavailable(.capture)
         }
     }
 
-    private func handle(events: [WakeWordCoordinatorEvent]) {
+    private func handle(
+        events: [WakeWordCoordinatorEvent],
+        from eventCoordinator: WakeWordCoordinator,
+        operationEpoch: UInt64
+    ) async {
+        guard acceptsLifecycleOperation(operationEpoch),
+              coordinator === eventCoordinator else {
+            return
+        }
+
         for event in events {
+            guard acceptsLifecycleOperation(operationEpoch),
+                  coordinator === eventCoordinator else {
+                return
+            }
             switch event {
-            case .wakeDetected:
+            case .wakeDetected(let generation):
+                guard eventCoordinator.accepts(generation) else { continue }
                 state = .handoff
-            case .commandEndpoint:
+            case .commandEndpoint(let generation, _):
+                guard eventCoordinator.accepts(generation) else { continue }
+                eventCoordinator.suspend(.processing)
                 state = .suspended(.processing)
-            case .detectorUnavailable:
-                state = .unavailable(.detectorRuntime)
+            case .detectorUnavailable(let generation):
+                guard eventCoordinator.accepts(generation) else { continue }
+                await handleDetectorRuntimeFailure(
+                    eventCoordinator: eventCoordinator,
+                    callbackEpoch: operationEpoch
+                )
+                return
             }
         }
     }
 
+    private func handleDetectorRuntimeFailure(
+        eventCoordinator: WakeWordCoordinator,
+        callbackEpoch: UInt64
+    ) async {
+        guard acceptsLifecycleOperation(callbackEpoch),
+              coordinator === eventCoordinator else {
+            return
+        }
+        let operationEpoch = beginLifecycleOperation()
+        clearSampleCallback(ifOwnedBy: callbackEpoch)
+        monitoringSessionID = nil
+        eventCoordinator.shutdown()
+        if coordinator === eventCoordinator {
+            coordinator = nil
+        }
+        if recorder.isWakeMonitoring {
+            await recorder.stopWakeMonitoring()
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
+        }
+        state = .unavailable(.detectorRuntime)
+    }
+
     private func stop(
         disable: Bool,
-        shutDownDetector: Bool
+        shutDownDetector: Bool,
+        operationEpoch: UInt64
     ) async {
-        recorder.onSamples = nil
+        guard acceptsLifecycleOperation(operationEpoch) else { return }
+        clearSampleCallback()
+        monitoringSessionID = nil
         if disable, coordinator != nil {
             coordinator?.beginStopping()
             state = .stopping
         }
-        if recorder.isWakeMonitoring {
-            await recorder.stopWakeMonitoring()
-        }
-        monitoringSessionID = nil
-
         if shutDownDetector {
             coordinator?.shutdown()
             coordinator = nil
-        } else if disable {
+        }
+        if recorder.isWakeMonitoring {
+            await recorder.stopWakeMonitoring()
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
+        }
+        await waitForStartupToSettle()
+        guard acceptsLifecycleOperation(operationEpoch) else { return }
+        if recorder.isWakeMonitoring {
+            await recorder.stopWakeMonitoring()
+            guard acceptsLifecycleOperation(operationEpoch) else { return }
+        }
+
+        if disable, !shutDownDetector {
             coordinator?.finishStopping()
         }
         if disable {
             state = .disabled
         }
+    }
+
+    private func beginLifecycleOperation() -> UInt64 {
+        lifecycleEpoch &+= 1
+        return lifecycleEpoch
+    }
+
+    private func acceptsLifecycleOperation(_ candidate: UInt64) -> Bool {
+        candidate == lifecycleEpoch
+    }
+
+    private func beginStartup(operationEpoch: UInt64) -> Bool {
+        guard startupEpoch == nil else { return false }
+        startupEpoch = operationEpoch
+        return true
+    }
+
+    private func finishStartup(operationEpoch: UInt64) {
+        guard startupEpoch == operationEpoch else { return }
+        startupEpoch = nil
+        let waiters = startupWaiters
+        startupWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForStartupToSettle() async {
+        guard startupEpoch != nil else { return }
+        await withCheckedContinuation { continuation in
+            startupWaiters.append(continuation)
+        }
+    }
+
+    private func clearSampleCallback(ifOwnedBy ownerEpoch: UInt64? = nil) {
+        if let ownerEpoch, sampleCallbackEpoch != ownerEpoch {
+            return
+        }
+        recorder.onSamples = nil
+        sampleCallbackEpoch = nil
     }
 }
 

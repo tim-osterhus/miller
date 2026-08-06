@@ -46,6 +46,71 @@ reject_tree_symlinks() {
   fi
 }
 
+remove_regular_partial() {
+  local partial="$1"
+  [[ ! -e "$partial" && ! -L "$partial" ]] && return 0
+  [[ -f "$partial" && ! -L "$partial" ]] || return 1
+  unlink "$partial"
+}
+
+download_exact_archive() {
+  local url="$1"
+  local destination="$2"
+  local expected_hash="$3"
+  local expected_size="$4"
+  local retries="${5:-3}"
+  local parent="${destination:h}"
+  local partial="$destination.partial"
+
+  reject_symlink_paths "$parent" "$destination" "$partial" || return 1
+  if [[ -f "$destination" && ! -L "$destination" ]] && \
+     [[ "$(stat -f '%z' "$destination")" == "$expected_size" ]] && \
+     [[ "$(shasum -a 256 "$destination" | awk '{print $1}')" == "$expected_hash" ]]; then
+    return 0
+  fi
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || {
+      print -u2 "refusing unsafe archive path: $destination"
+      return 1
+    }
+    unlink "$destination"
+  fi
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    remove_regular_partial "$partial" || {
+      print -u2 "refusing unsafe partial archive path: $partial"
+      return 1
+    }
+  fi
+
+  if ! curl --fail --location --silent --show-error \
+      --retry "$retries" \
+      --max-filesize "$expected_size" \
+      --output "$partial" \
+      "$url"; then
+    remove_regular_partial "$partial" || true
+    return 1
+  fi
+  if [[ ! -f "$partial" || -L "$partial" ]]; then
+    remove_regular_partial "$partial" || true
+    print -u2 "download did not produce a regular partial archive"
+    return 1
+  fi
+  if [[ "$(stat -f '%z' "$partial")" != "$expected_size" ]]; then
+    remove_regular_partial "$partial"
+    print -u2 "archive size mismatch: ${destination:t}"
+    return 1
+  fi
+  if [[ "$(shasum -a 256 "$partial" | awk '{print $1}')" != "$expected_hash" ]]; then
+    remove_regular_partial "$partial"
+    print -u2 "archive hash mismatch: ${destination:t}"
+    return 1
+  fi
+  if ! mv "$partial" "$destination"; then
+    remove_regular_partial "$partial" || true
+    return 1
+  fi
+}
+
 run_safety_self_test() {
   typeset -g wakeword_bootstrap_self_test_root
   wakeword_bootstrap_self_test_root="$(mktemp -d "/private/tmp/miller-wakeword-test-${EUID}-XXXXXX")"
@@ -111,12 +176,71 @@ run_safety_self_test() {
   print "wakeword bootstrap symlink safety verified"
 }
 
+run_download_self_test() {
+  typeset -g wakeword_download_self_test_root
+  wakeword_download_self_test_root="$(mktemp -d "/private/tmp/miller-wakeword-test-${EUID}-XXXXXX")"
+  chmod 700 "$wakeword_download_self_test_root"
+  local test_root="$wakeword_download_self_test_root"
+
+  cleanup_wakeword_download_self_test() {
+    [[ "$wakeword_download_self_test_root" == "/private/tmp/miller-wakeword-test-${EUID}-"* && \
+       -d "$wakeword_download_self_test_root" && \
+       ! -L "$wakeword_download_self_test_root" ]] || return 1
+    find -P "$wakeword_download_self_test_root" -depth -delete
+  }
+  trap cleanup_wakeword_download_self_test EXIT
+
+  local source="$test_root/exact.archive"
+  local destination="$test_root/downloaded.archive"
+  print -n "exact-pinned-bytes" > "$source"
+  local exact_size="$(stat -f '%z' "$source")"
+  local exact_hash="$(shasum -a 256 "$source" | awk '{print $1}')"
+  download_exact_archive \
+    "file://$source" "$destination" "$exact_hash" "$exact_size" 0
+  [[ -f "$destination" && ! -e "$destination.partial" ]] || {
+    print -u2 "exact local archive was not admitted cleanly"
+    exit 1
+  }
+  unlink "$destination"
+
+  local oversized="$test_root/oversized.archive"
+  print -n "one-byte-too-large" > "$oversized"
+  local capped_size=$(($(stat -f '%z' "$oversized") - 1))
+  if download_exact_archive \
+      "file://$oversized" "$destination" "$exact_hash" "$capped_size" 0 \
+      >/dev/null 2>&1; then
+    print -u2 "oversized local archive bypassed the download cap"
+    exit 1
+  fi
+  [[ ! -e "$destination" && ! -e "$destination.partial" ]] || {
+    print -u2 "oversized download retained partial bytes"
+    exit 1
+  }
+
+  if download_exact_archive \
+      "file://$test_root/missing.archive" \
+      "$destination" "$exact_hash" "$exact_size" 0 \
+      >/dev/null 2>&1; then
+    print -u2 "missing local archive unexpectedly downloaded"
+    exit 1
+  fi
+  [[ ! -e "$destination" && ! -e "$destination.partial" ]] || {
+    print -u2 "failed download retained partial bytes"
+    exit 1
+  }
+  print "wakeword exact-size download safety verified"
+}
+
 if [[ "$#" == 1 && "$1" == "--self-test-safety" ]]; then
   run_safety_self_test
   exit 0
 fi
+if [[ "$#" == 1 && "$1" == "--self-test-download-safety" ]]; then
+  run_download_self_test
+  exit 0
+fi
 [[ "$#" == 0 ]] || {
-  print -u2 "usage: $0 [--self-test-safety]"
+  print -u2 "usage: $0 [--self-test-safety|--self-test-download-safety]"
   exit 64
 }
 
@@ -128,6 +252,11 @@ typeset -A archive_hashes=(
   sherpa.tar.bz2 8756afb64ef7a1d612040c323e6f2cf707f90e703395413c79c572e37eddd65e
   model.tar.bz2 f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a
   onnx.zip 4752fa848d9d36143e3942537ff71736d2e581ce192a528482f7edd8d02c9ebf
+)
+typeset -A archive_sizes=(
+  sherpa.tar.bz2 8941262
+  model.tar.bz2 17626723
+  onnx.zip 17358514
 )
 
 if [[ "$vendor_root" == "$canonical_vendor_root" ]]; then
@@ -158,44 +287,20 @@ fetch() {
   local url="$1"
   local destination="$2"
   local expected="$3"
-  reject_symlink_paths "$downloads" "$destination" || exit 1
-  if [[ -f "$destination" && ! -L "$destination" ]] && \
-     [[ "$(shasum -a 256 "$destination" | awk '{print $1}')" == "$expected" ]]; then
-    return
-  fi
-  if [[ -e "$destination" || -L "$destination" ]]; then
-    [[ -f "$destination" && ! -L "$destination" ]] || {
-      print -u2 "refusing unsafe archive path: $destination"
-      exit 1
-    }
-    unlink "$destination"
-  fi
-  local partial="$destination.partial"
-  reject_symlink_paths "$partial" || exit 1
-  if [[ -e "$partial" || -L "$partial" ]]; then
-    [[ -f "$partial" && ! -L "$partial" ]] || {
-      print -u2 "refusing unsafe partial archive path: $partial"
-      exit 1
-    }
-    unlink "$partial"
-  fi
-  curl -fL --retry 3 --output "$partial" "$url"
-  [[ -f "$partial" && ! -L "$partial" ]] || {
-    print -u2 "download did not produce a regular partial archive"
-    exit 1
-  }
-  local actual="$(shasum -a 256 "$partial" | awk '{print $1}')"
-  [[ "$actual" == "$expected" ]] || {
-    unlink "$partial"
-    print -u2 "archive hash mismatch: ${destination:t}"
-    exit 1
-  }
-  mv "$partial" "$destination"
+  local expected_size="$4"
+  download_exact_archive \
+    "$url" "$destination" "$expected" "$expected_size" || exit 1
 }
 
-fetch "$sherpa_url" "$downloads/sherpa.tar.bz2" "$archive_hashes[sherpa.tar.bz2]"
-fetch "$model_url" "$downloads/model.tar.bz2" "$archive_hashes[model.tar.bz2]"
-fetch "$onnx_url" "$downloads/onnx.zip" "$archive_hashes[onnx.zip]"
+fetch \
+  "$sherpa_url" "$downloads/sherpa.tar.bz2" \
+  "$archive_hashes[sherpa.tar.bz2]" "$archive_sizes[sherpa.tar.bz2]"
+fetch \
+  "$model_url" "$downloads/model.tar.bz2" \
+  "$archive_hashes[model.tar.bz2]" "$archive_sizes[model.tar.bz2]"
+fetch \
+  "$onnx_url" "$downloads/onnx.zip" \
+  "$archive_hashes[onnx.zip]" "$archive_sizes[onnx.zip]"
 
 safe_tar_extract() {
   local archive="$1"

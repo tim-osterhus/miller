@@ -113,14 +113,260 @@ struct WakeWordDonorParityTests {
         #expect(detector.shutdownCount == 1)
         #expect(controller.state == .disabled)
     }
+
+    @Test @MainActor
+    func suspendedStartCannotPublishAfterSuspension() async {
+        let recorder = GatedRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe() }
+        )
+
+        let start = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+        await recorder.waitForStartRequest()
+        let suspension = Task { @MainActor in
+            await controller.suspend(.foregroundSession)
+        }
+        await waitUntil {
+            controller.state == .suspended(.foregroundSession)
+        }
+        recorder.releaseStart()
+        await start.value
+        await suspension.value
+
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(controller.state == .suspended(.foregroundSession))
+    }
+
+    @Test @MainActor
+    func suspendedStartCannotPublishAfterDisable() async {
+        let recorder = GatedRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe() }
+        )
+
+        let start = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+        await recorder.waitForStartRequest()
+        let disable = Task { @MainActor in
+            await controller.setEnabled(false)
+        }
+        await waitUntil { controller.state == .stopping }
+        recorder.releaseStart()
+        await start.value
+        await disable.value
+
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(controller.state == .disabled)
+    }
+
+    @Test @MainActor
+    func suspendedStartCannotPublishAfterShutdown() async {
+        let recorder = GatedRecorderProbe()
+        let detector = DetectorProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { detector }
+        )
+
+        let start = Task { @MainActor in
+            await controller.setEnabled(true)
+        }
+        await recorder.waitForStartRequest()
+        let shutdown = Task { @MainActor in
+            await controller.shutdown()
+        }
+        await waitUntil { controller.state == .stopping }
+        recorder.releaseStart()
+        await start.value
+        #expect(await shutdown.value)
+
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(detector.shutdownCount == 1)
+        #expect(controller.state == .disabled)
+    }
+
+    @Test @MainActor
+    func detectorFailureReleasesCaptureBeforePublishingUnavailable() async {
+        let recorder = RecorderProbe()
+        let detector = DetectorProbe(process: { _ in
+            throw WakeWordDetectorError.runtimeFailure
+        })
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { detector }
+        )
+
+        await controller.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        await waitUntil { controller.state == .unavailable(.detectorRuntime) }
+
+        #expect(controller.state == .unavailable(.detectorRuntime))
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(recorder.onSamples == nil)
+        #expect(recorder.stopCount == 1)
+        #expect(detector.shutdownCount == 1)
+    }
+
+    @Test @MainActor
+    func queuedWakeEventCannotPublishAfterSuspension() async {
+        let recorder = RecorderProbe()
+        let scheduler = EventSchedulerProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe(process: { _ in true }) },
+            eventScheduler: scheduler.enqueue
+        )
+
+        await controller.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        #expect(scheduler.count == 1)
+
+        await controller.suspend(.foregroundSession)
+        await scheduler.drain()
+
+        #expect(controller.state == .suspended(.foregroundSession))
+    }
+
+    @Test @MainActor
+    func queuedEndpointEventCannotPublishAfterSuspension() async {
+        let recorder = RecorderProbe()
+        let scheduler = EventSchedulerProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe(process: { _ in true }) },
+            eventScheduler: scheduler.enqueue
+        )
+
+        await controller.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        await scheduler.drain()
+        #expect(controller.state == .handoff)
+
+        for _ in 0..<5 {
+            recorder.emit(ContiguousArray(repeating: 10_000, count: 480))
+        }
+        for _ in 0..<50 {
+            recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        }
+        #expect(scheduler.count == 1)
+
+        await controller.suspend(.foregroundSession)
+        await scheduler.drain()
+
+        #expect(controller.state == .suspended(.foregroundSession))
+    }
+
+    @Test @MainActor
+    func queuedDetectorFailureCannotPublishAfterDisable() async {
+        let recorder = RecorderProbe()
+        let scheduler = EventSchedulerProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: {
+                DetectorProbe(process: { _ in
+                    throw WakeWordDetectorError.runtimeFailure
+                })
+            },
+            eventScheduler: scheduler.enqueue
+        )
+
+        await controller.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        #expect(scheduler.count == 1)
+
+        await controller.setEnabled(false)
+        await scheduler.drain()
+
+        #expect(controller.state == .disabled)
+        #expect(recorder.isWakeMonitoring == false)
+    }
+
+    @Test @MainActor
+    func settingsControllerDoesNotRetainItselfAcrossAnOperationAwait() async {
+        let suite = "WakeWordSettingsLifetime-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = StateOperationGate()
+        var controller: WakeWordSettingsController? = WakeWordSettingsController(
+            defaults: defaults,
+            enable: { await gate.run() },
+            disable: { .disabled }
+        )
+        weak var weakController = controller
+
+        controller?.setEnabled(true)
+        await gate.waitUntilStarted()
+        controller = nil
+        await waitUntil { weakController == nil }
+
+        #expect(weakController == nil)
+        await gate.finish(with: .monitoring)
+    }
+
+    @Test
+    func sherpaRuntimeMapsCreateAcceptResetAndIdempotentDestroy() throws {
+        let probe = SherpaRuntimeProbe(createHandle: true)
+        let detector = try SherpaWakeWordDetector(
+            paths: modelPaths(),
+            runtime: probe.runtime
+        )
+
+        probe.acceptResult = 0
+        #expect(try detector.process(frame: .init(repeating: 0, count: 480)) == false)
+        probe.acceptResult = 1
+        #expect(try detector.process(frame: .init(repeating: 0, count: 480)))
+        probe.acceptResult = -1
+        #expect(throws: WakeWordDetectorError.runtimeFailure) {
+            try detector.process(frame: .init(repeating: 0, count: 480))
+        }
+        #expect(throws: WakeWordDetectorError.invalidFrame) {
+            try detector.process(frame: [0])
+        }
+
+        detector.shutdown()
+        detector.shutdown()
+        #expect(throws: WakeWordDetectorError.unavailable) {
+            try detector.reset()
+        }
+        #expect(probe.destroyCount == 1)
+    }
+
+    @Test
+    func sherpaRuntimeRejectsNilCreate() {
+        let probe = SherpaRuntimeProbe(createHandle: false)
+        #expect(throws: WakeWordDetectorError.unavailable) {
+            try SherpaWakeWordDetector(
+                paths: modelPaths(),
+                runtime: probe.runtime
+            )
+        }
+        #expect(probe.destroyCount == 0)
+    }
 }
 
 private final class DetectorProbe: WakeWordDetecting, @unchecked Sendable {
     let requiredSampleRate = 16_000
     let requiredFrameLength = 480
     private(set) var shutdownCount = 0
+    private let processOperation:
+        @Sendable (ContiguousArray<Int16>) throws -> Bool
 
-    func process(frame: ContiguousArray<Int16>) throws -> Bool { false }
+    init(
+        process: @escaping @Sendable (ContiguousArray<Int16>) throws -> Bool = {
+            _ in false
+        }
+    ) {
+        processOperation = process
+    }
+
+    func process(frame: ContiguousArray<Int16>) throws -> Bool {
+        try processOperation(frame)
+    }
     func reset() throws {}
     func shutdown() { shutdownCount += 1 }
 }
@@ -140,5 +386,150 @@ private final class RecorderProbe: WakeWordCaptureOwning {
         guard isWakeMonitoring else { return }
         isWakeMonitoring = false
         stopCount += 1
+    }
+
+    func emit(_ samples: ContiguousArray<Int16>) {
+        onSamples?(samples)
+    }
+}
+
+@MainActor
+private final class GatedRecorderProbe: WakeWordCaptureOwning {
+    var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    private(set) var isWakeMonitoring = false
+    private(set) var stopCount = 0
+    private var startRequested = false
+    private var startWaiters = [CheckedContinuation<Void, Never>]()
+    private var startGate: CheckedContinuation<Void, Never>?
+
+    func startWakeMonitoring() async throws -> UUID {
+        startRequested = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            startGate = continuation
+        }
+        isWakeMonitoring = true
+        return UUID()
+    }
+
+    func stopWakeMonitoring() async {
+        guard isWakeMonitoring else { return }
+        isWakeMonitoring = false
+        stopCount += 1
+    }
+
+    func waitForStartRequest() async {
+        guard !startRequested else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseStart() {
+        startGate?.resume()
+        startGate = nil
+    }
+}
+
+private actor StateOperationGate {
+    private var started = false
+    private var startWaiters = [CheckedContinuation<Void, Never>]()
+    private var result: WakeWordState?
+    private var resultWaiters = [CheckedContinuation<WakeWordState, Never>]()
+
+    func run() async -> WakeWordState {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if let result { return result }
+        return await withCheckedContinuation { continuation in
+            resultWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish(with state: WakeWordState) {
+        result = state
+        let waiters = resultWaiters
+        resultWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: state) }
+    }
+}
+
+private final class EventSchedulerProbe: @unchecked Sendable {
+    typealias Operation = @MainActor @Sendable () async -> Void
+    private let lock = NSLock()
+    private var operations = [Operation]()
+
+    var count: Int {
+        lock.withLock { operations.count }
+    }
+
+    func enqueue(_ operation: @escaping Operation) {
+        lock.withLock { operations.append(operation) }
+    }
+
+    @MainActor
+    func drain() async {
+        while true {
+            let operation = lock.withLock {
+                operations.isEmpty ? nil : operations.removeFirst()
+            }
+            guard let operation else { return }
+            await operation()
+        }
+    }
+}
+
+private final class SherpaRuntimeProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let createHandle: Bool
+    var acceptResult: Int32 = 0
+    private(set) var destroyCount = 0
+
+    init(createHandle: Bool) {
+        self.createHandle = createHandle
+    }
+
+    var runtime: SherpaWakeWordRuntime {
+        SherpaWakeWordRuntime(
+            create: { [self] _, _ in
+                createHandle ? OpaquePointer(bitPattern: 0x1) : nil
+            },
+            accept: { [self] _, _, _ in lock.withLock { acceptResult } },
+            reset: { _ in },
+            destroy: { [self] _ in
+                lock.withLock { destroyCount += 1 }
+            }
+        )
+    }
+}
+
+private func modelPaths() -> WakeWordModelPaths {
+    WakeWordModelPaths(
+        encoder: URL(fileURLWithPath: "/private/tmp/encoder.onnx"),
+        decoder: URL(fileURLWithPath: "/private/tmp/decoder.onnx"),
+        joiner: URL(fileURLWithPath: "/private/tmp/joiner.onnx"),
+        tokens: URL(fileURLWithPath: "/private/tmp/tokens.txt"),
+        keywords: URL(fileURLWithPath: "/private/tmp/keywords.txt")
+    )
+}
+
+@MainActor
+private func waitUntil(
+    _ condition: @escaping @MainActor () -> Bool
+) async {
+    for _ in 0..<100 {
+        if condition() { return }
+        await Task.yield()
     }
 }
