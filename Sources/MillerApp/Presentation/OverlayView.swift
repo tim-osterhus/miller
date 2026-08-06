@@ -136,13 +136,17 @@ struct OverlayView: View {
         .padding(18)
         .frame(minWidth: 480, minHeight: 320)
         .onExitCommand {
-            model.declineCapabilityApprovalForDismissal()
-            dismiss()
+            handleExitCommand()
         }
         .onAppear { inputFocused = true }
         .onChange(of: model.focusRequest) { _, _ in
             inputFocused = true
         }
+    }
+
+    func handleExitCommand() {
+        model.declineCapabilityApprovalForDismissal()
+        dismiss()
     }
 }
 

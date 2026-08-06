@@ -1172,18 +1172,24 @@ final class CapabilityController: ObservableObject {
 
     private func recoverPendingTerminalAudits() async throws {
         for callID in Array(pendingTerminalAudits.keys) {
-            guard let event = pendingTerminalAudits[callID],
-                  let context = callContexts[callID]
-            else { throw CapabilityControllerError.auditUnavailable }
-            try await persistBeginAudit(
-                callID: callID,
-                context: context,
-                policy: event.policy
-            )
-            try await persistTerminalAudit(event, context: context)
-            markProviderCallMappingsCompleted(callID)
-            releaseCallState(callID)
+            try await recoverPendingTerminalAudit(callID)
         }
+    }
+
+    private func recoverPendingTerminalAudit(
+        _ callID: CapabilityCallID
+    ) async throws {
+        guard let event = pendingTerminalAudits[callID],
+              let context = callContexts[callID]
+        else { throw CapabilityControllerError.auditUnavailable }
+        try await persistBeginAudit(
+            callID: callID,
+            context: context,
+            policy: event.policy
+        )
+        try await persistTerminalAudit(event, context: context)
+        markProviderCallMappingsCompleted(callID)
+        releaseCallState(callID)
     }
 
     private func markProviderCallMappingsCompleted(_ callID: CapabilityCallID) {
@@ -1359,6 +1365,10 @@ final class CapabilityController: ObservableObject {
 
     private func finalizeProviderActivities() async {
         for callID in Set(providerCallIDs.values) {
+            if pendingTerminalAudits[callID] != nil {
+                try? await recoverPendingTerminalAudit(callID)
+                continue
+            }
             guard let context = callContexts[callID] else { continue }
             let event = try? CapabilityLifecycleEvent(
                 callID: callID,
@@ -1370,10 +1380,31 @@ final class CapabilityController: ObservableObject {
             )
             if let event { await recordLifecycle(event) }
             if terminalAuditIDs.contains(callID) {
+                markProviderCallMappingsCompleted(callID)
                 releaseCallState(callID)
             }
         }
-        resetProviderActivityAuthority()
+        retainOnlyUndurableProviderActivityAuthority()
+    }
+
+    private func retainOnlyUndurableProviderActivityAuthority() {
+        let retainedCallIDs = Set(providerCallIDs.values.filter {
+            callContexts[$0] != nil
+        })
+        guard !retainedCallIDs.isEmpty else {
+            resetProviderActivityAuthority()
+            return
+        }
+        providerCallIDs = providerCallIDs.filter {
+            retainedCallIDs.contains($0.value)
+        }
+        providerCallPolicies = providerCallPolicies.filter {
+            retainedCallIDs.contains($0.key)
+        }
+        providerCallStartedAt = providerCallStartedAt.filter {
+            retainedCallIDs.contains($0.key)
+        }
+        completedProviderCallKeys.formIntersection(providerCallIDs.keys)
     }
 
     private func markTypedGenerationCancelled(_ key: String) {

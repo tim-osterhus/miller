@@ -47,7 +47,7 @@ struct OverlayLiveVoicePresentationTests {
         controller.show()
         try await waitUntil { controller.window?.isVisible == true }
 
-        entryPoint.dismiss(controller)
+        entryPoint.dismiss(controller, model: model)
 
         #expect(await approval.value == .decline)
         #expect(capabilityController.pendingApproval == nil)
@@ -67,7 +67,7 @@ struct OverlayLiveVoicePresentationTests {
         controller.show()
         try await waitUntil { controller.window?.isVisible == true }
 
-        entryPoint.dismiss(controller)
+        entryPoint.dismiss(controller, model: model)
         try await waitUntil { await probe.endEntered }
         // Escape/status-toggle/window-close all reach the same controller
         // method; a second dismissal must join, not hide early or end twice.
@@ -131,10 +131,16 @@ private enum OverlayDismissalEntryPoint: CaseIterable {
     static var allCases: [Self] { [.escape, .statusToggle, .windowClose] }
 
     @MainActor
-    func dismiss(_ controller: OverlayPanelController) {
+    func dismiss(
+        _ controller: OverlayPanelController,
+        model: AppPresentationModel
+    ) {
         switch self {
         case .escape:
-            controller.dismissAfterLiveVoiceCleanup()
+            OverlayView(
+                model: model,
+                dismiss: { controller.dismissAfterLiveVoiceCleanup() }
+            ).handleExitCommand()
         case .statusToggle:
             controller.toggle()
         case .windowClose:

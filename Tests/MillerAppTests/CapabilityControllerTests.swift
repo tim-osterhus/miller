@@ -1255,6 +1255,51 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func associationEndRetriesObservedProviderSuccessWithoutCancellingIt() async throws {
+        let audit = CapabilityAuditProbe(terminalFailures: 1)
+        let fixture = try makeFixture(
+            policy: .fullyTrusted,
+            readOnly: false,
+            audit: audit
+        )
+        await fixture.controller.start()
+        let turnID = TurnID()
+        fixture.controller.admitTypedAssociation(
+            .typed(
+                conversationID: ConversationID(),
+                turnID: turnID,
+                generation: 1
+            ),
+            providerProfileID: fixture.profileID
+        )
+        let terminal = CodexCapabilityActivity(
+            threadID: "truthful-terminal-thread",
+            turnID: "truthful-terminal-turn",
+            itemID: "truthful-terminal-item",
+            capabilityID: try CapabilityID(
+                source: .providerNative,
+                serverID: "codex",
+                toolName: "web-search"
+            ),
+            phase: .terminal,
+            outcome: .succeeded,
+            summary: try CapabilitySummary(text: "Provider details unavailable"),
+            visibility: .opaqueProviderActivity
+        )
+
+        await fixture.controller.recordProviderActivity(terminal)
+        #expect(await audit.terminalRows == 0)
+        await fixture.controller.finishTypedAssociation(
+            turnID: turnID,
+            generation: 1
+        )
+
+        #expect(await audit.terminalRows == 1)
+        #expect(await audit.outcomes == [.succeeded])
+        #expect(fixture.controller.activityRows.map(\.status) == ["Succeeded"])
+    }
+
+    @Test
     func recoveredProviderTerminalAuditIgnoresLateDuplicateActivity() async throws {
         let audit = CapabilityAuditProbe(terminalFailures: 1)
         let fixture = try makeFixture(
@@ -1676,6 +1721,7 @@ private actor CapabilityAuditProbe {
     private(set) var approvalRequests: [Bool] = []
     private(set) var records: [CapabilityAuditRecord] = []
     private(set) var terminalObservedAt: [Date] = []
+    private(set) var outcomes: [CapabilityTerminalOutcome] = []
     private(set) var beginAttempts = 0
     private(set) var terminalAttempts = 0
     private var beginFailures: Int
@@ -1693,8 +1739,8 @@ private actor CapabilityAuditProbe {
     nonisolated func dependencies() -> CapabilityPersistenceDependencies {
         CapabilityPersistenceDependencies(
             beginAudit: { [self] record in try await recordBegin(record) },
-            terminalizeAudit: { [self] _, _, decision in
-                try await recordTerminal(decision)
+            terminalizeAudit: { [self] _, outcome, decision in
+                try await recordTerminal(outcome, decision: decision)
             }
         )
     }
@@ -1710,13 +1756,17 @@ private actor CapabilityAuditProbe {
         approvalRequests.append(record.approvalRequested)
     }
 
-    private func recordTerminal(_ decision: CapabilityApprovalDecision?) throws {
+    private func recordTerminal(
+        _ outcome: CapabilityTerminalOutcome,
+        decision: CapabilityApprovalDecision?
+    ) throws {
         terminalAttempts += 1
         if terminalFailures > 0 {
             terminalFailures -= 1
             throw CapabilityAuditProbeError.persistenceUnavailable
         }
         terminalRows += 1
+        outcomes.append(outcome)
         terminalObservedAt.append(Date())
         if let decision { decisions.append(decision) }
     }
