@@ -27,9 +27,76 @@ private final class SpawnedProcessVerifierProbe: @unchecked Sendable {
     }
 }
 
+private actor ProviderApprovalPresentationProbe {
+    private(set) var requests: [CapabilityApprovalRequest] = []
+
+    func approve(_ request: CapabilityApprovalRequest) -> CapabilityApprovalDecision {
+        requests.append(request)
+        return .allowOnce
+    }
+}
+
 @Suite(.serialized)
 @MainActor
 struct GPTLivePresentationTests {
+    @Test
+    func helperLiveVoiceRoutesProviderApprovalThroughInjectedMillerContract() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/provider-approval-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryParent) }
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let helper = temporaryParent.appendingPathComponent("fake-helper")
+        try Data(
+            "#!/bin/sh\nexec /opt/homebrew/opt/node@22/bin/node \(fixture.path) realtime-provider-approval\n".utf8
+        ).write(to: helper)
+        #expect(chmod(helper.path, 0o700) == 0)
+        let reference = UUID()
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: reference,
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let approvals = ProviderApprovalPresentationProbe()
+        let controller = try GPTLiveController(
+            helperURL: helper,
+            temporaryParentURL: temporaryParent,
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            resolveProviderApproval: { request in await approvals.approve(request) },
+            makeSession: { client in
+                LiveAudioSession(client: client, peer: PresentationTestPeer())
+            },
+            helperVerifier: acceptingLiveHelperVerifier,
+            spawnedProcessVerifier: { _ in }
+        )
+
+        try await controller.dependencies().start { _ in }
+
+        #expect(await approvals.requests.count == 1)
+        #expect(await approvals.requests.first?.policy.requiresApproval == true)
+    }
+
     @Test
     func transcriptPersistenceFailureIsPresentedWithoutEndingLiveMedia() async {
         let recorder = LiveVoiceTranscriptRecorder(

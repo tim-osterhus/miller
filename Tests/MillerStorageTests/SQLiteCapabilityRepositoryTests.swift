@@ -189,6 +189,47 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func catalogRoundTripPreservesProviderAuthorityState() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        try await repository.saveServer(makeServer())
+        let authorityDescriptor = try CapabilityDescriptor(
+            id: CapabilityID(
+                source: .codexAccount,
+                serverID: "local-tools",
+                toolName: "calendar"
+            ),
+            source: .codexAccount,
+            serverID: "local-tools",
+            toolName: "calendar",
+            displayName: "Calendar",
+            summary: "Calendar is unavailable.",
+            inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+            readOnlyHint: nil,
+            providerProfileIDs: [],
+            isAvailable: true,
+            isAccessible: false,
+            isEnabled: false,
+            isCallable: false,
+            visibility: .providerManaged
+        )
+
+        try await repository.reconcileCatalog(
+            serverID: "local-tools",
+            descriptors: [authorityDescriptor]
+        )
+
+        let restored = try #require(
+            await repository.catalog(serverID: "local-tools").first?.descriptor
+        )
+        #expect(restored.isAvailable == true)
+        #expect(restored.isAccessible == false)
+        #expect(restored.isEnabled == false)
+        #expect(restored.isCallable == false)
+        #expect(restored.visibility == .providerManaged)
+    }
+
+    @Test
     func catalogBoundsAreCheckedBeforeAtomicRefresh() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)

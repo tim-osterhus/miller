@@ -498,8 +498,10 @@ public actor SQLiteCapabilityRepository {
                     INSERT INTO capability_tools
                         (id, server_id, source, source_server_id, tool_name,
                          display_name, summary, input_schema_json, read_only_hint,
-                         available, stale_state, content_hash, reconciled_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', NULL, ?)
+                         available, accessible, enabled, callable, visibility,
+                         stale_state, content_hash, reconciled_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            'current', NULL, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         server_id = excluded.server_id,
                         source = excluded.source,
@@ -510,6 +512,10 @@ public actor SQLiteCapabilityRepository {
                         input_schema_json = excluded.input_schema_json,
                         read_only_hint = excluded.read_only_hint,
                         available = excluded.available,
+                        accessible = excluded.accessible,
+                        enabled = excluded.enabled,
+                        callable = excluded.callable,
+                        visibility = excluded.visibility,
                         stale_state = 'current',
                         reconciled_at = excluded.reconciled_at
                     """,
@@ -521,6 +527,10 @@ public actor SQLiteCapabilityRepository {
                         .blob(descriptor.inputSchemaJSON),
                         descriptor.readOnlyHint.map { .integer($0 ? 1 : 0) } ?? .null,
                         .integer(descriptor.isAvailable ? 1 : 0),
+                        .integer(descriptor.isAccessible ? 1 : 0),
+                        .integer(descriptor.isEnabled ? 1 : 0),
+                        .integer(descriptor.isCallable ? 1 : 0),
+                        .text(descriptor.visibility.rawValue),
                         .text(Self.timestamp(refreshedAt)),
                     ]
                 )
@@ -570,7 +580,8 @@ public actor SQLiteCapabilityRepository {
             """
             SELECT t.id, t.source, t.source_server_id, t.tool_name,
                    t.display_name, t.summary, t.input_schema_json,
-                   t.read_only_hint, t.available, t.stale_state,
+                   t.read_only_hint, t.available, t.accessible, t.enabled,
+                   t.callable, t.visibility, t.stale_state,
                    o.policy, t.reconciled_at
             FROM capability_tools t
             LEFT JOIN capability_policy_overrides o ON o.tool_id = t.id
@@ -1068,25 +1079,31 @@ public actor SQLiteCapabilityRepository {
         _ row: [SQLiteValue],
         providerIDs: Set<UUID>
     ) throws -> CapabilityToolRecord {
-        guard row.count == 12, let idValue = string(row[0]),
+        guard row.count == 16, let idValue = string(row[0]),
               let id = try? CapabilityID(rawValue: idValue),
               let sourceValue = string(row[1]),
               let source = CapabilitySource(rawValue: sourceValue),
               let serverID = string(row[2]), let toolName = string(row[3]),
               let displayName = string(row[4]), let summary = string(row[5]),
               case let .blob(schema) = row[6], let available = bool(row[8]),
-              let staleValue = string(row[9]),
+              let accessible = bool(row[9]), let enabled = bool(row[10]),
+              let callable = bool(row[11]),
+              let visibilityValue = string(row[12]),
+              let visibility = CapabilityVisibility(rawValue: visibilityValue),
+              let staleValue = string(row[13]),
               let stale = CapabilityCatalogStaleState(rawValue: staleValue),
-              let reconciledValue = string(row[11]),
+              let reconciledValue = string(row[15]),
               let reconciledAt = date(reconciledValue)
         else { throw CapabilityStorageError.invalidRecord }
         let descriptor = try CapabilityDescriptor(
             id: id, source: source, serverID: serverID, toolName: toolName,
             displayName: displayName, summary: summary,
             inputSchemaJSON: schema, readOnlyHint: optionalBool(row[7]),
-            providerProfileIDs: providerIDs, isAvailable: available
+            providerProfileIDs: providerIDs, isAvailable: available,
+            isAccessible: accessible, isEnabled: enabled,
+            isCallable: callable, visibility: visibility
         )
-        let override = string(row[10]).flatMap(CapabilityPolicy.init(rawValue:))
+        let override = string(row[14]).flatMap(CapabilityPolicy.init(rawValue:))
         return CapabilityToolRecord(
             descriptor: descriptor, staleState: stale,
             policyOverride: override, reconciledAt: reconciledAt

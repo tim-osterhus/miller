@@ -175,6 +175,37 @@ struct CapabilityBrokerTests {
     }
 
     @Test
+    func unavailableProjectionPreservesProviderAuthorityState() throws {
+        let descriptor = try CapabilityDescriptor(
+            id: CapabilityID(
+                source: .millerMCP,
+                serverID: "calendar",
+                toolName: "list"
+            ),
+            source: .millerMCP,
+            serverID: "calendar",
+            toolName: "list",
+            displayName: "List calendar",
+            summary: "List calendar events.",
+            inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+            readOnlyHint: true,
+            providerProfileIDs: [UUID()],
+            isAvailable: true,
+            isAccessible: false,
+            isEnabled: false,
+            isCallable: false,
+            visibility: .providerManaged
+        )
+
+        let unavailable = try #require(CapabilityBroker.unavailable(descriptor))
+        #expect(unavailable.isAvailable == false)
+        #expect(unavailable.isAccessible == false)
+        #expect(unavailable.isEnabled == false)
+        #expect(unavailable.isCallable == false)
+        #expect(unavailable.visibility == .providerManaged)
+    }
+
+    @Test
     func disabledServerIsNotListedOrExecutedForProvider() async throws {
         let fixture = BrokerFixture(providerEnabled: false)
         let broker = try await fixture.makeBroker()

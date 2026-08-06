@@ -375,6 +375,26 @@ enum SQLiteMigrations {
                 ON capability_audit(started_at);
             """
         ),
+        SQLiteMigration(
+            version: 4,
+            sql: """
+            ALTER TABLE capability_tools
+            ADD COLUMN accessible INTEGER NOT NULL DEFAULT 1
+                CHECK (accessible IN (0, 1));
+
+            ALTER TABLE capability_tools
+            ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1
+                CHECK (enabled IN (0, 1));
+
+            ALTER TABLE capability_tools
+            ADD COLUMN callable INTEGER NOT NULL DEFAULT 1
+                CHECK (callable IN (0, 1));
+
+            ALTER TABLE capability_tools
+            ADD COLUMN visibility TEXT NOT NULL DEFAULT 'owner_managed'
+                CHECK (visibility IN ('owner_managed', 'provider_managed'));
+            """
+        ),
     ]
 
     static let latestVersion = all.last?.version ?? 0

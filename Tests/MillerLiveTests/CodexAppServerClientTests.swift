@@ -1,6 +1,7 @@
 @testable import MillerLive
 import Darwin
 import Foundation
+import MillerCore
 import Testing
 
 private actor RefreshRecorder {
@@ -22,6 +23,20 @@ private actor CleanupCompletionFlag {
 
     func markComplete() { isComplete = true }
     func reportPending() { pendingReports += 1 }
+}
+
+private actor CapabilityEventRecorder {
+    private(set) var activities: [CodexCapabilityActivity] = []
+    private(set) var approvals: [CapabilityApprovalRequest] = []
+
+    func record(_ activity: CodexCapabilityActivity) {
+        activities.append(activity)
+    }
+
+    func approve(_ request: CapabilityApprovalRequest) -> CapabilityApprovalDecision {
+        approvals.append(request)
+        return .allowOnce
+    }
 }
 
 private let syntheticSHA256Fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
@@ -51,6 +66,161 @@ a=max-message-size:262144\r
 
 @Suite(.serialized)
 struct CodexAppServerClientTests {
+    @Test
+    func inventoriesPagedCodexAppsAndMCPWithoutDuplicatingTheMillerBridge() async throws {
+        let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let existing = try CapabilityDescriptor(
+            id: CapabilityID(rawValue: "miller_mcp/calendar/list"),
+            source: .millerMCP,
+            serverID: "calendar",
+            toolName: "list",
+            displayName: "List events",
+            summary: "Lists events",
+            inputSchemaJSON: Data("{}".utf8),
+            readOnlyHint: true,
+            providerProfileIDs: [profileID],
+            isAvailable: true
+        )
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-inventory"
+        ))
+        let client = CodexAppServerClient(process: process)
+
+        let catalog = try await client.inventoryCapabilities(
+            requestID: "inventory-1",
+            credential: credential,
+            codexProviderProfileID: profileID,
+            existingMillerCapabilities: [existing],
+            timeout: .seconds(2)
+        )
+
+        #expect(catalog.descriptors.contains { descriptor in
+            descriptor.id.rawValue == "codex_account/gmail/search"
+                && descriptor.visibility == .providerManaged
+                && descriptor.isCallable
+        })
+        #expect(catalog.descriptors.contains(existing))
+        #expect(catalog.descriptors.filter {
+            $0.id.rawValue == existing.id.rawValue
+        }.count == 1)
+        #expect(!catalog.descriptors.contains {
+            $0.id.rawValue.contains("miller-capability-bridge")
+        })
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func typedProviderApprovalUsesInjectedMillerResolverAndResponseChannel() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-provider-approval"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            resolveProviderApproval: { request in await recorder.approve(request) }
+        )
+
+        var messages: [CodexTypedMessage] = []
+        for try await message in client.typedEvents(
+            requestID: "typed-approval-1",
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            context: [],
+            userText: "perform approved action",
+            timeout: .seconds(2)
+        ) {
+            messages.append(message)
+        }
+
+        #expect(await recorder.approvals.count == 1)
+        #expect(await recorder.approvals.first?.policy.requiresApproval == true)
+        #expect(messages.contains {
+            if case .turnCompleted(_, _, .completed) = $0 { true } else { false }
+        })
+        #expect(!process.isRunning)
+    }
+
+    @Test
+    func realtimeCapabilityLifecycleIsSanitizedAndDoesNotEnterTranscriptEvents() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "realtime-capability"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            onCapabilityActivity: { activity in await recorder.record(activity) }
+        )
+
+        let events = try await client.runUntilClosed(
+            identity: identity,
+            credential: credential,
+            timeout: .seconds(2)
+        )
+
+        let activities = await recorder.activities
+        #expect(activities.count == 2)
+        #expect(activities.allSatisfy { activity in
+            activity.visibility == .opaqueProviderActivity
+                && !activity.summary.text.contains("private")
+        })
+        #expect(events.last == .closed(
+            threadID: identity.threadID,
+            reason: "synthetic-complete"
+        ))
+    }
+
+    @Test
+    func typedCapabilityWithWrongAuthorityCannotReachActivityCallback() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-wrong-authority"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            onCapabilityActivity: { activity in await recorder.record(activity) }
+        )
+
+        await #expect(throws: (any Error).self) {
+            for try await _ in client.typedEvents(
+                requestID: "typed-wrong-authority-1",
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                context: [],
+                userText: "do not execute",
+                timeout: .seconds(2)
+            ) {}
+        }
+
+        #expect(await recorder.activities.isEmpty)
+        #expect(!process.isRunning)
+    }
+
+    @Test
+    func realtimeCapabilityWithWrongAuthorityCannotReachActivityCallback() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "realtime-capability-wrong-authority"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            onCapabilityActivity: { activity in await recorder.record(activity) }
+        )
+
+        await #expect(throws: (any Error).self) {
+            _ = try await client.runUntilClosed(
+                identity: identity,
+                credential: credential,
+                timeout: .seconds(2)
+            )
+        }
+
+        #expect(await recorder.activities.isEmpty)
+        #expect(!process.isRunning)
+    }
+
     @Test(arguments: [
         "",
         "v=0\u{0000}\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n",

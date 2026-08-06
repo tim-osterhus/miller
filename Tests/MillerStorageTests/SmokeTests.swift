@@ -211,7 +211,7 @@ struct MillerStorageTests {
     func testSchemaAllowsExactlyOneSelectedProviderProfile() throws {
         let fixture = try TestDatabase(named: #function)
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
@@ -230,6 +230,22 @@ struct MillerStorageTests {
             ),
             1
         )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+            ),
+            1
+        )
+        let capabilityColumns = try database.query(
+            "PRAGMA table_info(capability_tools)"
+        ).compactMap { row -> String? in
+            guard row.count > 1, case let .text(name) = row[1] else { return nil }
+            return name
+        }
+        #expect(capabilityColumns.contains("accessible"))
+        #expect(capabilityColumns.contains("enabled"))
+        #expect(capabilityColumns.contains("callable"))
+        #expect(capabilityColumns.contains("visibility"))
         try database.execute(
             """
             INSERT INTO provider_profiles
@@ -317,7 +333,7 @@ struct MillerStorageTests {
             try database.execute("PRAGMA user_version = 99")
         }
         XCTAssertThrowsError(try SQLiteConversationRepository(path: newer.path)) {
-            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 3))
+            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 4))
         }
     }
 
@@ -366,10 +382,10 @@ struct MillerStorageTests {
         XCTAssertEqual(process.terminationStatus, 0)
 
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
         XCTAssertEqual(
             try database.scalarInt("SELECT MAX(version) FROM schema_migrations"),
-            3
+            4
         )
         XCTAssertEqual(try database.scalarInt("PRAGMA foreign_keys"), 1)
         XCTAssertEqual(try database.scalarText("PRAGMA quick_check"), "ok")
@@ -432,7 +448,7 @@ struct MillerStorageTests {
         let database = try SQLiteDatabase(path: duplicate.path)
         XCTAssertThrowsError(
             try database.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (4, ?)",
                 bindings: [.text(now)]
             )
         ) { XCTAssertEqual($0 as? SQLiteError, .constraintFailed) }
@@ -466,7 +482,7 @@ struct MillerStorageTests {
             for _ in 0..<2 {
                 group.addTask {
                     let database = try SQLiteDatabase(path: fixture.path)
-                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 3)
+                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
                 }
             }
             try await group.waitForAll()
@@ -474,7 +490,64 @@ struct MillerStorageTests {
         let database = try SQLiteDatabase(path: fixture.path)
         XCTAssertEqual(
             try database.scalarInt(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+            ),
+            1
+        )
+    }
+
+    @Test
+    func testVersionThreeCapabilityRowsMigrateWithSafeAuthorityDefaults() throws {
+        let fixture = try TestDatabase(named: #function)
+        let versionThreeSQL = SQLiteMigrations.all
+            .filter { $0.version <= 3 }
+            .map(\.sql)
+            .joined(separator: "\n")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            fixture.path,
+            """
+            PRAGMA foreign_keys = ON;
+            BEGIN;
+            \(versionThreeSQL)
+            INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, '\(now)'), (2, '\(now)'), (3, '\(now)');
+            INSERT INTO capability_servers
+                (id, display_name, transport, command, endpoint, arguments_json,
+                 enabled, default_policy, stale_state, created_at, updated_at)
+                VALUES ('legacy', 'Legacy', 'stdio', '/usr/bin/env', NULL, '[]',
+                        1, 'ask_before_changes', 'current', '\(now)', '\(now)');
+            INSERT INTO capability_tools
+                (id, server_id, source, source_server_id, tool_name,
+                 display_name, summary, input_schema_json, read_only_hint,
+                 available, stale_state, content_hash, reconciled_at)
+                VALUES ('miller_mcp/legacy/list', 'legacy', 'miller_mcp',
+                        'legacy', 'list', 'List', 'List', X'7B7D', 1,
+                        1, 'current', NULL, '\(now)');
+            PRAGMA user_version = 3;
+            COMMIT;
+            """,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let database = try SQLiteDatabase(path: fixture.path)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 4)
+        XCTAssertEqual(
+            try database.query(
+                """
+                SELECT accessible, enabled, callable, visibility
+                FROM capability_tools
+                WHERE id = 'miller_mcp/legacy/list'
+                """
+            ),
+            [[.integer(1), .integer(1), .integer(1), .text("owner_managed")]]
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
             ),
             1
         )

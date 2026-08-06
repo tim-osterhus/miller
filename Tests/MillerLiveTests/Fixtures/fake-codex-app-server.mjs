@@ -127,6 +127,45 @@ function emitLifecycle() {
     notify("thread/realtime/error", { threadId: emittedThread, message: "synthetic realtime error" });
     return;
   }
+  if (mode === "realtime-capability" ||
+      mode === "realtime-capability-wrong-authority") {
+    const capabilityThread = mode === "realtime-capability-wrong-authority"
+      ? "thread-other"
+      : emittedThread;
+    notify("item/started", {
+      threadId: capabilityThread, startedAtMs: 1,
+      turnId: "turn-capability-1",
+      item: {
+        type: "mcpToolCall", id: "capability-1", server: "gmail",
+        tool: "search", status: "inProgress",
+        arguments: { query: "private query" },
+        appContext: { connectorId: "gmail", actionName: "search" },
+      },
+    });
+    notify("item/completed", {
+      threadId: capabilityThread, completedAtMs: 2,
+      turnId: "turn-capability-1",
+      item: {
+        type: "mcpToolCall", id: "capability-1", server: "gmail",
+        tool: "search", status: "completed",
+        arguments: { query: "private query" },
+        result: { private: "result" },
+        appContext: { connectorId: "gmail", actionName: "search" },
+      },
+    });
+  }
+  if (mode === "realtime-provider-approval") {
+    send({
+      id: "realtime-approval-1",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: emittedThread, turnId: "turn-approval-1",
+        itemId: "file-change-1", startedAtMs: 1,
+        reason: "private provider reason",
+      },
+    });
+    return;
+  }
   notify("thread/realtime/transcript/delta", { threadId: emittedThread, role: "assistant", delta: "hel" });
   notify("thread/realtime/transcript/done", { threadId: emittedThread, role: "assistant", text: "hello" });
   notify("thread/realtime/outputAudio/delta", {
@@ -232,6 +271,14 @@ lines.on("line", (line) => {
     return;
   }
   const request = JSON.parse(line);
+  if (mode === "realtime-provider-approval" &&
+      request.id === "realtime-approval-1") {
+    if (request.result?.decision !== "accept") process.exit(51);
+    notify("thread/realtime/closed", {
+      threadId, reason: "synthetic-complete",
+    });
+    return;
+  }
   if (mode.startsWith("typed-")) {
     if ((mode === "typed-record" || mode === "typed-probe-record" ||
          mode.startsWith("typed-authority-")) && pidPath) {
@@ -248,6 +295,64 @@ lines.on("line", (line) => {
     if (request.method === "initialized") return;
     if (request.method === "account/login/start") {
       send({ id: request.id, result: { type: "chatgptAuthTokens" } });
+      return;
+    }
+    if (mode === "typed-capability-inventory" && request.method === "app/list") {
+      if (request.params?.cursor === null) {
+        send({ id: request.id, result: { data: [{
+          id: "gmail", name: "Gmail", description: "Mail",
+          isAccessible: true, isEnabled: true,
+        }], nextCursor: "apps-page-2" } });
+      } else if (request.params?.cursor === "apps-page-2") {
+        send({ id: request.id, result: { data: [{
+          id: "drive", name: "Drive", description: "Files",
+          isAccessible: false, isEnabled: true,
+        }], nextCursor: null } });
+      } else process.exit(49);
+      return;
+    }
+    if (mode === "typed-capability-inventory" && request.method === "app/read") {
+      send({ id: request.id, result: {
+        apps: request.params.appIds.map((appId) => ({
+          id: appId,
+          name: appId === "gmail" ? "Gmail" : "Drive",
+          description: "Synthetic app",
+          toolSummaries: appId === "gmail" ? [{
+            name: "search", title: "Search Gmail",
+            description: "Search messages", isEnabled: true, isReadOnly: true,
+          }] : [],
+        })),
+        missingAppIds: [],
+      } });
+      return;
+    }
+    if (mode === "typed-capability-inventory" && request.method === "app/installed") {
+      send({ id: request.id, result: { apps: [
+        { id: "gmail", enabled: true, callable: true },
+        { id: "drive", enabled: true, callable: false },
+      ] } });
+      return;
+    }
+    if (mode === "typed-capability-inventory" &&
+        request.method === "mcpServerStatus/list") {
+      if (request.params?.cursor === null) {
+        send({ id: request.id, result: { data: [{
+          name: "miller-capability-bridge", authStatus: "unsupported",
+          tools: { miller_a13462d74f54f23f_list: {
+            name: "miller_a13462d74f54f23f_list",
+            title: "List events", description: "Duplicate",
+            inputSchema: { type: "object" },
+          } }, resources: [], resourceTemplates: [],
+        }], nextCursor: "mcp-page-2" } });
+      } else if (request.params?.cursor === "mcp-page-2") {
+        send({ id: request.id, result: { data: [{
+          name: "external", authStatus: "bearerToken",
+          tools: { inspect: {
+            name: "inspect", description: "Inspect resource",
+            inputSchema: { type: "object" },
+          } }, resources: [], resourceTemplates: [],
+        }], nextCursor: null } });
+      } else process.exit(50);
       return;
     }
     if (request.method === "thread/start") {
@@ -389,13 +494,25 @@ lines.on("line", (line) => {
         });
         return;
       }
-      if (mode === "typed-approval") {
+      if (mode === "typed-capability-wrong-authority") {
+        notify("item/started", {
+          threadId: "thread-other",
+          turnId: typedTurnId, startedAtMs: 1,
+          item: {
+            type: "mcpToolCall", id: "wrong-authority-1", server: "gmail",
+            tool: "search", status: "inProgress",
+            arguments: { query: "private query" },
+          },
+        });
+        return;
+      }
+      if (mode === "typed-approval" || mode === "typed-provider-approval") {
         send({
           id: "approval-request-1",
           method: "item/commandExecution/requestApproval",
           params: {
             threadId, turnId: typedTurnId, itemId: "approval-item-1",
-            reason: "private approval reason",
+            startedAtMs: 1, reason: "private approval reason",
           },
         });
         return;
@@ -453,20 +570,29 @@ lines.on("line", (line) => {
         for (const type of ["webSearch", "mcpToolCall", "app-mcpToolCall"]) {
           const wireType = type === "app-mcpToolCall" ? "mcpToolCall" : type;
           const appContext = type === "app-mcpToolCall"
-            ? { resourceUri: "private://resource" }
+            ? { connectorId: "app", actionName: "search" }
             : undefined;
           notify("item/started", {
-            threadId, turnId: typedTurnId,
+            threadId, turnId: typedTurnId, startedAtMs: 1,
             item: {
               type: wireType, id: `cap-${type}`, status: "inProgress",
-              appContext, arguments: { secret: "private" },
+              appContext,
+              query: wireType === "webSearch" ? "private" : undefined,
+              server: wireType === "mcpToolCall" ? "server" : undefined,
+              tool: wireType === "mcpToolCall" ? "search" : undefined,
+              arguments: { secret: "private" },
             },
           });
           notify("item/completed", {
-            threadId, turnId: typedTurnId,
+            threadId, turnId: typedTurnId, completedAtMs: 2,
             item: {
               type: wireType, id: `cap-${type}`, status: "completed",
-              appContext, result: { secret: "private" },
+              appContext,
+              query: wireType === "webSearch" ? "private" : undefined,
+              server: wireType === "mcpToolCall" ? "server" : undefined,
+              tool: wireType === "mcpToolCall" ? "search" : undefined,
+              arguments: { secret: "private" },
+              result: { secret: "private" },
             },
           });
         }
@@ -515,13 +641,19 @@ lines.on("line", (line) => {
       });
       return;
     }
-    if (mode === "typed-approval" && request.id === "approval-request-1") {
-      if (request.result?.decision !== "decline") process.exit(47);
+    if ((mode === "typed-approval" || mode === "typed-provider-approval") &&
+        request.id === "approval-request-1") {
+      const expectedDecision = mode === "typed-provider-approval" ? "accept" : "decline";
+      if (request.result?.decision !== expectedDecision) process.exit(47);
       notify("turn/completed", {
         threadId,
         turn: {
-          id: typedTurnId, status: "failed", items: [],
-          error: { message: "private approval unavailable" },
+          id: typedTurnId,
+          status: mode === "typed-provider-approval" ? "completed" : "failed",
+          items: [],
+          error: mode === "typed-provider-approval"
+            ? null
+            : { message: "private approval unavailable" },
         },
       });
       return;

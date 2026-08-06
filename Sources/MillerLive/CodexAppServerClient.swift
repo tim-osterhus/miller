@@ -1,4 +1,5 @@
 import Foundation
+import MillerCore
 
 public enum CodexAppServerClientError: Error, Equatable, Sendable {
     case wrongResponse
@@ -113,24 +114,168 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private let codec: CodexAppServerProtocol
     private let bridge: CodexCredentialBridge
     private let refreshProvider: CodexCredentialRefreshProvider?
+    private let onCapabilityActivity: CodexCapabilityActivityHandler
+    private let resolveProviderApproval: CodexProviderApprovalResolver
+    private let existingMillerCapabilities: [CapabilityDescriptor]
     private let state = State()
 
     public init(
         process: CodexAppServerProcess,
-        codec: CodexAppServerProtocol = .init(),
+        codec: CodexAppServerProtocol? = nil,
         bridge: CodexCredentialBridge = .init(),
-        refreshProvider: CodexCredentialRefreshProvider? = nil
+        refreshProvider: CodexCredentialRefreshProvider? = nil,
+        onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
+        resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
+        existingMillerCapabilities: [CapabilityDescriptor] = []
     ) {
         self.process = process
-        self.codec = codec
+        self.codec = codec ?? CodexAppServerProtocol(
+            existingMillerCapabilities: existingMillerCapabilities
+        )
         self.bridge = bridge
         self.refreshProvider = refreshProvider
+        self.onCapabilityActivity = onCapabilityActivity
+        self.resolveProviderApproval = resolveProviderApproval
+        self.existingMillerCapabilities = existingMillerCapabilities
     }
 
     public var sessionState: LiveSessionState { state.locked { $0.contract.state } }
     public var unacknowledgedAudioCount: Int { state.locked { $0.pendingAppendIDs.count } }
     package var hasActiveTypedTurn: Bool {
         state.locked { $0.typedActive && $0.typedThreadID != nil && $0.typedTurnID != nil }
+    }
+
+    public func inventoryCapabilities(
+        requestID: String,
+        credential: CodexOAuthCredential,
+        codexProviderProfileID: UUID,
+        existingMillerCapabilities: [CapabilityDescriptor],
+        timeout: Duration = .seconds(15),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) async throws -> CapabilityCatalogSnapshot {
+        let admitted = state.locked { value -> Bool in
+            guard !value.typedActive, !value.sessionAdmitted else { return false }
+            value.typedActive = true
+            return true
+        }
+        guard admitted else { throw CodexAppServerClientError.sessionAlreadyActive }
+        defer { state.locked { $0.typedActive = false } }
+
+        let timeoutState = StartupTimeoutState()
+        let watchdog = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            timeoutState.markTimedOut()
+            self.process.cancel()
+        }
+        defer { watchdog.cancel() }
+        do {
+            let wire = CodexCapabilityProtocol()
+            let typed = CodexTypedProtocol()
+            var currentCredential = credential
+            let source = try process.start()
+            var iterator = source.makeAsyncIterator()
+            try await typedHandshake(
+                prefix: requestID,
+                credential: &currentCredential,
+                codec: typed,
+                iterator: &iterator
+            )
+
+            var apps: [CodexAccountApp] = []
+            var appCursor: String?
+            var appCursors = Set<String>()
+            for pageNumber in 0..<32 {
+                let id = "\(requestID):apps:\(pageNumber)"
+                try process.send(try wire.appsListRequest(
+                    id: id, cursor: appCursor, limit: 100
+                ))
+                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                let page = try wire.decodeAppsListResponse(frame, expectedID: id)
+                apps.append(contentsOf: page.items)
+                guard apps.count <= wire.maximumItems else {
+                    throw CodexCapabilityProtocolError.catalogTooLarge
+                }
+                guard let next = page.nextCursor else {
+                    appCursor = nil
+                    break
+                }
+                guard appCursors.insert(next).inserted else {
+                    throw CodexCapabilityProtocolError.wrongResponse
+                }
+                appCursor = next
+            }
+            guard appCursor == nil else { throw CodexCapabilityProtocolError.tooManyItems }
+
+            var appDetails: [CodexAccountAppTool] = []
+            for (chunkNumber, start) in stride(
+                from: 0, to: apps.count, by: 100
+            ).enumerated() {
+                let id = "\(requestID):app-read:\(chunkNumber)"
+                let appIDs = Array(apps[start..<min(start + 100, apps.count)]).map(\.id)
+                try process.send(try wire.appsReadRequest(id: id, appIDs: appIDs))
+                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                appDetails.append(contentsOf: try wire.decodeAppsReadResponse(
+                    frame, expectedID: id
+                ))
+                guard appDetails.count <= wire.maximumItems else {
+                    throw CodexCapabilityProtocolError.catalogTooLarge
+                }
+            }
+
+            let installedID = "\(requestID):installed"
+            try process.send(try wire.appsInstalledRequest(id: installedID))
+            let installedFrame = try await awaitCapabilityResponse(
+                id: installedID, iterator: &iterator
+            )
+            let installed = try wire.decodeAppsInstalledResponse(
+                installedFrame, expectedID: installedID
+            )
+
+            var servers: [CodexMCPServer] = []
+            var serverToolCount = 0
+            var mcpCursor: String?
+            var mcpCursors = Set<String>()
+            for pageNumber in 0..<32 {
+                let id = "\(requestID):mcp:\(pageNumber)"
+                try process.send(try wire.mcpServerStatusListRequest(
+                    id: id, cursor: mcpCursor, limit: 100
+                ))
+                let frame = try await awaitCapabilityResponse(id: id, iterator: &iterator)
+                let page = try wire.decodeMCPServerStatusResponse(frame, expectedID: id)
+                serverToolCount += page.items.reduce(0) { $0 + $1.tools.count }
+                guard serverToolCount <= wire.maximumItems else {
+                    throw CodexCapabilityProtocolError.catalogTooLarge
+                }
+                servers.append(contentsOf: page.items)
+                guard servers.count <= wire.maximumItems else {
+                    throw CodexCapabilityProtocolError.catalogTooLarge
+                }
+                guard let next = page.nextCursor else {
+                    mcpCursor = nil
+                    break
+                }
+                guard mcpCursors.insert(next).inserted else {
+                    throw CodexCapabilityProtocolError.wrongResponse
+                }
+                mcpCursor = next
+            }
+            guard mcpCursor == nil else { throw CodexCapabilityProtocolError.tooManyItems }
+
+            let catalog = try wire.projectCatalog(
+                apps: apps,
+                appDetails: appDetails,
+                installedApps: installed,
+                mcpServers: servers,
+                codexProviderProfileID: codexProviderProfileID,
+                existingMillerCapabilities: existingMillerCapabilities
+            )
+            await process.stop(onCleanupPending: onCleanupPending)
+            return catalog
+        } catch {
+            await process.stop(onCleanupPending: onCleanupPending)
+            if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
+            throw error
+        }
     }
 
     public func typedEvents(
@@ -680,7 +825,32 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     threadID: helperThreadID,
                     turnID: responseTurnID
                 ))
+                let capabilityCodec = CodexCapabilityProtocol()
                 while let data = try await iterator.next() {
+                    switch try capabilityCodec.decodeActivity(
+                        data,
+                        existingMillerCapabilities: existingMillerCapabilities
+                    ) {
+                    case .activity(let activity):
+                        guard activity.threadID == helperThreadID,
+                              activity.turnID == responseTurnID
+                        else { throw CodexTypedProtocolError.invalidSequence }
+                        await onCapabilityActivity(activity)
+                    case .approval(let approval):
+                        guard approval.threadID == helperThreadID,
+                              approval.turnID == responseTurnID
+                        else { throw CodexTypedProtocolError.invalidSequence }
+                        let decision = await resolveProviderApproval(approval.request)
+                        try Task.checkCancellation()
+                        try process.send(try capabilityCodec.approvalResponse(
+                            approval, decision: decision
+                        ))
+                        continue
+                    case .ignored:
+                        continue
+                    case .notCapability:
+                        break
+                    }
                     let message = try codec.decode(data)
                     switch message {
                     case .ignored, .threadStarted:
@@ -749,6 +919,28 @@ public final class CodexAppServerClient: @unchecked Sendable {
             codec: codec,
             iterator: &iterator
         )
+    }
+
+    private func awaitCapabilityResponse(
+        id: String,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws -> Data {
+        var skipped = 0
+        while let data = try await iterator.next() {
+            guard data.count <= 1_048_576,
+                  let root = try JSONSerialization.jsonObject(with: data)
+                    as? [String: Any]
+            else { throw CodexCapabilityProtocolError.malformedJSON }
+            if root["id"] as? String == id { return data }
+            if root["id"] != nil {
+                throw CodexCapabilityProtocolError.wrongResponse
+            }
+            skipped += 1
+            guard skipped <= 64 else {
+                throw CodexCapabilityProtocolError.wrongResponse
+            }
+        }
+        throw CodexAppServerClientError.missingTerminal
     }
 
     private func awaitTypedResponse(
@@ -1026,6 +1218,24 @@ public final class CodexAppServerClient: @unchecked Sendable {
             try Task.checkCancellation()
             let message = try codec.decode(data)
             switch message {
+            case let .capabilityActivity(activity):
+                guard activity.threadID == helperThreadID else {
+                    throw CodexAppServerClientError.unexpectedMessage
+                }
+                await onCapabilityActivity(activity)
+                continue
+            case let .providerApproval(approval):
+                guard approval.threadID == helperThreadID else {
+                    throw CodexAppServerClientError.unexpectedMessage
+                }
+                let decision = await resolveProviderApproval(approval.request)
+                try Task.checkCancellation()
+                try process.send(try CodexCapabilityProtocol().approvalResponse(
+                    approval, decision: decision
+                ))
+                continue
+            case .ignoredCapabilityActivity:
+                continue
             case let .credentialRefresh(id, previousAccountID):
                 try await refreshCredential(
                     id: id,

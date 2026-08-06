@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import MillerCore
 
 public enum LiveProtocolError: Error, Equatable, Sendable {
     case frameTooLarge
@@ -61,21 +62,27 @@ public enum CodexAppServerMessage: Equatable, Sendable {
     case error(threadID: String, message: String)
     case closed(threadID: String, reason: String?)
     case credentialRefresh(id: JSONRPCRequestID, previousAccountID: String?)
+    case capabilityActivity(CodexCapabilityActivity)
+    case providerApproval(CodexProviderApproval)
+    case ignoredCapabilityActivity
 }
 
 public struct CodexAppServerProtocol: Sendable {
     public let maximumFrameBytes: Int
     public let maximumTextBytes: Int
     public let maximumAudioBytes: Int
+    private let existingMillerCapabilities: [CapabilityDescriptor]
 
     public init(
         maximumFrameBytes: Int = 1_048_576,
         maximumTextBytes: Int = 65_536,
-        maximumAudioBytes: Int = 1_048_576
+        maximumAudioBytes: Int = 1_048_576,
+        existingMillerCapabilities: [CapabilityDescriptor] = []
     ) {
         self.maximumFrameBytes = maximumFrameBytes
         self.maximumTextBytes = maximumTextBytes
         self.maximumAudioBytes = maximumAudioBytes
+        self.existingMillerCapabilities = existingMillerCapabilities
     }
 
     public func initializeRequest(id: String) throws -> Data {
@@ -271,6 +278,31 @@ public struct CodexAppServerProtocol: Sendable {
         _ method: String,
         root: [String: Any]
     ) throws -> CodexAppServerMessage {
+        if method == "item/started" || method == "item/completed"
+            || method == "thread/realtime/itemAdded"
+            || method == "item/commandExecution/requestApproval"
+            || method == "item/fileChange/requestApproval"
+        {
+            let frame = try JSONSerialization.data(
+                withJSONObject: root, options: [.sortedKeys]
+            )
+            switch try CodexCapabilityProtocol(
+                maximumFrameBytes: maximumFrameBytes,
+                maximumTextBytes: maximumTextBytes
+            ).decodeActivity(
+                frame,
+                existingMillerCapabilities: existingMillerCapabilities
+            ) {
+            case .activity(let activity):
+                return .capabilityActivity(activity)
+            case .approval(let approval):
+                return .providerApproval(approval)
+            case .ignored:
+                return .ignoredCapabilityActivity
+            case .notCapability:
+                break
+            }
+        }
         let isRequest = method == "account/chatgptAuthTokens/refresh"
         let isNotification = root["id"] == nil
         try requireFields(

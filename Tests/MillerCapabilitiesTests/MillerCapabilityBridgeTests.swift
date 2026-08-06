@@ -55,7 +55,7 @@ struct MillerCapabilityBridgeTests {
         let tools = try await client.listTools().tools
         #expect(tools.count == 1)
         let tool = try #require(tools.first)
-        #expect(tool.name.hasPrefix("miller_"))
+        #expect(tool.name == descriptor.bridgeProjectedToolName)
         #expect(tool.title == "Lookup")
         #expect(tool.description == "Looks up a value")
         #expect(tool.annotations.readOnlyHint == true)

@@ -35,6 +35,76 @@ struct CodexAppServerProtocolTests {
     )
 
     @Test
+    func realtimeCapabilityItemsProjectSanitizedOpaqueLifecycle() throws {
+        let message = try protocolCodec.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "method": "thread/realtime/itemAdded",
+                "params": [
+                    "threadId": "thread-1",
+                    "item": [
+                        "type": "mcpToolCall", "id": "call-1",
+                        "server": "gmail", "tool": "search",
+                        "status": "inProgress",
+                        "arguments": ["query": "private"],
+                        "appContext": [
+                            "connectorId": "gmail", "actionName": "search",
+                        ],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any]
+        ))
+
+        guard case .capabilityActivity(let activity) = message else {
+            Issue.record("Expected capability activity"); return
+        }
+        #expect(activity.capabilityID.rawValue == "codex_account/gmail/search")
+        #expect(activity.visibility == .opaqueProviderActivity)
+        #expect(!activity.summary.text.contains("private"))
+    }
+
+    @Test
+    func providerApprovalProjectsTheSharedMillerApprovalContract() throws {
+        let message = try protocolCodec.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "id": "approval-1",
+                "method": "item/fileChange/requestApproval",
+                "params": [
+                    "threadId": "thread-1", "turnId": "turn-1",
+                    "itemId": "file-1", "startedAtMs": 1,
+                    "reason": "private provider reason",
+                ] as [String: Any],
+            ] as [String: Any]
+        ))
+
+        guard case .providerApproval(let approval) = message else {
+            Issue.record("Expected provider approval"); return
+        }
+        #expect(approval.request.policy.requiresApproval)
+        #expect(approval.request.policy.reason == "provider_approval_required")
+        #expect(!approval.request.summary.text.contains("private"))
+    }
+
+    @Test
+    func boundsAndIgnoresUnknownFutureCapabilityActivity() throws {
+        let message = try protocolCodec.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "method": "item/started",
+                "params": [
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": [
+                        "type": "futureCapability",
+                        "id": "future-1",
+                        "opaque": "bounded",
+                    ],
+                ],
+            ] as [String: Any]
+        ))
+
+        #expect(message == .ignoredCapabilityActivity)
+    }
+
+    @Test
     func encodesOnlyExactWebRTCStartFieldsWithANullUpstreamContinuationID() throws {
         let codec = CodexAppServerProtocol(
             maximumFrameBytes: 2_048,

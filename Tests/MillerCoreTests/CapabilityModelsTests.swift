@@ -85,6 +85,58 @@ struct CapabilityModelsTests {
     }
 
     @Test
+    func descriptorStateAndVisibilityAreLiteralAndGateProviderAvailability() throws {
+        let providerID = UUID()
+        let managed = try descriptor(
+            providerProfileIDs: [providerID],
+            isAvailable: true,
+            isAccessible: true,
+            isEnabled: false,
+            isCallable: true,
+            visibility: .providerManaged
+        )
+
+        #expect(managed.isAccessible)
+        #expect(!managed.isEnabled)
+        #expect(managed.isCallable)
+        #expect(managed.visibility == .providerManaged)
+        #expect(!managed.isAvailable(to: providerID))
+    }
+
+    @Test
+    func bridgeProjectionNameIsStableAndIdentityDerived() throws {
+        let descriptor = try descriptor()
+
+        #expect(
+            descriptor.bridgeProjectedToolName
+                == "miller_a13462d74f54f23f_list"
+        )
+    }
+
+    @Test
+    func olderDescriptorJSONDecodesWithSafeOwnerManagedDefaults() throws {
+        let descriptor = try descriptor()
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(descriptor))
+                as? [String: Any]
+        )
+        object["isAccessible"] = nil
+        object["isEnabled"] = nil
+        object["isCallable"] = nil
+        object["visibility"] = nil
+
+        let decoded = try JSONDecoder().decode(
+            CapabilityDescriptor.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.isAccessible)
+        #expect(decoded.isEnabled)
+        #expect(decoded.isCallable)
+        #expect(decoded.visibility == .ownerManaged)
+    }
+
+    @Test
     func descriptorIdentityMustMatchItsNormalizedIDTriple() throws {
         let id = try CapabilityID(rawValue: "miller_mcp/calendar/list")
         let matching = try CapabilityDescriptor(
@@ -391,7 +443,11 @@ private func idForCodex() throws -> CapabilityID {
 
 private func descriptor(
     providerProfileIDs: Set<UUID> = [],
-    isAvailable: Bool = true
+    isAvailable: Bool = true,
+    isAccessible: Bool = true,
+    isEnabled: Bool = true,
+    isCallable: Bool = true,
+    visibility: CapabilityVisibility = .ownerManaged
 ) throws -> CapabilityDescriptor {
     try CapabilityDescriptor(
         id: try CapabilityID(rawValue: "miller_mcp/calendar/list"),
@@ -403,7 +459,11 @@ private func descriptor(
         inputSchemaJSON: Data("{}".utf8),
         readOnlyHint: true,
         providerProfileIDs: providerProfileIDs,
-        isAvailable: isAvailable
+        isAvailable: isAvailable,
+        isAccessible: isAccessible,
+        isEnabled: isEnabled,
+        isCallable: isCallable,
+        visibility: visibility
     )
 }
 

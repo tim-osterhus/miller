@@ -334,6 +334,18 @@ public struct CodexTypedProtocol: Sendable {
         return .emptyResponse(id: id)
     }
 
+    public func decodeCapability(
+        _ data: Data
+    ) throws -> CodexCapabilityDecodedEvent {
+        try CodexCapabilityProtocol(
+            maximumFrameBytes: maximumFrameBytes,
+            maximumRawItemBytes: min(maximumFrameBytes, 262_144),
+            maximumIdentifierBytes: maximumIdentifierBytes,
+            maximumTextBytes: maximumTextBytes,
+            maximumItems: maximumItems
+        ).decodeActivity(data)
+    }
+
     private func decodeNotification(
         method: String,
         root: [String: Any]

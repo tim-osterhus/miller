@@ -66,6 +66,9 @@ actor GPTLiveController {
     private let microphonePermission: @Sendable () async -> MicrophonePermission
     private let credentialRefreshTimeout: Duration
     private let cleanupPendingDelay: Duration
+    private let onCapabilityActivity: CodexCapabilityActivityHandler
+    private let resolveProviderApproval: CodexProviderApprovalResolver
+    private let existingMillerCapabilities: [CapabilityDescriptor]
     private let makeSession: @Sendable (CodexAppServerClient) -> LiveAudioSession
     private let makePeer: (@Sendable () async throws -> any LiveAudioPeer)?
     private let makeDirectSession: (@Sendable (any LiveAudioPeer) -> DirectGPTLiveSession)?
@@ -103,6 +106,9 @@ actor GPTLiveController {
         },
         credentialRefreshTimeout: Duration = .seconds(15),
         cleanupPendingDelay: Duration = .seconds(2),
+        onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
+        resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
+        existingMillerCapabilities: [CapabilityDescriptor] = [],
         makeSession: @escaping @Sendable (CodexAppServerClient) -> LiveAudioSession = {
             LiveAudioSession(client: $0)
         },
@@ -136,6 +142,9 @@ actor GPTLiveController {
         self.microphonePermission = microphonePermission
         self.credentialRefreshTimeout = credentialRefreshTimeout
         self.cleanupPendingDelay = cleanupPendingDelay
+        self.onCapabilityActivity = onCapabilityActivity
+        self.resolveProviderApproval = resolveProviderApproval
+        self.existingMillerCapabilities = existingMillerCapabilities
         self.makeSession = makeSession
         self.makePeer = makePeer
         self.makeDirectSession = makeDirectSession
@@ -300,7 +309,10 @@ actor GPTLiveController {
                         throw GPTLiveCredentialError.accountMismatch
                     }
                     return replacement
-                }
+                },
+                onCapabilityActivity: onCapabilityActivity,
+                resolveProviderApproval: resolveProviderApproval,
+                existingMillerCapabilities: existingMillerCapabilities
             )
             session = peer.map { LiveAudioSession(client: client, peer: $0) }
                 ?? makeSession(client)

@@ -505,7 +505,7 @@ public actor CapabilityBroker {
         return result
     }
 
-    private static func unavailable(
+    static func unavailable(
         _ descriptor: CapabilityDescriptor
     ) -> CapabilityDescriptor? {
         try? CapabilityDescriptor(
@@ -518,7 +518,11 @@ public actor CapabilityBroker {
             inputSchemaJSON: descriptor.inputSchemaJSON,
             readOnlyHint: descriptor.readOnlyHint,
             providerProfileIDs: descriptor.providerProfileIDs,
-            isAvailable: false
+            isAvailable: false,
+            isAccessible: descriptor.isAccessible,
+            isEnabled: descriptor.isEnabled,
+            isCallable: descriptor.isCallable,
+            visibility: descriptor.visibility
         )
     }
 

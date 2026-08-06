@@ -186,7 +186,7 @@ private actor ProjectedCapabilityCatalog {
         var tools: [Tool] = []
         tools.reserveCapacity(descriptors.count)
         for descriptor in descriptors.sorted(by: { $0.id.rawValue < $1.id.rawValue }) {
-            let name = Self.projectedName(descriptor)
+            let name = descriptor.bridgeProjectedToolName
             guard next.updateValue(descriptor.id, forKey: name) == nil,
                   let schema = try? JSONDecoder().decode(
                     Value.self,
@@ -211,23 +211,6 @@ private actor ProjectedCapabilityCatalog {
 
     func capabilityID(for name: String) -> CapabilityID? { capabilities[name] }
 
-    private static func projectedName(_ descriptor: CapabilityDescriptor) -> String {
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in descriptor.id.rawValue.utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        let suffix = descriptor.toolName.unicodeScalars.map { scalar -> Character in
-            if scalar.isASCII,
-               (scalar.properties.isAlphabetic || (48...57).contains(scalar.value)
-                    || scalar == "_" || scalar == "-")
-            {
-                return Character(String(scalar))
-            }
-            return "_"
-        }
-        return "miller_\(String(hash, radix: 16))_\(String(suffix).prefix(72))"
-    }
 }
 
 private struct BridgeToolResultPayload: Decodable {

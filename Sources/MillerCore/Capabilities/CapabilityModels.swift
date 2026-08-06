@@ -103,6 +103,11 @@ public enum CapabilitySource: String, Codable, Sendable {
     case providerNative = "provider_native"
 }
 
+public enum CapabilityVisibility: String, Codable, Sendable {
+    case ownerManaged = "owner_managed"
+    case providerManaged = "provider_managed"
+}
+
 public enum CapabilityPolicy: String, Codable, Sendable, CaseIterable {
     case readOnlyAutomatic = "read_only_automatic"
     case askBeforeChanges = "ask_before_changes"
@@ -136,6 +141,10 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
     public let readOnlyHint: Bool?
     public let providerProfileIDs: Set<UUID>
     public let isAvailable: Bool
+    public let isAccessible: Bool
+    public let isEnabled: Bool
+    public let isCallable: Bool
+    public let visibility: CapabilityVisibility
 
     public init(
         id: CapabilityID,
@@ -147,7 +156,11 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
         inputSchemaJSON: Data,
         readOnlyHint: Bool?,
         providerProfileIDs: Set<UUID>,
-        isAvailable: Bool
+        isAvailable: Bool,
+        isAccessible: Bool = true,
+        isEnabled: Bool = true,
+        isCallable: Bool = true,
+        visibility: CapabilityVisibility = .ownerManaged
     ) throws {
         let normalizedServerID = try CapabilityID.normalizeComponent(serverID)
         let normalizedToolName = try CapabilityID.normalizeComponent(toolName)
@@ -168,6 +181,10 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
         self.readOnlyHint = readOnlyHint
         self.providerProfileIDs = providerProfileIDs
         self.isAvailable = isAvailable
+        self.isAccessible = isAccessible
+        self.isEnabled = isEnabled
+        self.isCallable = isCallable
+        self.visibility = visibility
     }
 
     public init(from decoder: any Decoder) throws {
@@ -191,12 +208,45 @@ public struct CapabilityDescriptor: Codable, Equatable, Sendable {
                 Set<UUID>.self,
                 forKey: .providerProfileIDs
             ),
-            isAvailable: container.decode(Bool.self, forKey: .isAvailable)
+            isAvailable: container.decode(Bool.self, forKey: .isAvailable),
+            isAccessible: try container.decodeIfPresent(
+                Bool.self, forKey: .isAccessible
+            ) ?? true,
+            isEnabled: try container.decodeIfPresent(
+                Bool.self, forKey: .isEnabled
+            ) ?? true,
+            isCallable: try container.decodeIfPresent(
+                Bool.self, forKey: .isCallable
+            ) ?? true,
+            visibility: try container.decodeIfPresent(
+                CapabilityVisibility.self, forKey: .visibility
+            ) ?? .ownerManaged
         )
     }
 
     public func isAvailable(to providerProfileID: UUID) -> Bool {
-        isAvailable && providerProfileIDs.contains(providerProfileID)
+        isAvailable && isAccessible && isEnabled && isCallable
+            && providerProfileIDs.contains(providerProfileID)
+    }
+
+    public var bridgeProjectedToolName: String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in id.rawValue.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        let suffix = toolName.unicodeScalars.map { scalar -> Character in
+            if scalar.isASCII,
+               scalar.properties.isAlphabetic
+                    || (48...57).contains(scalar.value)
+                    || scalar == "_"
+                    || scalar == "-"
+            {
+                return Character(String(scalar))
+            }
+            return "_"
+        }
+        return "miller_\(String(hash, radix: 16))_\(String(suffix).prefix(72))"
     }
 }
 
