@@ -73,7 +73,7 @@ const a1ManifestPath = resolve(
 const expectedA1ManifestSHA256 =
   "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b";
 const expectedDependencies = {
-  "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a2.tgz",
+  "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a3.tgz",
   openai: "6.26.0",
   "partial-json": "0.1.7",
 };
@@ -154,11 +154,11 @@ async function bundleInventoryUnder(root) {
 
 const manifestBytes = await readFile(manifestPath);
 const manifest = JSON.parse(manifestBytes);
-assert.equal(manifest.schema, "miller-pi-a2-vendor-manifest");
+assert.equal(manifest.schema, "miller-pi-a3-vendor-manifest");
 assert.equal(manifest.version, 1);
 assert.deepEqual(manifest.package, {
   name: "@miller/pi-mvp-overlay",
-  version: "0.82.0-a2",
+  version: "0.82.0-a3",
 });
 assert.equal(manifest.source.a1_manifest_sha256, expectedA1ManifestSHA256);
 assert.equal(
@@ -173,7 +173,7 @@ assert.equal(
 assert.equal(
   manifest.transformation.script_sha256,
   sha256(await readFile(join(gatewayRoot, "scripts/build-overlay.mjs"))),
-  "A2 transformation script changed without regenerating provenance",
+  "A3 transformation script changed without regenerating provenance",
 );
 
 const listed = manifest.files.map((entry) => entry.path).sort();
@@ -227,7 +227,7 @@ assert.deepEqual(
 );
 assert.equal(
   lock.packages["node_modules/@miller/pi-mvp-overlay"].version,
-  "0.82.0-a2",
+  "0.82.0-a3",
 );
 for (const name of ["openai", "partial-json"]) {
   assert.equal(
@@ -275,25 +275,29 @@ assert.deepEqual(
   sourceMap.entries
     .filter((entry) => entry.transformation !== "copied_exactly_from_a1")
     .map((entry) => entry.path),
-  ["dist/auth/oauth/openai-codex.js", "package.json"],
+  [
+    "dist/api/openai-completions.js",
+    "dist/auth/oauth/openai-codex.js",
+    "package.json",
+  ],
 );
 assert.equal(sbom.spdxVersion, "SPDX-2.3");
 assert.equal(sbom.dataLicense, "CC0-1.0");
 assert.equal(sbom.SPDXID, "SPDXRef-DOCUMENT");
-assert.equal(sbom.name, "@miller/pi-mvp-overlay@0.82.0-a2");
+assert.equal(sbom.name, "@miller/pi-mvp-overlay@0.82.0-a3");
 assert.equal(
   sbom.documentNamespace,
-  "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a2",
+  "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a3",
 );
 assert.deepEqual(sbom.creationInfo, {
   created: "2026-07-29T00:00:00Z",
-  creators: ["Tool: miller-a2-overlay-builder-1.0"],
+  creators: ["Tool: miller-a3-overlay-builder-1.0"],
 });
 const expectedSBOMPackages = [
   {
     SPDXID: "SPDXRef-Package-Overlay",
     name: "@miller/pi-mvp-overlay",
-    versionInfo: "0.82.0-a2",
+    versionInfo: "0.82.0-a3",
     license: "Apache-2.0 AND MIT",
     downloadLocation: "NOASSERTION",
   },

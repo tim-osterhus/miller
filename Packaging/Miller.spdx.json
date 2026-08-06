@@ -33,7 +33,7 @@
     {
       "name": "@miller/pi-mvp-overlay",
       "SPDXID": "SPDXRef-Package-PiOverlay",
-      "versionInfo": "0.82.0-a2",
+      "versionInfo": "0.82.0-a3",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0 AND MIT",

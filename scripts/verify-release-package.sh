@@ -62,7 +62,7 @@ assert.equal(sbom.dataLicense, "CC0-1.0");
 assert.deepEqual(
   sbom.packages.map((entry) => `${entry.name}@${entry.versionInfo}`).sort(),
   [
-    "@miller/pi-mvp-overlay@0.82.0-a2",
+    "@miller/pi-mvp-overlay@0.82.0-a3",
     "Miller@0.1.0",
     "MillerCapabilityBridge@0.1.1",
     "Node.js@22.22.0",

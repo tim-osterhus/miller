@@ -46,18 +46,18 @@ async function regularFiles(root) {
   return files.sort();
 }
 
-test("vendor manifest binds the reviewed A1 baseline and exact A2 output", async () => {
+test("vendor manifest binds the reviewed A1 baseline and exact A3 output", async () => {
   assert.equal(
     sha256(await readFile(join(a1Root, "manifest.json"))),
     expectedA1ManifestSHA256,
   );
 
   const manifest = JSON.parse(await readFile(join(vendorRoot, "manifest.json"), "utf8"));
-  assert.equal(manifest.schema, "miller-pi-a2-vendor-manifest");
+  assert.equal(manifest.schema, "miller-pi-a3-vendor-manifest");
   assert.equal(manifest.version, 1);
   assert.deepEqual(manifest.package, {
     name: "@miller/pi-mvp-overlay",
-    version: "0.82.0-a2",
+    version: "0.82.0-a3",
   });
   assert.equal(manifest.source.a1_manifest_sha256, expectedA1ManifestSHA256);
   assert.equal(
@@ -88,17 +88,18 @@ test("vendor manifest binds the reviewed A1 baseline and exact A2 output", async
   }
   assert.match(manifest.transformation.script_sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(manifest.transformation.modified_overlay_files, [
+    "dist/api/openai-completions.js",
     "dist/auth/oauth/openai-codex.js",
     "package.json",
   ]);
 });
 
-test("A2 archive contains only the closed provider/auth overlay", async () => {
+test("A3 archive contains only the closed provider/auth overlay", async () => {
   const manifest = JSON.parse(await readFile(join(vendorRoot, "manifest.json"), "utf8"));
   const archive = manifest.files.find((entry) => entry.role === "overlay_archive");
   assert.ok(archive);
 
-  const extractionRoot = await mkdtemp(join(tmpdir(), "miller-a2-test-"));
+  const extractionRoot = await mkdtemp(join(tmpdir(), "miller-a3-test-"));
   try {
     const result = spawnSync(
       "/usr/bin/tar",
@@ -109,7 +110,7 @@ test("A2 archive contains only the closed provider/auth overlay", async () => {
     const packageRoot = join(extractionRoot, "package");
     const packageJSON = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
     assert.equal(packageJSON.name, "@miller/pi-mvp-overlay");
-    assert.equal(packageJSON.version, "0.82.0-a2");
+    assert.equal(packageJSON.version, "0.82.0-a3");
     assert.deepEqual(packageJSON.dependencies, {
       openai: "6.26.0",
       "partial-json": "0.1.7",
@@ -137,6 +138,17 @@ test("A2 archive contains only the closed provider/auth overlay", async () => {
     assert.match(oauth, /Referrer-Policy", "no-referrer"/);
     assert.match(oauth, /req\.method !== "GET"/);
     assert.match(oauth, /await server\.close\(\)/);
+
+    const completions = await readFile(
+      join(packageRoot, "dist/api/openai-completions.js"),
+      "utf8",
+    );
+    assert.doesNotMatch(completions, /Text-only overlay does not accept tool calls/);
+    assert.match(completions, /toolcall_start/);
+    assert.match(completions, /toolcall_delta/);
+    assert.match(completions, /toolcall_end/);
+    assert.match(completions, /role === "toolResult"/);
+    assert.match(completions, /tool_choice: "auto"/);
   } finally {
     await rm(extractionRoot, { recursive: true, force: true });
   }
@@ -145,7 +157,7 @@ test("A2 archive contains only the closed provider/auth overlay", async () => {
 test("gateway package and lock admit only the exact runtime closure", async () => {
   const packageJSON = JSON.parse(await readFile(join(gatewayRoot, "package.json"), "utf8"));
   assert.deepEqual(packageJSON.dependencies, {
-    "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a2.tgz",
+    "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a3.tgz",
     openai: "6.26.0",
     "partial-json": "0.1.7",
   });
@@ -165,7 +177,7 @@ test("gateway package and lock admit only the exact runtime closure", async () =
   assert.equal(lock.packages["node_modules/partial-json"].version, "0.1.7");
   assert.equal(
     lock.packages["node_modules/@miller/pi-mvp-overlay"].version,
-    "0.82.0-a2",
+    "0.82.0-a3",
   );
 });
 
@@ -179,7 +191,7 @@ test("generated SPDX SBOM has complete deterministic SPDX 2.3 package metadata",
   assert.equal(sbom.SPDXID, "SPDXRef-DOCUMENT");
   assert.deepEqual(sbom.creationInfo, {
     created: "2026-07-29T00:00:00Z",
-    creators: ["Tool: miller-a2-overlay-builder-1.0"],
+    creators: ["Tool: miller-a3-overlay-builder-1.0"],
   });
 
   for (const [name, license] of [

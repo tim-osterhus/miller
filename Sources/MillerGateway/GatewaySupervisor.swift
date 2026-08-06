@@ -379,6 +379,43 @@ public actor GatewaySupervisor {
         }
     }
 
+    public func submitToolResult(
+        requestID: String,
+        turnID: String,
+        generation requestGeneration: Int,
+        callID: String,
+        outcome: String,
+        result: JSONValue?
+    ) async throws {
+        try await sendToolRecord(
+            type: "reasoning.tool_result",
+            requestID: requestID,
+            turnID: turnID,
+            generation: requestGeneration,
+            callID: callID,
+            additionalFields: [
+                "outcome": .string(outcome),
+                "result": result,
+            ].compactMapValues { $0 }
+        )
+    }
+
+    public func cancelTool(
+        requestID: String,
+        turnID: String,
+        generation requestGeneration: Int,
+        callID: String
+    ) async throws {
+        try await sendToolRecord(
+            type: "reasoning.tool_cancel",
+            requestID: requestID,
+            turnID: turnID,
+            generation: requestGeneration,
+            callID: callID,
+            additionalFields: [:]
+        )
+    }
+
     public func shutdown() async {
         generation += 1
         let old = process
@@ -424,6 +461,52 @@ public actor GatewaySupervisor {
                     continuation.finish(throwing: error)
                 }
             }
+        }
+    }
+
+    private func sendToolRecord(
+        type: String,
+        requestID: String,
+        turnID: String,
+        generation requestGeneration: Int,
+        callID: String,
+        additionalFields: [String: JSONValue]
+    ) async throws {
+        guard let sessionID = validator.sessionID,
+              let process,
+              case let .reasoning(operation)? = pending[requestID],
+              operation.turnID == turnID,
+              operation.generation == requestGeneration
+        else {
+            throw GatewayProtocolError.invalidSequence
+        }
+        var fields: [String: JSONValue] = [
+            "turn_id": .string(turnID),
+            "generation": .integer(requestGeneration),
+            "call_id": .string(callID),
+        ]
+        fields.merge(additionalFields) { _, new in new }
+        let record = try GatewayRecord.make(
+            type: type,
+            sessionID: sessionID,
+            requestID: requestID,
+            fields: fields
+        )
+        try validator.resolveTool(
+            requestID: requestID,
+            turnID: turnID,
+            generation: requestGeneration,
+            callID: callID
+        )
+        do {
+            try process.send(record)
+        } catch {
+            let processGeneration = self.generation
+            await handleFailure(
+                GatewayProtocolError.processUnavailable,
+                generation: processGeneration
+            )
+            throw GatewayProtocolError.processUnavailable
         }
     }
 

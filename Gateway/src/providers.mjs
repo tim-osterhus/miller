@@ -61,12 +61,6 @@ export function streamForProfile(profileInput, credentialInput, context, options
     apiKey: credential.key,
     signal: options.signal,
     maxRetries: 0,
-    onPayload(payload) {
-      const sanitized = { ...payload };
-      delete sanitized.tools;
-      delete sanitized.tool_choice;
-      return sanitized;
-    },
   });
 }
 
@@ -95,7 +89,10 @@ export async function refreshCodexAuthentication(credential, { signal }) {
 function streamCodex(profile, credential, context, options) {
   const provider = openaiCodexProvider();
   const model = resolveCodexModel(provider, profile.model);
-  return provider.streamSimple(model, codexContextForModel(model, context), {
+  return provider.streamSimple(model, codexContextForModel(model, {
+    ...context,
+    tools: [],
+  }), {
     apiKey: credential.access,
     signal: options.signal,
     maxRetries: 0,

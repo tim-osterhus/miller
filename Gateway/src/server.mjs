@@ -168,10 +168,6 @@ async function dispatch(record) {
 
   if (record.type === "reasoning.start") {
     requireIdle();
-    if (record.tools.length !== 0) {
-      emitReasoningFailed(record, "tools_forbidden");
-      return;
-    }
     const credential = credentials.require(record.provider_profile.credential_ref);
     reasoningOperation = new ReasoningOperation(
       record,
@@ -183,6 +179,18 @@ async function dispatch(record) {
     void current.run().finally(() => {
       if (reasoningOperation === current) reasoningOperation = undefined;
     });
+    return;
+  }
+  if (record.type === "reasoning.tool_result") {
+    if (!reasoningOperation?.resolveToolResult(record)) {
+      throw new Error("unknown_tool_call");
+    }
+    return;
+  }
+  if (record.type === "reasoning.tool_cancel") {
+    if (!reasoningOperation?.cancelTool(record)) {
+      throw new Error("unknown_tool_call");
+    }
     return;
   }
   if (record.type === "reasoning.cancel") {

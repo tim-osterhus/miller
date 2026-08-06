@@ -160,7 +160,8 @@ struct ProtocolFixtureTests {
                     try assertOptionalParity(
                         field: field,
                         constraint: constraint,
-                        fixture: fixture.object
+                        fixture: fixture.object,
+                        recordType: type
                     )
                 }
             }
@@ -535,7 +536,14 @@ struct ProtocolFixtureTests {
                     == schemaValues
             )
             for value in values {
-                _ = try decode(replacing(field, with: value, in: workingFixture))
+                var candidate = replacing(field, with: value, in: workingFixture)
+                if recordType == "reasoning.tool_result",
+                   field == "outcome",
+                   value != "succeeded", value != "failed"
+                {
+                    candidate.removeValue(forKey: "result")
+                }
+                _ = try decode(candidate)
             }
             expectDecodeFailure("\(recordType).\(field) matches its enum", object: replacing(
                 field, with: differentString(from: schemaValues), in: workingFixture
@@ -598,8 +606,20 @@ struct ProtocolFixtureTests {
     private func assertOptionalParity(
         field: String,
         constraint: [String: Any],
-        fixture: [String: Any]
+        fixture: [String: Any],
+        recordType: String
     ) throws {
+        if recordType == "reasoning.tool_result", field == "result" {
+            var missing = fixture
+            missing.removeValue(forKey: field)
+            expectDecodeFailure(
+                "successful tool results require content",
+                object: missing
+            )
+            missing["outcome"] = "cancelled"
+            _ = try decode(missing)
+            return
+        }
         if fixture[field] != nil {
             var missing = fixture
             missing.removeValue(forKey: field)

@@ -220,10 +220,10 @@ the scaled source alpha values and applies no optical dilation. Its output,
 `Sources/MillerApp/Resources/MillerStatusIcon.png`, has SHA-256
 `34be9cf271b2d7a5bfb1f11c459902c0167add683baa006cabbafe4fa4f6c6db`.
 
-## Pi-derived A2 gateway overlay
+## Pi-derived A3 gateway overlay
 
 Miller retains one reviewed Pi-derived distribution:
-`@miller/pi-mvp-overlay@0.82.0-a2`.
+`@miller/pi-mvp-overlay@0.82.0-a3`.
 
 ### Upstream and A1 baseline
 
@@ -238,14 +238,18 @@ Miller retains one reviewed Pi-derived distribution:
   `902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b`
 
 The A1 manifest binds each retained module to the exact npm tarball and pinned
-Git source-map content. The A2 generator refuses any A1 manifest or retained
+Git source-map content. The A3 generator refuses any A1 manifest or retained
 file whose hash, byte count, or mode differs.
 
-### A2 transformation
+### A3 transformation
 
 `Gateway/scripts/build-overlay.mjs` has SHA-256
-`4d9feb112a65f606fbd5fd199af64da5bc69637ccff42228ddd0b6f0d64f9388`.
-It changes exactly two overlay files:
+`541b097adf3c4b7d77bf51763a2b9d76983e2f8610b833bd3042accb95bfd9f6`.
+It changes exactly three overlay files:
+
+- `dist/api/openai-completions.js`: admits bounded OpenAI-compatible tool
+  definitions, assembles streamed tool calls, rejects malformed arguments,
+  and replays bounded tool results without adding runtime network access.
 
 - `dist/auth/oauth/openai-codex.js`: admits only GET requests to
   `/auth/callback`, requires matching state, rejects a second callback, sends
@@ -254,11 +258,11 @@ It changes exactly two overlay files:
   deadline before awaited listener close, removes `PI_OAUTH_CALLBACK_HOST`,
   and removes manual authorization-code input.
 - `package.json`: changes only the derived package name and version to
-  `@miller/pi-mvp-overlay@0.82.0-a2`.
+  `@miller/pi-mvp-overlay@0.82.0-a3`.
 
 All other retained files are byte-identical to the reviewed A1 distribution.
 The exact 53-file archive inventory is
-`Gateway/vendor/overlay-files.json`; the per-file A1-to-A2 provenance record is
+`Gateway/vendor/overlay-files.json`; the per-file A1-to-A3 provenance record is
 `Gateway/vendor/source-map.json`. These generated documents are authoritative
 for every retained file rather than a summarized path list in this prose.
 
@@ -268,12 +272,12 @@ The exact generated vendor artifacts are:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `Gateway/vendor/manifest.json` | `4e69f5ba887667f56279fab20c19d6eb22276991227d01dae76af6ea8228a6af` |
-| `Gateway/vendor/pi-mvp-overlay-0.82.0-a2.tgz` | `2d38923e44eeec3dba38076b0d35caff6883c533aec07d0522cedb3cb7dab4e4` |
-| `Gateway/vendor/development-bundle-inventory.json` | `bde46208688d27709bb6d67dd8e8ff19b31959dd60e558cdb0905827ea2fd5ae` |
-| `Gateway/vendor/overlay-files.json` | `11523a303ef9d0f4efc6ba14dfec848413179906a9bd12e720db077a791cd93c` |
-| `Gateway/vendor/source-map.json` | `17f0cbc679348237d39937251b81e10b9359d7c8986363b0e8fbfbf1a9a83df2` |
-| `Gateway/vendor/sbom.spdx.json` | `851dbca0451beff2175980ffeda2439b6f539737e0b18c941df4e12996192157` |
+| `Gateway/vendor/manifest.json` | `ce5fa50ff5abc1c6ccd1c78e6ac87668a0198b79e3581334b00c3971a87b672c` |
+| `Gateway/vendor/pi-mvp-overlay-0.82.0-a3.tgz` | `49b3846b3ec3d1daa9ac704b9eeae085fa4c9aaa35692ed2b7ad027c9ead266c` |
+| `Gateway/vendor/development-bundle-inventory.json` | `b2ee22957e6675f841a9332d5309596e78a04f674cb4dc6b29191339d2149820` |
+| `Gateway/vendor/overlay-files.json` | `afd306f30a4f0a261dbe7d324f7c91be9592f7316250fdd3c377b9db8ac2af79` |
+| `Gateway/vendor/source-map.json` | `20c875d9ecf580ec3223374e511a912bc40a8d9b4808d837ee6614b7c0cc3788` |
+| `Gateway/vendor/sbom.spdx.json` | `c4f87d60394a0859cd5e234cd8eb536d4f9d08f4ec530ecfafe61314d748ebc7` |
 
 The runtime dependency closure contains only:
 
@@ -283,7 +287,7 @@ The runtime dependency closure contains only:
   `sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA==`.
 
 The exact package lock SHA-256 is
-`a98b4b2654c79b76bf4de2c2e6424178a6e31e57b53cba1aa52ce1b57c086a9e`.
+`937103fdcfcf315929f2d2262d6f4478bc9a2d124018767abff32549d8a05a48`.
 The overlay contains no Pi coding-agent package, unrelated provider package,
 callable shell or filesystem dependency, AWS SDK, Google SDK, Bedrock SDK,
 native add-on, or install script.

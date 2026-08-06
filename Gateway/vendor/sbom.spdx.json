@@ -2,19 +2,19 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "@miller/pi-mvp-overlay@0.82.0-a2",
-  "documentNamespace": "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a2",
+  "name": "@miller/pi-mvp-overlay@0.82.0-a3",
+  "documentNamespace": "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a3",
   "creationInfo": {
     "created": "2026-07-29T00:00:00Z",
     "creators": [
-      "Tool: miller-a2-overlay-builder-1.0"
+      "Tool: miller-a3-overlay-builder-1.0"
     ]
   },
   "packages": [
     {
       "SPDXID": "SPDXRef-Package-Overlay",
       "name": "@miller/pi-mvp-overlay",
-      "versionInfo": "0.82.0-a2",
+      "versionInfo": "0.82.0-a3",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0 AND MIT",
       "licenseDeclared": "Apache-2.0 AND MIT",

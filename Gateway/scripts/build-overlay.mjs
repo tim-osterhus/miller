@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   rmdir,
@@ -26,20 +27,23 @@ const artifactRoot = join(millerRoot, ".artifacts");
 const stagingRoot = join(artifactRoot, "overlay-build");
 const overlayRoot = join(stagingRoot, "overlay");
 const stagedVendorRoot = join(stagingRoot, "vendor");
+const stagedGatewayRoot = join(stagingRoot, "gateway");
 const vendorRoot = join(gatewayRoot, "vendor");
 const packageLockPath = join(gatewayRoot, "package-lock.json");
 const nodeExecutable = "/opt/homebrew/opt/node@22/bin/node";
 const npmCLI = "/opt/homebrew/opt/node@22/lib/node_modules/npm/bin/npm-cli.js";
-const archiveName = "pi-mvp-overlay-0.82.0-a2.tgz";
+const archiveName = "pi-mvp-overlay-0.82.0-a3.tgz";
 const a1ManifestSHA256 =
   "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b";
 const a1OAuthSHA256 =
   "033266083e72b3b48a3421bdaf19c13d33ad746842516c577d97a698ca3ec5dd";
 const a1PackageSHA256 =
   "44fbdefc5cbc97293f08937dca4850a95463c85d3ceda712948f7a7b9caf4a94";
+const a1OpenAICompletionsSHA256 =
+  "aabaf8ccc270b59b98cde3adcab02ff5577bc3d8b55501d7689b48bf7b6cd2d9";
 const packageIdentity = {
   name: "@miller/pi-mvp-overlay",
-  version: "0.82.0-a2",
+  version: "0.82.0-a3",
 };
 const dependencies = {
   openai: {
@@ -60,7 +64,7 @@ const dependencies = {
 };
 
 function fail(message) {
-  throw new Error(`A2_OVERLAY_BUILD_FAIL: ${message}`);
+  throw new Error(`A3_OVERLAY_BUILD_FAIL: ${message}`);
 }
 
 function digest(algorithm, bytes, encoding = "hex") {
@@ -336,6 +340,129 @@ function transformPackage(source) {
   return stableJSON(value);
 }
 
+function transformOpenAICompletions(source) {
+  let output = replaceBounded(
+    source,
+    "function requestMessages(context) {",
+    "function clientFor(model, apiKey, headers) {",
+    `function requestMessages(context) {
+    const messages = [];
+    if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
+    for (const message of context.messages) {
+        if (message.role === "user") {
+            messages.push({ role: "user", content: textFromContent(message.content) });
+            continue;
+        }
+        if (message.role === "assistant") {
+            const blocks = Array.isArray(message.content) ? message.content : [{ type: "text", text: message.content }];
+            const text = blocks.filter((block) => block?.type === "text").map((block) => block.text).join("");
+            const calls = blocks.filter((block) => block?.type === "toolCall").map((block) => ({
+                id: block.id,
+                type: "function",
+                function: { name: block.name, arguments: JSON.stringify(block.arguments) },
+            }));
+            if (blocks.some((block) => block?.type !== "text" && block?.type !== "toolCall")) throw new Error("Unsupported assistant content");
+            messages.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
+            continue;
+        }
+        if (message.role === "toolResult") {
+            messages.push({ role: "tool", tool_call_id: message.toolCallId, content: textFromContent(message.content) });
+            continue;
+        }
+        throw new Error("Unsupported replay message role");
+    }
+    return messages;
+}
+function requestTools(context) {
+    return (context.tools ?? []).map((tool) => ({
+        type: "function",
+        function: { name: tool.name, description: tool.description, parameters: tool.input_schema, strict: false },
+    }));
+}
+function parseArguments(value) {
+    let parsed;
+    try { parsed = JSON.parse(value || "{}"); }
+    catch { throw new Error("Malformed tool arguments"); }
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Malformed tool arguments");
+    return parsed;
+}
+`,
+    "OpenAI completions message/tool transform",
+  );
+  output = replaceBounded(
+    output,
+    "function stopReason(value) {",
+    "export const stream = (model, context, options) => {",
+    `function stopReason(value) {
+    if (value === null || value === "stop" || value === "end") return "stop";
+    if (value === "length") return "length";
+    if (value === "tool_calls") return "toolUse";
+    throw new Error(\`Unsupported completion finish reason: \${value}\`);
+}
+`,
+    "OpenAI completions stop reason",
+  );
+  output = output.replace(
+    "let params = { model: model.id, messages: requestMessages(context), stream: true, stream_options: { include_usage: true }, store: false };",
+    "const tools = requestTools(context);\n            let params = { model: model.id, messages: requestMessages(context), stream: true, stream_options: { include_usage: true }, store: false, ...(tools.length ? { tools, tool_choice: \"auto\" } : {}) };",
+  );
+  output = output.replace(
+    "            let block;\n            let finished = false;",
+    "            let textBlock;\n            const toolBlocks = new Map();\n            let finished = false;",
+  );
+  output = output.replace(
+    `                const delta = choice.delta?.content;
+                if (typeof delta === "string" && delta.length > 0) {
+                    if (!block) { block = { type: "text", text: "" }; output.content.push(block); stream.push({ type: "text_start", contentIndex: 0, partial: output }); }
+                    block.text += delta;
+                    stream.push({ type: "text_delta", contentIndex: 0, delta, partial: output });
+                }
+                if (choice.delta?.tool_calls) throw new Error("Text-only overlay does not accept tool calls");`,
+    `                const delta = choice.delta?.content;
+                if (typeof delta === "string" && delta.length > 0) {
+                    if (!textBlock) { textBlock = { type: "text", text: "" }; output.content.push(textBlock); stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output }); }
+                    textBlock.text += delta;
+                    stream.push({ type: "text_delta", contentIndex: output.content.indexOf(textBlock), delta, partial: output });
+                }
+                for (const fragment of choice.delta?.tool_calls ?? []) {
+                    if (!Number.isInteger(fragment.index) || fragment.index < 0) throw new Error("Malformed tool call index");
+                    let slot = toolBlocks.get(fragment.index);
+                    if (!slot) {
+                        const block = { type: "toolCall", id: "", name: "", arguments: {}, partialJson: "" };
+                        output.content.push(block);
+                        slot = { block, contentIndex: output.content.length - 1 };
+                        toolBlocks.set(fragment.index, slot);
+                        stream.push({ type: "toolcall_start", contentIndex: slot.contentIndex, partial: output });
+                    }
+                    if (fragment.id) slot.block.id += fragment.id;
+                    if (fragment.function?.name) slot.block.name += fragment.function.name;
+                    const argumentDelta = fragment.function?.arguments ?? "";
+                    slot.block.partialJson += argumentDelta;
+                    if (argumentDelta) stream.push({ type: "toolcall_delta", contentIndex: slot.contentIndex, delta: argumentDelta, partial: output });
+                }`,
+  );
+  output = output.replace(
+    "            if (block) stream.push({ type: \"text_end\", contentIndex: 0, content: block.text, partial: output });",
+    `            if (textBlock) stream.push({ type: "text_end", contentIndex: output.content.indexOf(textBlock), content: textBlock.text, partial: output });
+            for (const { block, contentIndex } of [...toolBlocks.values()].sort((a, b) => a.contentIndex - b.contentIndex)) {
+                if (!block.id || !block.name) throw new Error("Malformed tool call");
+                block.arguments = parseArguments(block.partialJson);
+                delete block.partialJson;
+                stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
+            }`,
+  );
+  for (const seam of [
+    "requestTools(context)", "toolcall_start", "toolcall_delta", "toolcall_end",
+    'message.role === "toolResult"', 'tool_choice: "auto"',
+  ]) {
+    if (!output.includes(seam)) fail(`OpenAI completions transform missed ${seam}`);
+  }
+  if (output.includes("Text-only overlay does not accept tool calls")) {
+    fail("OpenAI completions transform retained text-only tool rejection");
+  }
+  return output;
+}
+
 function gatewayLock(archiveIntegrity) {
   return {
     name: "miller-gateway",
@@ -346,14 +473,14 @@ function gatewayLock(archiveIntegrity) {
         name: "miller-gateway",
         dependencies: {
           "@miller/pi-mvp-overlay":
-            "file:vendor/pi-mvp-overlay-0.82.0-a2.tgz",
+            "file:vendor/pi-mvp-overlay-0.82.0-a3.tgz",
           openai: "6.26.0",
           "partial-json": "0.1.7",
         },
       },
       "node_modules/@miller/pi-mvp-overlay": {
         version: packageIdentity.version,
-        resolved: "file:vendor/pi-mvp-overlay-0.82.0-a2.tgz",
+        resolved: "file:vendor/pi-mvp-overlay-0.82.0-a3.tgz",
         integrity: archiveIntegrity,
         license: "Apache-2.0",
         dependencies: {
@@ -396,6 +523,38 @@ async function retainedFile(path, role) {
   };
 }
 
+async function developmentBundleInventory(root) {
+  const admittedRoots = ["@miller/pi-mvp-overlay", "openai", "partial-json"];
+  const files = [];
+  async function visit(path) {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink()) fail(`development bundle retained symlink ${path}`);
+    if (metadata.isFile()) {
+      const bytes = await readFile(path);
+      files.push({
+        path: path.slice(root.length + 1).replaceAll("\\", "/"),
+        sha256: sha256(bytes),
+        bytes: bytes.length,
+      });
+      return;
+    }
+    if (!metadata.isDirectory()) fail(`development bundle retained unsupported entry ${path}`);
+    for (const entry of await readdir(path)) await visit(join(path, entry));
+  }
+  for (const path of admittedRoots) await visit(join(root, path));
+  files.sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ));
+  return {
+    schema: "miller-development-bundle-inventory",
+    version: 1,
+    roots: admittedRoots,
+    file_count: files.length,
+    total_bytes: files.reduce((total, entry) => total + entry.bytes, 0),
+    inventory_sha256: sha256(Buffer.from(JSON.stringify(files))),
+  };
+}
+
 async function build() {
   const scriptBytes = await readFile(fileURLToPath(import.meta.url));
   const a1ManifestBytes = await readFile(a1ManifestPath);
@@ -420,7 +579,7 @@ async function build() {
   await mkdir(stagedVendorRoot, { recursive: true });
 
   const sourceMap = [];
-  const a2Files = [];
+  const a3Files = [];
   for (const entry of a1Manifest.files) {
     if (
       typeof entry.path !== "string" ||
@@ -446,10 +605,16 @@ async function build() {
       if (sha256(input) !== a1OAuthSHA256) fail("A1 OAuth module hash changed");
       output = Buffer.from(transformOAuth(input.toString("utf8")));
       transformation = "oauth-callback-hardening-v1";
+    } else if (entry.path === "dist/api/openai-completions.js") {
+      if (sha256(input) !== a1OpenAICompletionsSHA256) {
+        fail("A1 OpenAI completions module hash changed");
+      }
+      output = Buffer.from(transformOpenAICompletions(input.toString("utf8")));
+      transformation = "bounded-tool-calls-v1";
     } else if (entry.path === "package.json") {
       if (sha256(input) !== a1PackageSHA256) fail("A1 package manifest hash changed");
       output = Buffer.from(transformPackage(input.toString("utf8")));
-      transformation = "package-identity-a2-v1";
+      transformation = "package-identity-a3-v1";
     }
 
     const destination = join(overlayRoot, entry.path);
@@ -460,10 +625,10 @@ async function build() {
       path: entry.path,
       transformation,
       a1_sha256: entry.sha256,
-      a2_sha256: outputHash,
+      a3_sha256: outputHash,
       source: entry.provenance,
     });
-    a2Files.push({
+    a3Files.push({
       ...entry,
       sha256: outputHash,
       bytes: output.length,
@@ -484,18 +649,19 @@ async function build() {
     });
   }
 
-  const a2OverlayManifest = {
+  const a3OverlayManifest = {
     ...a1Manifest,
-    schema: "miller-pi-a2-derived-overlay",
+    schema: "miller-pi-a3-derived-overlay",
     version: 1,
     package: packageIdentity,
-    files: a2Files,
+    files: a3Files,
     transformation: {
       baseline: "@miller/pi-a1-overlay@0.82.0-a1",
       baseline_manifest_sha256: a1ManifestSHA256,
       script: "Gateway/scripts/build-overlay.mjs",
       script_sha256: sha256(scriptBytes),
       modified_files: [
+        "dist/api/openai-completions.js",
         "dist/auth/oauth/openai-codex.js",
         "package.json",
       ],
@@ -503,7 +669,7 @@ async function build() {
   };
   await writeFile(
     join(overlayRoot, "manifest.json"),
-    stableJSON(a2OverlayManifest),
+    stableJSON(a3OverlayManifest),
     { mode: 0o600 },
   );
 
@@ -529,17 +695,44 @@ async function build() {
       },
     },
   );
-  const packedName = "miller-pi-mvp-overlay-0.82.0-a2.tgz";
+  const packedName = "miller-pi-mvp-overlay-0.82.0-a3.tgz";
   await rename(join(stagedVendorRoot, packedName), join(stagedVendorRoot, archiveName));
   const archiveBytes = await readFile(join(stagedVendorRoot, archiveName));
   const archiveIntegrity = `sha512-${digest("sha512", archiveBytes, "base64")}`;
   const lockBytes = Buffer.from(stableJSON(gatewayLock(archiveIntegrity)));
+  await mkdir(join(stagedGatewayRoot, "vendor"), { recursive: true });
+  await writeFile(
+    join(stagedGatewayRoot, "package.json"),
+    await readFile(join(gatewayRoot, "package.json")),
+  );
+  await writeFile(join(stagedGatewayRoot, "package-lock.json"), lockBytes);
+  await cp(
+    join(stagedVendorRoot, archiveName),
+    join(stagedGatewayRoot, "vendor", archiveName),
+    { errorOnExist: true, force: false },
+  );
+  await run(
+    nodeExecutable,
+    [npmCLI, "ci", "--ignore-scripts", "--silent"],
+    {
+      cwd: stagedGatewayRoot,
+      env: {
+        PATH: "/usr/bin:/bin",
+        npm_config_cache: npmCache,
+        npm_config_ignore_scripts: "true",
+      },
+    },
+  );
+  await writeFile(
+    join(stagedVendorRoot, "development-bundle-inventory.json"),
+    stableJSON(await developmentBundleInventory(join(stagedGatewayRoot, "node_modules"))),
+  );
 
   const inventory = {
-    schema: "miller-pi-a2-overlay-file-inventory",
+    schema: "miller-pi-a3-overlay-file-inventory",
     version: 1,
     package: packageIdentity,
-    files: a2Files.map(({ path, sha256: hash, bytes, mode }) => ({
+    files: a3Files.map(({ path, sha256: hash, bytes, mode }) => ({
       path,
       sha256: hash,
       bytes,
@@ -547,11 +740,11 @@ async function build() {
     })),
     package_manifest: {
       path: "manifest.json",
-      sha256: sha256(Buffer.from(stableJSON(a2OverlayManifest))),
+      sha256: sha256(Buffer.from(stableJSON(a3OverlayManifest))),
     },
   };
   const sourceMapDocument = {
-    schema: "miller-pi-a2-source-map",
+    schema: "miller-pi-a3-source-map",
     version: 1,
     baseline_manifest_sha256: a1ManifestSHA256,
     entries: sourceMap,
@@ -560,12 +753,12 @@ async function build() {
     spdxVersion: "SPDX-2.3",
     dataLicense: "CC0-1.0",
     SPDXID: "SPDXRef-DOCUMENT",
-    name: "@miller/pi-mvp-overlay@0.82.0-a2",
+    name: "@miller/pi-mvp-overlay@0.82.0-a3",
     documentNamespace:
-      "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a2",
+      "https://miller.local/spdx/pi-mvp-overlay/0.82.0-a3",
     creationInfo: {
       created: "2026-07-29T00:00:00Z",
-      creators: ["Tool: miller-a2-overlay-builder-1.0"],
+      creators: ["Tool: miller-a3-overlay-builder-1.0"],
     },
     packages: [
       {
@@ -629,9 +822,9 @@ async function build() {
       },
     ],
   };
-  const notice = `Miller Pi A2 overlay distribution NOTICE
+  const notice = `Miller Pi A3 overlay distribution NOTICE
 
-Miller-authored packaging and the bounded A2 transformation are Apache-2.0.
+Miller-authored packaging and the bounded A3 transformation are Apache-2.0.
 Retained Pi AI 0.82.0 source is MIT-licensed and derives from commit 083e61621276bff9f6faefab87ce07fcd98734e2.
 OpenAI 6.26.0 is Apache-2.0.
 partial-json 0.1.7 is MIT.
@@ -655,6 +848,10 @@ The exact license texts and hashes are retained with this distribution.
   }
 
   const vendorFiles = [
+    await retainedFile(
+      join(stagedVendorRoot, "development-bundle-inventory.json"),
+      "development_bundle_inventory",
+    ),
     await retainedFile(join(stagedVendorRoot, archiveName), "overlay_archive"),
     await retainedFile(join(stagedVendorRoot, "overlay-files.json"), "file_inventory"),
     await retainedFile(join(stagedVendorRoot, "source-map.json"), "source_map"),
@@ -674,7 +871,7 @@ The exact license texts and hashes are retained with this distribution.
     ),
   ].sort((left, right) => left.path.localeCompare(right.path));
   const vendorManifest = {
-    schema: "miller-pi-a2-vendor-manifest",
+    schema: "miller-pi-a3-vendor-manifest",
     version: 1,
     package: packageIdentity,
     source: {
@@ -693,6 +890,7 @@ The exact license texts and hashes are retained with this distribution.
       script: "Gateway/scripts/build-overlay.mjs",
       script_sha256: sha256(scriptBytes),
       modified_overlay_files: [
+        "dist/api/openai-completions.js",
         "dist/auth/oauth/openai-codex.js",
         "package.json",
       ],
@@ -701,6 +899,8 @@ The exact license texts and hashes are retained with this distribution.
         "single matching-state callback",
         "no-store and no-referrer response headers",
         "awaited callback listener close",
+        "bounded OpenAI-compatible tool definitions and arguments",
+        "streamed tool-call assembly with tool-result replay",
         "cancellation and deadline settle before awaited listener close",
         "fixed 127.0.0.1 listener host",
         "no manual authorization-code input",

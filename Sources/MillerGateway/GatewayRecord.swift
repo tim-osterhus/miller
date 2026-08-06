@@ -1,4 +1,5 @@
 import Foundation
+import MillerCore
 
 public enum GatewayProtocol {
     public static let name = "miller.gateway"
@@ -176,6 +177,14 @@ public struct GatewayRecord: Equatable, Sendable {
                 try validate(value, as: kind, field: key)
             }
         }
+        if type == "reasoning.tool_result",
+           let outcome = object["outcome"]?.stringValue
+        {
+            let requiresResult = outcome == "succeeded" || outcome == "failed"
+            guard requiresResult == (object["result"] != nil) else {
+                throw GatewayProtocolError.invalidField
+            }
+        }
         try rejectNUL(in: .object(object))
 
         var fields = object
@@ -203,6 +212,12 @@ public struct GatewayRecord: Equatable, Sendable {
         case modelChoices
         case anyArray
         case nullableString
+        case capabilityID
+        case toolDefinitions
+        case argumentsObject
+        case boundedResult
+        case toolOutcome
+        case toolStatus
     }
 
     private struct RecordSchema {
@@ -294,7 +309,8 @@ public struct GatewayRecord: Equatable, Sendable {
         "reasoning.start": .init(required: [
             "conversation_id": .uuid, "turn_id": .uuid,
             "generation": .nonnegativeInteger, "provider_profile": .object,
-            "context": .objectArray, "user_text": .string, "tools": .anyArray,
+            "context": .objectArray, "user_text": .string,
+            "tools": .toolDefinitions,
         ], optional: ["voice_history_attachment": .string]),
         "reasoning.cancel": .init(required: [
             "turn_id": .uuid, "target_generation": .nonnegativeInteger,
@@ -323,6 +339,29 @@ public struct GatewayRecord: Equatable, Sendable {
             "turn_id": .uuid, "generation": .nonnegativeInteger,
             "error_code": .string,
         ]),
+        "reasoning.tool_call": .init(required: [
+            "turn_id": .uuid, "generation": .nonnegativeInteger,
+            "call_id": .uuid, "capability_id": .capabilityID,
+            "arguments": .argumentsObject,
+        ]),
+        "reasoning.tool_result": .init(
+            required: [
+                "turn_id": .uuid, "generation": .nonnegativeInteger,
+                "call_id": .uuid, "outcome": .toolOutcome,
+            ],
+            optional: ["result": .boundedResult]
+        ),
+        "reasoning.tool_cancel": .init(required: [
+            "turn_id": .uuid, "generation": .nonnegativeInteger,
+            "call_id": .uuid,
+        ]),
+        "reasoning.tool_event": .init(
+            required: [
+                "turn_id": .uuid, "generation": .nonnegativeInteger,
+                "call_id": .uuid, "status": .toolStatus,
+            ],
+            optional: ["capability_id": .capabilityID]
+        ),
     ]
 
     private static func validate(
@@ -351,6 +390,22 @@ public struct GatewayRecord: Equatable, Sendable {
             guard readinessStatuses.contains(value) else {
                 throw GatewayProtocolError.invalidField
             }
+        case let (.capabilityID, .string(value)):
+            guard (try? CapabilityID(rawValue: value)) != nil else {
+                throw GatewayProtocolError.invalidField
+            }
+        case let (.toolOutcome, .string(value)):
+            guard Self.toolOutcomes.contains(value) else {
+                throw GatewayProtocolError.invalidField
+            }
+        case let (.toolStatus, .string(value)):
+            guard Self.toolStatuses.contains(value) else {
+                throw GatewayProtocolError.invalidField
+            }
+        case (.toolDefinitions, .array),
+             (.argumentsObject, .object),
+             (.boundedResult, .object):
+            break
         case (.optionalNonnegativeInteger, .null),
              (.nullableString, .null),
              (.nullableString, .string):
@@ -421,6 +476,15 @@ public struct GatewayRecord: Equatable, Sendable {
         {
             throw GatewayProtocolError.invalidField
         }
+        if case .toolDefinitions = kind {
+            try validateToolDefinitions(value)
+        }
+        if case .argumentsObject = kind {
+            try validateJSONBytes(value, maximum: 64 * 1_024)
+        }
+        if case .boundedResult = kind {
+            try validateJSONBytes(value, maximum: 256 * 1_024)
+        }
     }
 
     static let readinessStatuses: Set<String> = [
@@ -445,11 +509,22 @@ public struct GatewayRecord: Equatable, Sendable {
         "assistant",
     ]
 
+    static let toolOutcomes: Set<String> = [
+        "succeeded", "failed", "declined", "timed_out", "cancelled",
+    ]
+
+    static let toolStatuses: Set<String> = [
+        "started", "awaiting_approval", "running", "succeeded", "failed",
+        "declined", "timed_out", "cancelled", "tools_unavailable",
+    ]
+
     static let enumAuthority: [String: Set<String>] = [
         "provider.readiness_result/status": readinessStatuses,
         "provider.readiness/provider_profile.kind": providerKinds,
         "reasoning.start/provider_profile.kind": providerKinds,
         "reasoning.start/context[].role": contextRoles,
+        "reasoning.tool_result/outcome": toolOutcomes,
+        "reasoning.tool_event/status": toolStatuses,
     ]
 
     static func enumValues(
@@ -487,6 +562,56 @@ public struct GatewayRecord: Equatable, Sendable {
               contextRoles.contains(role),
               message["text"]?.stringValue != nil
         else {
+            throw GatewayProtocolError.invalidField
+        }
+    }
+
+    private static func validateToolDefinitions(_ value: JSONValue) throws {
+        guard case let .array(tools) = value, tools.count <= 2_048 else {
+            throw GatewayProtocolError.invalidField
+        }
+        var capabilityIDs = Set<String>()
+        var names = Set<String>()
+        for tool in tools {
+            guard case let .object(fields) = tool,
+                  Set(fields.keys) == [
+                      "capability_id", "name", "description", "input_schema",
+                  ],
+                  let capabilityID = fields["capability_id"]?.stringValue,
+                  (try? CapabilityID(rawValue: capabilityID)) != nil,
+                  let name = fields["name"]?.stringValue,
+                  name.utf8.count <= 128,
+                  !name.isEmpty,
+                  name.unicodeScalars.allSatisfy({
+                      CharacterSet.alphanumerics.contains($0) || $0 == "_"
+                  }),
+                  let description = fields["description"]?.stringValue,
+                  description.utf8.count <= 1_024,
+                  case let .object(schema)? = fields["input_schema"],
+                  !schema.isEmpty,
+                  capabilityIDs.insert(capabilityID).inserted,
+                  names.insert(name).inserted
+            else {
+                throw GatewayProtocolError.invalidField
+            }
+            try validateJSONBytes(.object(schema), maximum: 64 * 1_024)
+        }
+    }
+
+    private static func validateJSONBytes(
+        _ value: JSONValue,
+        maximum: Int
+    ) throws {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(
+                withJSONObject: value.foundationValue,
+                options: [.sortedKeys, .fragmentsAllowed]
+            )
+        } catch {
+            throw GatewayProtocolError.invalidField
+        }
+        guard data.count <= maximum else {
             throw GatewayProtocolError.invalidField
         }
     }
@@ -532,6 +657,8 @@ public struct GatewaySessionValidator: Sendable {
         let turnID: String
         let generation: Int
         var nextOrdinal = 0
+        var seenCallIDs: Set<String> = []
+        var activeCallIDs: Set<String> = []
         var phase: Phase = .awaitingAccepted
     }
 
@@ -607,12 +734,56 @@ public struct GatewaySessionValidator: Sendable {
             guard state.phase == .streaming else {
                 throw GatewayProtocolError.invalidSequence
             }
+        case "reasoning.tool_call":
+            guard state.phase == .streaming,
+                  let callID = record["call_id"]?.stringValue,
+                  state.seenCallIDs.insert(callID).inserted
+            else {
+                throw GatewayProtocolError.invalidSequence
+            }
+            state.activeCallIDs.insert(callID)
+        case "reasoning.tool_event":
+            guard state.phase == .streaming,
+                  let callID = record["call_id"]?.stringValue,
+                  record["status"]?.stringValue == "tools_unavailable"
+                    || state.seenCallIDs.contains(callID)
+            else {
+                throw GatewayProtocolError.invalidSequence
+            }
+            if let status = record["status"]?.stringValue,
+               Self.terminalToolStatuses.contains(status)
+            {
+                guard state.activeCallIDs.remove(callID) != nil else {
+                    throw GatewayProtocolError.invalidSequence
+                }
+            }
         case "reasoning.completed", "reasoning.stopped", "reasoning.failed":
-            guard state.phase == .streaming else {
+            guard state.phase == .streaming, state.activeCallIDs.isEmpty else {
                 throw GatewayProtocolError.invalidSequence
             }
             state.phase = .terminal
         default:
+            throw GatewayProtocolError.invalidSequence
+        }
+        requests[requestID] = state
+    }
+
+    private static let terminalToolStatuses: Set<String> = [
+        "succeeded", "failed", "declined", "timed_out", "cancelled",
+    ]
+
+    public mutating func resolveTool(
+        requestID: String,
+        turnID: String,
+        generation: Int,
+        callID: String
+    ) throws {
+        guard var state = requests[requestID],
+              state.phase == .streaming,
+              state.turnID == turnID,
+              state.generation == generation,
+              state.activeCallIDs.remove(callID) != nil
+        else {
             throw GatewayProtocolError.invalidSequence
         }
         requests[requestID] = state

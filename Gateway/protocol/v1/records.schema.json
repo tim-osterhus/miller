@@ -27,7 +27,11 @@
     {"$ref": "#/$defs/reasoning.usage"},
     {"$ref": "#/$defs/reasoning.completed"},
     {"$ref": "#/$defs/reasoning.stopped"},
-    {"$ref": "#/$defs/reasoning.failed"}
+    {"$ref": "#/$defs/reasoning.failed"},
+    {"$ref": "#/$defs/reasoning.tool_call"},
+    {"$ref": "#/$defs/reasoning.tool_result"},
+    {"$ref": "#/$defs/reasoning.tool_cancel"},
+    {"$ref": "#/$defs/reasoning.tool_event"}
   ],
   "$defs": {
     "uuid": {
@@ -70,6 +74,20 @@
       "properties": {
         "role": {"enum": ["user", "assistant"]},
         "text": {"type": "string"}
+      }
+    },
+    "capability_id": {
+      "type": "string"
+    },
+    "tool_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_id", "name", "description", "input_schema"],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/capability_id"},
+        "name": {"type": "string"},
+        "description": {"type": "string", "maxLength": 1024},
+        "input_schema": {"type": "object"}
       }
     },
     "gateway.ready": {
@@ -375,7 +393,10 @@
             },
             "user_text": {"type": "string", "maxLength": 65536},
             "voice_history_attachment": {"type": "string", "maxLength": 32768},
-            "tools": {"type": "array"}
+            "tools": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/tool_definition"}
+            }
           }
         }
       ],
@@ -453,6 +474,68 @@
           "properties": {
             "type": {"const": "reasoning.failed"},
             "error_code": {"type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.tool_call": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["call_id", "capability_id", "arguments"],
+          "properties": {
+            "type": {"const": "reasoning.tool_call"},
+            "call_id": {"$ref": "#/$defs/uuid"},
+            "capability_id": {"$ref": "#/$defs/capability_id"},
+            "arguments": {"type": "object"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.tool_result": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["call_id", "outcome"],
+          "properties": {
+            "type": {"const": "reasoning.tool_result"},
+            "call_id": {"$ref": "#/$defs/uuid"},
+            "outcome": {"enum": ["succeeded", "failed", "declined", "timed_out", "cancelled"]},
+            "result": {"type": "object"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.tool_cancel": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["call_id"],
+          "properties": {
+            "type": {"const": "reasoning.tool_cancel"},
+            "call_id": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reasoning.tool_event": {
+      "allOf": [
+        {"$ref": "#/$defs/reasoning_event"},
+        {
+          "type": "object",
+          "required": ["call_id", "status"],
+          "properties": {
+            "type": {"const": "reasoning.tool_event"},
+            "call_id": {"$ref": "#/$defs/uuid"},
+            "capability_id": {"$ref": "#/$defs/capability_id"},
+            "status": {"enum": ["started", "awaiting_approval", "running", "succeeded", "failed", "declined", "timed_out", "cancelled", "tools_unavailable"]}
           }
         }
       ],

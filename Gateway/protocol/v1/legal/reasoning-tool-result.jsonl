@@ -1,0 +1,1 @@
+{"protocol":"miller.gateway","version":1,"type":"reasoning.tool_result","session_id":"00000000-0000-4000-8000-000000000001","request_id":"00000000-0000-4000-8000-000000000002","turn_id":"00000000-0000-4000-8000-000000000003","generation":1,"call_id":"00000000-0000-4000-8000-000000000004","outcome":"succeeded","result":{"value":"fixture"}}

@@ -13,7 +13,8 @@ import {
   codexContextForModel,
   normalizeProviderProfile,
 } from "../src/providers.mjs";
-import { FrameDecoder } from "../src/protocol.mjs";
+import { FrameDecoder, validateGatewayRecord } from "../src/protocol.mjs";
+import { ReasoningOperation } from "../src/reasoning.mjs";
 import * as strictJSON from "../src/strict-json.mjs";
 
 const { requireClosedObject, strictParse, validateProtocolRecord, validateProtocolSequence } = strictJSON;
@@ -39,6 +40,35 @@ const dispositionsByKind = {
   template: new Set(["helper-template"]),
   sequence: new Set(["sequence"]),
 };
+
+const toolFixture = {
+  capability_id: "miller_mcp/notes/lookup",
+  name: "miller_mcp__notes__lookup",
+  description: "Look up a note",
+  input_schema: { type: "object", properties: { query: { type: "string" } } },
+};
+
+function reasoningRecord(overrides = {}) {
+  return {
+    provider_profile: {
+      kind: "openai_compatible",
+      base_url: "https://fixture.invalid/v1",
+      model: "fixture-model",
+      credential_ref: crypto.randomUUID(),
+    },
+    context: [],
+    user_text: "use a tool",
+    tools: [toolFixture],
+    request_id: crypto.randomUUID(),
+    turn_id: crypto.randomUUID(),
+    generation: 1,
+    ...overrides,
+  };
+}
+
+async function* events(values) {
+  for (const value of values) yield value;
+}
 
 test("JavaScript protocol validator is available", () => {
   assert.equal(typeof validateProtocolRecord, "function");
@@ -259,7 +289,7 @@ test("JavaScript consumes every complete legal protocol-v1 fixture", async (cont
     const lines = source.slice(0, -1).split("\n");
     assert.equal(lines.length, 1, `${file} must contain exactly one complete record`);
     const record = strictParse(lines[0]);
-    validateProtocolRecord(record);
+    validateGatewayRecord(record);
     consumedTypes.add(record.type);
   }
   assert.deepEqual(consumedTypes, schemaTypes);
@@ -483,3 +513,249 @@ function exerciseQualificationHelper({ cancel }) {
     });
   });
 }
+
+test("tool records are closed, identity-bound, and bounded", () => {
+  const identity = {
+    protocol: "miller.gateway",
+    version: 1,
+    session_id: crypto.randomUUID(),
+    request_id: crypto.randomUUID(),
+    turn_id: crypto.randomUUID(),
+    generation: 7,
+    call_id: crypto.randomUUID(),
+  };
+  for (const record of [
+    {
+      ...identity,
+      type: "reasoning.tool_call",
+      capability_id: toolFixture.capability_id,
+      arguments: { query: "bounded" },
+    },
+    {
+      ...identity,
+      type: "reasoning.tool_result",
+      outcome: "succeeded",
+      result: { content: "bounded" },
+    },
+    { ...identity, type: "reasoning.tool_cancel" },
+    {
+      ...identity,
+      type: "reasoning.tool_event",
+      capability_id: toolFixture.capability_id,
+      status: "running",
+    },
+  ]) validateGatewayRecord(record);
+
+  assert.throws(() => validateGatewayRecord({
+    ...identity,
+    type: "reasoning.tool_call",
+    capability_id: toolFixture.capability_id,
+    arguments: [],
+  }), /invalid_record/);
+  assert.throws(() => validateGatewayRecord({
+    ...identity,
+    type: "reasoning.tool_call",
+    capability_id: "unknown/tool",
+    arguments: {},
+  }), /invalid_record/);
+  assert.throws(() => validateGatewayRecord({
+    ...identity,
+    type: "reasoning.tool_event",
+    capability_id: toolFixture.capability_id,
+    status: "running",
+    raw_payload: "secret",
+  }), /invalid_record/);
+  assert.throws(() => validateGatewayRecord({
+    ...identity,
+    type: "reasoning.tool_result",
+    outcome: "succeeded",
+    result: { content: "x".repeat(256 * 1_024 + 1) },
+  }), /invalid_record/);
+});
+
+test("reasoning operation suspends for one tool result then continues", async () => {
+  const record = reasoningRecord();
+  const emitted = [];
+  let round = 0;
+  const operation = new ReasoningOperation(
+    record,
+    { kind: "api_key", key: "synthetic" },
+    (event) => emitted.push(event),
+    () => assert.fail("unexpected diagnostic"),
+    (_profile, _credential, context) => {
+      round += 1;
+      if (round === 1) return events([
+        { type: "toolcall_end", toolCall: {
+          id: "provider-call-1",
+          name: toolFixture.name,
+          arguments: { query: "weather" },
+        } },
+        { type: "done", message: { content: [{
+          type: "toolCall",
+          id: "provider-call-1",
+          name: toolFixture.name,
+          arguments: { query: "weather" },
+        }] } },
+      ]);
+      assert.equal(context.messages.at(-1).role, "toolResult");
+      return events([
+        { type: "text_delta", delta: "continued" },
+        { type: "done", message: { usage: { input: 2, output: 1 }, content: [] } },
+      ]);
+    },
+  );
+  const running = operation.run();
+  await new Promise((resolve) => setImmediate(resolve));
+  const call = emitted.find((event) => event.type === "reasoning.tool_call");
+  assert.ok(call);
+  assert.equal(call.capability_id, toolFixture.capability_id);
+  assert.deepEqual(call.arguments, { query: "weather" });
+  assert.equal(operation.resolveToolResult({
+    request_id: record.request_id,
+    turn_id: record.turn_id,
+    generation: record.generation,
+    call_id: call.call_id,
+    outcome: "succeeded",
+    result: { content: "sunny" },
+  }), true);
+  await running;
+  assert.equal(round, 2);
+  assert.equal(emitted.at(-1).type, "reasoning.completed");
+  assert.equal(emitted.some((event) => JSON.stringify(event).includes("sunny")), false);
+});
+
+test("reasoning operation admits concurrent distinct calls and rejects duplicate or stale results", async () => {
+  const secondTool = {
+    ...toolFixture,
+    capability_id: "miller_mcp/notes/list",
+    name: "miller_mcp__notes__list",
+  };
+  const record = reasoningRecord({ tools: [toolFixture, secondTool] });
+  const emitted = [];
+  let round = 0;
+  const operation = new ReasoningOperation(
+    record,
+    { kind: "api_key", key: "synthetic" },
+    (event) => emitted.push(event),
+    () => assert.fail("unexpected diagnostic"),
+    () => {
+      round += 1;
+      if (round === 1) return events([
+        { type: "toolcall_end", toolCall: {
+          id: "one", name: toolFixture.name, arguments: { query: "one" },
+        } },
+        { type: "toolcall_end", toolCall: {
+          id: "two", name: secondTool.name, arguments: { query: "two" },
+        } },
+        { type: "done", message: { content: [] } },
+      ]);
+      return events([{ type: "done", message: { content: [] } }]);
+    },
+  );
+  const running = operation.run();
+  await new Promise((resolve) => setImmediate(resolve));
+  const calls = emitted.filter((event) => event.type === "reasoning.tool_call");
+  assert.equal(calls.length, 2);
+  assert.notEqual(calls[0].call_id, calls[1].call_id);
+  const result = (call, outcome = "succeeded") => ({
+    request_id: record.request_id,
+    turn_id: record.turn_id,
+    generation: record.generation,
+    call_id: call.call_id,
+    outcome,
+    ...(outcome === "succeeded" ? { result: { ok: true } } : {}),
+  });
+  assert.equal(operation.resolveToolResult(result(calls[1])), true);
+  assert.equal(operation.resolveToolResult(result(calls[1])), false);
+  assert.equal(operation.resolveToolResult({ ...result(calls[0]), generation: 9 }), false);
+  assert.equal(operation.resolveToolResult(result(calls[0], "declined")), true);
+  await running;
+  assert.equal(emitted.at(-1).type, "reasoning.completed");
+});
+
+test("tool wait supports timeout, cancellation, malformed args, and unsupported-tool fallback", async () => {
+  const timeoutRecord = reasoningRecord();
+  const timeoutEvents = [];
+  const timeout = new ReasoningOperation(
+    timeoutRecord,
+    { kind: "api_key", key: "synthetic" },
+    (event) => timeoutEvents.push(event),
+    () => {},
+    () => events([
+      { type: "toolcall_end", toolCall: {
+        id: "timeout", name: toolFixture.name, arguments: { query: "x" },
+      } },
+      { type: "done", message: { content: [] } },
+    ]),
+    { toolTimeoutMilliseconds: 5 },
+  );
+  await timeout.run();
+  assert.equal(timeoutEvents.some(
+    (event) => event.type === "reasoning.tool_event" && event.status === "timed_out",
+  ), true);
+  assert.equal(timeoutEvents.at(-1).type, "reasoning.failed");
+
+  const cancelRecord = reasoningRecord();
+  const cancelEvents = [];
+  const cancelled = new ReasoningOperation(
+    cancelRecord,
+    { kind: "api_key", key: "synthetic" },
+    (event) => cancelEvents.push(event),
+    () => {},
+    () => events([
+      { type: "toolcall_end", toolCall: {
+        id: "cancel", name: toolFixture.name, arguments: { query: "x" },
+      } },
+      { type: "done", message: { content: [] } },
+    ]),
+  );
+  const cancelRun = cancelled.run();
+  await new Promise((resolve) => setImmediate(resolve));
+  cancelled.cancel(cancelRecord.request_id, cancelRecord.turn_id, cancelRecord.generation);
+  await cancelRun;
+  assert.equal(cancelEvents.some(
+    (event) => event.type === "reasoning.tool_event" && event.status === "cancelled",
+  ), true);
+  assert.equal(cancelEvents.at(-1).type, "reasoning.stopped");
+
+  const malformedEvents = [];
+  const malformedRecord = reasoningRecord();
+  await new ReasoningOperation(
+    malformedRecord,
+    { kind: "api_key", key: "synthetic" },
+    (event) => malformedEvents.push(event),
+    () => {},
+    () => events([
+      { type: "toolcall_end", toolCall: {
+        id: "bad", name: toolFixture.name, arguments: ["not-object"],
+      } },
+      { type: "done", message: { content: [] } },
+    ]),
+  ).run();
+  assert.equal(malformedEvents.at(-1).type, "reasoning.failed");
+
+  const fallbackEvents = [];
+  let fallbackRound = 0;
+  const fallbackRecord = reasoningRecord();
+  await new ReasoningOperation(
+    fallbackRecord,
+    { kind: "api_key", key: "synthetic" },
+    (event) => fallbackEvents.push(event),
+    () => {},
+    (_profile, _credential, context) => {
+      fallbackRound += 1;
+      if (fallbackRound === 1) return events([
+        { type: "error", error: { errorMessage: "tools_unsupported" } },
+      ]);
+      assert.deepEqual(context.tools, []);
+      return events([
+        { type: "text_delta", delta: "ordinary text" },
+        { type: "done", message: { content: [] } },
+      ]);
+    },
+  ).run();
+  assert.equal(fallbackEvents.filter(
+    (event) => event.type === "reasoning.tool_event" && event.status === "tools_unavailable",
+  ).length, 1);
+  assert.equal(fallbackEvents.at(-1).type, "reasoning.completed");
+});

@@ -28,7 +28,7 @@ its later file-level authorship review is recorded separately in
 
 ## Pi AI 0.82.0
 
-Portions of `@miller/pi-mvp-overlay@0.82.0-a2` derive from
+Portions of `@miller/pi-mvp-overlay@0.82.0-a3` derive from
 `@earendil-works/pi-ai@0.82.0` at commit
 `083e61621276bff9f6faefab87ce07fcd98734e2`.
 
@@ -37,9 +37,10 @@ Copyright (c) 2025 Mario Zechner
 Licensed under the MIT License. The exact license text is distributed at
 `Gateway/vendor/LICENSES/pi-ai-0.82.0-MIT.txt`.
 
-Miller changed the reviewed A1 distribution only to harden the OpenAI Codex
-OAuth callback and assign the A2 derived-package identity. The exact changes
-and retained files are recorded in `Gateway/vendor/source-map.json`.
+Miller changed the reviewed A1 distribution to harden the OpenAI Codex OAuth
+callback, add bounded OpenAI-compatible tool-call conversion, and assign the
+A3 derived-package identity. The exact changes and retained files are recorded
+in `Gateway/vendor/source-map.json`.
 
 ## OpenAI JavaScript 6.26.0
 

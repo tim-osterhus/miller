@@ -247,6 +247,78 @@ test("production helper completes streamed contextual turns without tools", asyn
   assert.equal(client.stderr, "");
 });
 
+test("production A3 overlay completes a tool round then continues", async (context) => {
+  const requests = [];
+  const provider = await startProvider((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const parsed = JSON.parse(body);
+      requests.push(parsed);
+      if (requests.length === 1) {
+        sse(response, [
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: "provider-call", function: { name: "miller_tool_0", arguments: "{\"query\":\"bounded\"}" } }] }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        ]);
+      } else {
+        sse(response, [
+          { choices: [{ delta: { content: "continued" }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: "stop" }] },
+        ]);
+      }
+    });
+  });
+  const client = new HelperClient();
+  context.after(async () => {
+    if (!client.child.killed && client.child.exitCode === null) await client.close();
+    await provider.close();
+  });
+  await client.ready();
+  const turn = ids();
+  await restore(client, turn.credential_ref);
+  client.send({
+    type: "reasoning.start",
+    request_id: turn.request_id,
+    conversation_id: turn.conversation_id,
+    turn_id: turn.turn_id,
+    generation: 1,
+    provider_profile: profile(provider.baseURL, turn.credential_ref),
+    context: [],
+    user_text: "use the tool",
+    tools: [{
+      capability_id: "miller_mcp/notes/lookup",
+      name: "miller_tool_0",
+      description: "Look up a note",
+      input_schema: { type: "object" },
+    }],
+  });
+  const toolCall = await client.waitFor((record) => record.request_id === turn.request_id
+    && record.type === "reasoning.tool_call");
+  assert.equal(toolCall.capability_id, "miller_mcp/notes/lookup");
+  assert.deepEqual(toolCall.arguments, { query: "bounded" });
+  client.send({
+    type: "reasoning.tool_result",
+    request_id: turn.request_id,
+    turn_id: turn.turn_id,
+    generation: 1,
+    call_id: toolCall.call_id,
+    outcome: "succeeded",
+    result: { value: "private-result" },
+  });
+  await client.waitFor((record) => record.request_id === turn.request_id
+    && record.type === "reasoning.completed");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].tools[0].function.name, "miller_tool_0");
+  assert.equal(requests[0].tool_choice, "auto");
+  assert.equal(requests[1].messages.at(-1).role, "tool");
+  assert.equal(requests[1].messages.at(-1).content, "{\"value\":\"private-result\"}");
+  assert.equal(client.records.filter((record) => record.request_id === turn.request_id
+    && record.type === "reasoning.tool_call").length, 1);
+  assert.equal(client.records.filter((record) => record.request_id === turn.request_id
+    && record.type === "reasoning.text_delta").map((record) => record.text).join(""), "continued");
+});
+
 test("production helper returns the local Codex catalog and accepts custom readiness", async (context) => {
   const client = new HelperClient();
   context.after(async () => {

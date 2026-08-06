@@ -1,9 +1,9 @@
 {
-  "schema": "miller-pi-a2-vendor-manifest",
+  "schema": "miller-pi-a3-vendor-manifest",
   "version": 1,
   "package": {
     "name": "@miller/pi-mvp-overlay",
-    "version": "0.82.0-a2"
+    "version": "0.82.0-a3"
   },
   "source": {
     "upstream": {
@@ -18,8 +18,9 @@
   },
   "transformation": {
     "script": "Gateway/scripts/build-overlay.mjs",
-    "script_sha256": "4d9feb112a65f606fbd5fd199af64da5bc69637ccff42228ddd0b6f0d64f9388",
+    "script_sha256": "541b097adf3c4b7d77bf51763a2b9d76983e2f8610b833bd3042accb95bfd9f6",
     "modified_overlay_files": [
+      "dist/api/openai-completions.js",
       "dist/auth/oauth/openai-codex.js",
       "package.json"
     ],
@@ -28,6 +29,8 @@
       "single matching-state callback",
       "no-store and no-referrer response headers",
       "awaited callback listener close",
+      "bounded OpenAI-compatible tool definitions and arguments",
+      "streamed tool-call assembly with tool-result replay",
       "cancellation and deadline settle before awaited listener close",
       "fixed 127.0.0.1 listener host",
       "no manual authorization-code input"
@@ -46,10 +49,16 @@
     }
   },
   "gateway": {
-    "package_json_sha256": "c2a84bb22b2703b973b8accf89bdd8d4f9ff32315062900ab7e585b9b0225007",
-    "package_lock_sha256": "a98b4b2654c79b76bf4de2c2e6424178a6e31e57b53cba1aa52ce1b57c086a9e"
+    "package_json_sha256": "7e4ec21149296fb16732c0b4358ce68caa7ab2c238d7f5276118bf4e3d2f33b0",
+    "package_lock_sha256": "937103fdcfcf315929f2d2262d6f4478bc9a2d124018767abff32549d8a05a48"
   },
   "files": [
+    {
+      "path": "development-bundle-inventory.json",
+      "role": "development_bundle_inventory",
+      "sha256": "b2ee22957e6675f841a9332d5309596e78a04f674cb4dc6b29191339d2149820",
+      "bytes": 289
+    },
     {
       "path": "LICENSES/openai-6.26.0-Apache-2.0.txt",
       "role": "license",
@@ -71,38 +80,32 @@
     {
       "path": "NOTICE",
       "role": "notice",
-      "sha256": "1b90cfa0cd1e547a79e679b60b6e8a4dda450517235df5fb6616bebd6b61b4ce",
+      "sha256": "2bc2ba5104a40328328acb364ddb74106d425d94e6908c3044d9387cfb950071",
       "bytes": 357
-    },
-    {
-      "path": "development-bundle-inventory.json",
-      "role": "development_bundle_inventory",
-      "sha256": "bde46208688d27709bb6d67dd8e8ff19b31959dd60e558cdb0905827ea2fd5ae",
-      "bytes": 289
     },
     {
       "path": "overlay-files.json",
       "role": "file_inventory",
-      "sha256": "11523a303ef9d0f4efc6ba14dfec848413179906a9bd12e720db077a791cd93c",
+      "sha256": "afd306f30a4f0a261dbe7d324f7c91be9592f7316250fdd3c377b9db8ac2af79",
       "bytes": 9874
     },
     {
-      "path": "pi-mvp-overlay-0.82.0-a2.tgz",
+      "path": "pi-mvp-overlay-0.82.0-a3.tgz",
       "role": "overlay_archive",
-      "sha256": "2d38923e44eeec3dba38076b0d35caff6883c533aec07d0522cedb3cb7dab4e4",
-      "bytes": 66045
+      "sha256": "49b3846b3ec3d1daa9ac704b9eeae085fa4c9aaa35692ed2b7ad027c9ead266c",
+      "bytes": 66713
     },
     {
       "path": "sbom.spdx.json",
       "role": "sbom",
-      "sha256": "851dbca0451beff2175980ffeda2439b6f539737e0b18c941df4e12996192157",
+      "sha256": "c4f87d60394a0859cd5e234cd8eb536d4f9d08f4ec530ecfafe61314d748ebc7",
       "bytes": 2358
     },
     {
       "path": "source-map.json",
       "role": "source_map",
-      "sha256": "17f0cbc679348237d39937251b81e10b9359d7c8986363b0e8fbfbf1a9a83df2",
-      "bytes": 50732
+      "sha256": "20c875d9ecf580ec3223374e511a912bc40a8d9b4808d837ee6614b7c0cc3788",
+      "bytes": 50731
     }
   ]
 }

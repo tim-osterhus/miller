@@ -1,9 +1,9 @@
 {
-  "schema": "miller-pi-a2-overlay-file-inventory",
+  "schema": "miller-pi-a3-overlay-file-inventory",
   "version": 1,
   "package": {
     "name": "@miller/pi-mvp-overlay",
-    "version": "0.82.0-a2"
+    "version": "0.82.0-a3"
   },
   "files": [
     {
@@ -62,8 +62,8 @@
     },
     {
       "path": "dist/api/openai-completions.js",
-      "sha256": "aabaf8ccc270b59b98cde3adcab02ff5577bc3d8b55501d7689b48bf7b6cd2d9",
-      "bytes": 6014,
+      "sha256": "536885a4ebc718bdb3f845ded6b57c966cc110e448d7574f4bc2884222672994",
+      "bytes": 9417,
       "mode": 384
     },
     {
@@ -320,13 +320,13 @@
     },
     {
       "path": "package.json",
-      "sha256": "afc648bafcacc8930bf8150c7284cd8c3f7b4be758042363b9bb2f8c095785b2",
+      "sha256": "96f0c5801c48534ef868ea6142051edc9ad8fe963658fd9681bb00d1b3a93d36",
       "bytes": 507,
       "mode": 384
     }
   ],
   "package_manifest": {
     "path": "manifest.json",
-    "sha256": "a28a51f77e004f2e27aed217ccb243a895eb32a30942aa7350e0fb81e26170d9"
+    "sha256": "7f144a476a5de8c0d025010bf9eb14327615699bbd6a32b88e40180133c2bdf2"
   }
 }
