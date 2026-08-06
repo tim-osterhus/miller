@@ -105,6 +105,9 @@ public typealias CodexCapabilityActivityHandler = @Sendable (
 public typealias CodexProviderApprovalResolver = @Sendable (
     CapabilityApprovalRequest
 ) async -> CapabilityApprovalDecision
+public typealias CodexProviderApprovalDetailsResolver = @Sendable (
+    CodexProviderApproval
+) async -> CapabilityApprovalDecision
 
 public struct CodexCapabilityProtocol: Sendable {
     public static let reservedBridgeServerID = "miller-capability-bridge"

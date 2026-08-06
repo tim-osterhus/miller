@@ -68,7 +68,10 @@ actor GPTLiveController {
     private let cleanupPendingDelay: Duration
     private let onCapabilityActivity: CodexCapabilityActivityHandler
     private let resolveProviderApproval: CodexProviderApprovalResolver
-    private let existingMillerCapabilities: [CapabilityDescriptor]
+    private let resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver?
+    private let millerCapabilityCatalog: @Sendable () -> [CapabilityDescriptor]
+    private let bridgeConfiguration:
+        @Sendable () throws -> CodexMCPBridgeConfiguration?
     private let makeSession: @Sendable (CodexAppServerClient) -> LiveAudioSession
     private let makePeer: (@Sendable () async throws -> any LiveAudioPeer)?
     private let makeDirectSession: (@Sendable (any LiveAudioPeer) -> DirectGPTLiveSession)?
@@ -108,7 +111,11 @@ actor GPTLiveController {
         cleanupPendingDelay: Duration = .seconds(2),
         onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
         resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
+        resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver? = nil,
         existingMillerCapabilities: [CapabilityDescriptor] = [],
+        millerCapabilityCatalog: (@Sendable () -> [CapabilityDescriptor])? = nil,
+        bridgeConfiguration: @escaping @Sendable () throws
+            -> CodexMCPBridgeConfiguration? = { nil },
         makeSession: @escaping @Sendable (CodexAppServerClient) -> LiveAudioSession = {
             LiveAudioSession(client: $0)
         },
@@ -144,7 +151,10 @@ actor GPTLiveController {
         self.cleanupPendingDelay = cleanupPendingDelay
         self.onCapabilityActivity = onCapabilityActivity
         self.resolveProviderApproval = resolveProviderApproval
-        self.existingMillerCapabilities = existingMillerCapabilities
+        self.resolveProviderApprovalDetails = resolveProviderApprovalDetails
+        self.millerCapabilityCatalog = millerCapabilityCatalog
+            ?? { existingMillerCapabilities }
+        self.bridgeConfiguration = bridgeConfiguration
         self.makeSession = makeSession
         self.makePeer = makePeer
         self.makeDirectSession = makeDirectSession
@@ -156,16 +166,20 @@ actor GPTLiveController {
     nonisolated static func processConfiguration(
         helperURL: URL,
         temporaryParentURL: URL,
+        bridgeConfiguration: CodexMCPBridgeConfiguration? = nil,
         cleanupPendingDelay: Duration = .seconds(2),
         spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = {
             try CodexAppServerHelperVerifier().verifyRunningProcess(pid: $0)
         }
     ) throws -> CodexAppServerProcess.Configuration {
-        try .init(
+        let arguments = bridgeConfiguration?.appServerArguments()
+            ?? ["app-server", "--listen", "stdio://", "--strict-config"]
+        return try .init(
             executableURL: helperURL,
-            arguments: ["app-server", "--listen", "stdio://", "--strict-config"],
+            arguments: arguments,
             temporaryParentURL: temporaryParentURL,
             cleanupPendingDelay: cleanupPendingDelay,
+            additionalEnvironment: bridgeConfiguration?.additionalEnvironment ?? [:],
             spawnedProcessVerifier: spawnedProcessVerifier
         )
     }
@@ -279,6 +293,7 @@ actor GPTLiveController {
             let process = CodexAppServerProcess(configuration: try Self.processConfiguration(
                 helperURL: helperURL,
                 temporaryParentURL: temporaryParentURL,
+                bridgeConfiguration: try bridgeConfiguration(),
                 cleanupPendingDelay: cleanupPendingDelay,
                 spawnedProcessVerifier: spawnedProcessVerifier
             ))
@@ -312,7 +327,8 @@ actor GPTLiveController {
                 },
                 onCapabilityActivity: onCapabilityActivity,
                 resolveProviderApproval: resolveProviderApproval,
-                existingMillerCapabilities: existingMillerCapabilities
+                resolveProviderApprovalDetails: resolveProviderApprovalDetails,
+                existingMillerCapabilities: millerCapabilityCatalog()
             )
             session = peer.map { LiveAudioSession(client: client, peer: $0) }
                 ?? makeSession(client)

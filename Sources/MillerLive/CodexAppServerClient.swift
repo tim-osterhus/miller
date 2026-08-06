@@ -127,6 +127,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private let refreshProvider: CodexCredentialRefreshProvider?
     private let onCapabilityActivity: CodexCapabilityActivityHandler
     private let resolveProviderApproval: CodexProviderApprovalResolver
+    private let resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver?
     private let existingMillerCapabilities: [CapabilityDescriptor]
     private let state = State()
 
@@ -137,6 +138,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         refreshProvider: CodexCredentialRefreshProvider? = nil,
         onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
         resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
+        resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver? = nil,
         existingMillerCapabilities: [CapabilityDescriptor] = []
     ) {
         self.process = process
@@ -147,6 +149,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         self.refreshProvider = refreshProvider
         self.onCapabilityActivity = onCapabilityActivity
         self.resolveProviderApproval = resolveProviderApproval
+        self.resolveProviderApprovalDetails = resolveProviderApprovalDetails
         self.existingMillerCapabilities = existingMillerCapabilities
     }
 
@@ -870,7 +873,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
                         guard approvalResponseIDs.insert(approval.responseID).inserted,
                               approvalCalls.insert(.init(approval)).inserted
                         else { throw CodexTypedProtocolError.invalidSequence }
-                        let decision = await resolveProviderApproval(approval.request)
+                        let decision = if let resolveProviderApprovalDetails {
+                            await resolveProviderApprovalDetails(approval)
+                        } else {
+                            await resolveProviderApproval(approval.request)
+                        }
                         try Task.checkCancellation()
                         try process.send(try capabilityCodec.approvalResponse(
                             approval, decision: decision
@@ -1276,7 +1283,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 guard approvalResponseIDs.insert(approval.responseID).inserted,
                       approvalCalls.insert(.init(approval)).inserted
                 else { throw CodexAppServerClientError.unexpectedMessage }
-                let decision = await resolveProviderApproval(approval.request)
+                let decision = if let resolveProviderApprovalDetails {
+                    await resolveProviderApprovalDetails(approval)
+                } else {
+                    await resolveProviderApproval(approval.request)
+                }
                 try Task.checkCancellation()
                 try process.send(try CodexCapabilityProtocol().approvalResponse(
                     approval, decision: decision

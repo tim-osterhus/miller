@@ -42,6 +42,21 @@ struct OverlayView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            CapabilityActivityView(rows: model.capabilityActivityRows)
+
+            if let message = model.liveCapabilityConfirmationMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(message)
+            }
+
+            if let approval = model.pendingCapabilityApproval {
+                CapabilityApprovalView(presentation: approval) {
+                    model.resolveCapabilityApproval($0)
+                }
+            }
+
             TextField(AccessibilityLabel.input, text: $model.draft)
                 .textFieldStyle(.roundedBorder)
                 .focused($inputFocused)
@@ -120,7 +135,10 @@ struct OverlayView: View {
         }
         .padding(18)
         .frame(minWidth: 480, minHeight: 320)
-        .onExitCommand(perform: dismiss)
+        .onExitCommand {
+            model.declineCapabilityApprovalForDismissal()
+            dismiss()
+        }
         .onAppear { inputFocused = true }
         .onChange(of: model.focusRequest) { _, _ in
             inputFocused = true

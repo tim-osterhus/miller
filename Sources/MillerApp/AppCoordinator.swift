@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import MillerCapabilities
 import MillerCore
 import MillerGateway
 import MillerLive
@@ -315,12 +316,17 @@ final class AppPresentationModel: ObservableObject {
         PreparedVoiceHistoryAttachment?
     @Published private(set) var voiceHistoryStatus: String?
     @Published private(set) var reasoningStatus: ReasoningStatus?
+    @Published private(set) var pendingCapabilityApproval:
+        CapabilityApprovalPresentation?
+    @Published private(set) var capabilityActivityRows: [CapabilityActivityRow] = []
+    @Published private(set) var liveCapabilityConfirmationMessage: String?
 
     private let dependencies: HostDependencies
     private let providerSettings: ProviderSettingsDependencies
     private let liveVoice: LiveVoiceDependencies
     private let liveTranscriptRecorder: LiveVoiceTranscriptRecorder
     private let voiceHistory: VoiceHistoryDependencies
+    private let capabilityController: CapabilityController?
     private let voiceHistoryAttachmentBuilder = VoiceHistoryAttachmentBuilder()
     private var turnObservation: Task<Void, Never>?
     private var shortcutRegistration: ((GlobalShortcut) -> Bool)?
@@ -339,6 +345,7 @@ final class AppPresentationModel: ObservableObject {
     private var conversationProjectionGeneration: UInt64 = 0
     private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
+    private var capabilitySubscriptions = Set<AnyCancellable>()
 
     private struct PendingLiveTranscriptCleanup {
         let terminalState: LiveVoiceState
@@ -350,15 +357,36 @@ final class AppPresentationModel: ObservableObject {
         providerSettings: ProviderSettingsDependencies = .unavailable,
         liveVoice: LiveVoiceDependencies = .unavailable,
         liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init(),
-        voiceHistory: VoiceHistoryDependencies = .unavailable
+        voiceHistory: VoiceHistoryDependencies = .unavailable,
+        capabilityController: CapabilityController? = nil
     ) {
         self.dependencies = dependencies
         self.providerSettings = providerSettings
         self.liveVoice = liveVoice
         self.liveTranscriptRecorder = liveTranscriptRecorder
         self.voiceHistory = voiceHistory
+        self.capabilityController = capabilityController
         voiceState = liveVoice.initialAvailability
         liveVoiceAvailability = liveVoice.initialAvailability
+        if let capabilityController {
+            capabilityController.$pendingApproval
+                .sink { [weak self] in self?.pendingCapabilityApproval = $0 }
+                .store(in: &capabilitySubscriptions)
+            capabilityController.$activityRows
+                .sink { [weak self] in self?.capabilityActivityRows = $0 }
+                .store(in: &capabilitySubscriptions)
+            capabilityController.$liveVoiceConfirmationMessage
+                .sink { [weak self] in self?.liveCapabilityConfirmationMessage = $0 }
+                .store(in: &capabilitySubscriptions)
+        }
+    }
+
+    func resolveCapabilityApproval(_ decision: CapabilityApprovalDecision) {
+        capabilityController?.resolveApproval(decision)
+    }
+
+    func declineCapabilityApprovalForDismissal() {
+        capabilityController?.declinePendingApprovals(for: .close)
     }
 
     var isActiveTurn: Bool {
@@ -1056,6 +1084,19 @@ final class AppPresentationModel: ObservableObject {
         activationSource: VoiceActivationSource = .manual
     ) async {
         guard canStartLiveVoice else { return }
+        if let capabilityController {
+            guard let profileID = providerProfiles.first(where: \.isSelected)?.id
+            else { return }
+            do {
+                try await capabilityController.prepareLiveVoice(
+                    providerProfileID: profileID
+                )
+            } catch {
+                voiceState = .failed
+                liveVoiceFailureCode = "capability_bridge_unavailable"
+                return
+            }
+        }
         nextLiveVoiceAvailabilityGeneration()
         let eventGeneration = nextLiveVoiceEventGeneration()
         liveVoiceStartPending = true
@@ -1070,6 +1111,7 @@ final class AppPresentationModel: ObservableObject {
                 await self?.applyLiveEvent(event, generation: eventGeneration)
             }
         } catch {
+            await capabilityController?.finishLiveVoice()
             voiceState = .failed
             liveVoiceFailureCode = Self.liveFailureCode(error)
             if Self.isLiveAdmissionFailure(error) {
@@ -1100,6 +1142,7 @@ final class AppPresentationModel: ObservableObject {
 
     func interruptLiveVoice() async {
         guard voiceState.isActive, !liveVoiceCleanupPending else { return }
+        capabilityController?.declinePendingApprovals(for: .interrupt)
         nextLiveVoiceAvailabilityGeneration()
         liveVoiceCleanupPending = true
         await liveVoice.interrupt()
@@ -1126,6 +1169,7 @@ final class AppPresentationModel: ObservableObject {
         guard voiceState.isActive || voiceState == .stopped || liveVoiceStartPending else {
             return
         }
+        capabilityController?.declinePendingApprovals(for: .close)
         nextLiveVoiceAvailabilityGeneration()
         liveVoiceCleanupPending = true
         await liveVoice.end()
@@ -1177,6 +1221,7 @@ final class AppPresentationModel: ObservableObject {
         let waiters = liveVoiceCleanupWaiters
         liveVoiceCleanupWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+        await capabilityController?.finishLiveVoice()
     }
 
     func applyLiveEvent(_ event: LiveVoiceEvent) async {
@@ -1190,6 +1235,7 @@ final class AppPresentationModel: ObservableObject {
         guard generation == liveVoiceEventGeneration else { return }
         switch event {
         case let .sessionAdmitted(id):
+            capabilityController?.admitVoiceAssociation(sessionID: id)
             do {
                 try await liveTranscriptRecorder.begin(
                     sessionID: id,
@@ -1243,6 +1289,7 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         do {
+            capabilityController?.declinePendingApprovals(for: .interrupt)
             try await dependencies.stop()
             activeTurnID = nil
             reasoningStatus = nil
@@ -1260,6 +1307,7 @@ final class AppPresentationModel: ObservableObject {
         guard !isActiveOperation else {
             return
         }
+        capabilityController?.declinePendingApprovals(for: .close)
         nextConversationProjectionGeneration()
         selectedConversationID = ConversationID()
         visibleTurns = []
@@ -1815,6 +1863,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private var settingsObserver: NSObjectProtocol?
     private let providerController: ProviderSettingsController
     private let liveController: GPTLiveController?
+    private let capabilityController: CapabilityController
+    private let refreshCapabilityCatalog: @Sendable () async -> Void
 
     init(
         environment: [String: String],
@@ -1831,6 +1881,25 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             withIntermediateDirectories: true
         )
         let credentialStore = KeychainCredentialStore()
+        let capabilityBridgeBox: CapabilityBridgeSessionBox?
+        let capabilityTrustedParent: URL?
+        if let bridgeURL = Self.capabilityBridgeURL(environment: environment) {
+            let trustedParent = CapabilityRPCRuntime.defaultTrustedParent
+            try Self.prepareCapabilityTrustedParent(trustedParent)
+            capabilityBridgeBox = CapabilityBridgeSessionBox(
+                executableURL: bridgeURL
+            )
+            capabilityTrustedParent = trustedParent
+        } else {
+            capabilityBridgeBox = nil
+            capabilityTrustedParent = nil
+        }
+        capabilityController = try CapabilityController(
+            databasePath: databasePath,
+            credentialStore: credentialStore,
+            trustedParent: capabilityTrustedParent,
+            bridgeBox: capabilityBridgeBox
+        )
         let runtimeVerifier = CodexAppServerHelperVerifier()
         let runtimeResolver = CodexRuntimeResolver(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
@@ -1913,6 +1982,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     model: profile.model,
                     credentialReference: profile.credentialReference
                 )
+            },
+            toolHandler: { [capabilityController] call, emit in
+                try await capabilityController.handlePiToolCall(call, emit: emit)
             }
         )
         let codexGateway: any ReasoningGateway
@@ -1924,14 +1996,16 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 at: typedRoot,
                 withIntermediateDirectories: true
             )
-            codexGateway = CodexTypedReasoningGateway(
-                makeClient: {
+            let makeCodexClient: @Sendable () throws -> CodexAppServerClient = {
+                [capabilityController, capabilityBridgeBox] in
                     CodexAppServerClient(
                         process: CodexAppServerProcess(
                             configuration: try Self.typedCodexProcessConfiguration(
                                 executableURL: codexExecutableURL,
                                 temporaryParentURL: typedRoot,
                                 environment: environment,
+                                bridgeConfiguration: try capabilityBridgeBox?
+                                    .configuration(),
                                 spawnedProcessVerifier: { pid in
                                     try runtimeVerifier.verifyRunningProcess(
                                         pid: pid,
@@ -1942,9 +2016,21 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         ),
                         refreshProvider: { accountID in
                             try await typedCredentialRefresher.refresh(accountID: accountID)
-                        }
+                        },
+                        onCapabilityActivity: { activity in
+                            await capabilityController.recordProviderActivity(activity)
+                        },
+                        resolveProviderApproval: { request in
+                            await capabilityController.resolveProviderApproval(request)
+                        },
+                        resolveProviderApprovalDetails: { approval in
+                            await capabilityController.resolveProviderApproval(approval)
+                        },
+                        existingMillerCapabilities: capabilityBridgeBox?.catalog() ?? []
                     )
-                },
+                }
+            codexGateway = CodexTypedReasoningGateway(
+                makeClient: makeCodexClient,
                 credential: { [repository] in
                     guard let profile = try await repository.selectedProviderProfile(),
                           profile.kind == .codexOAuth,
@@ -1962,10 +2048,34 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 },
                 cwd: typedRoot.path
             )
+            refreshCapabilityCatalog = {
+                [repository, capabilityController] in
+                do {
+                    guard let profile = try await repository.selectedProviderProfile(),
+                          profile.kind == .codexOAuth,
+                          try await repository.credentialIsInvalidated(
+                              reference: profile.credentialReference
+                          ) == false
+                    else { return }
+                    let local = await capabilityController.catalog(
+                        providerProfileID: profile.id
+                    ).descriptors.filter { $0.source == .millerMCP }
+                    let snapshot = try await makeCodexClient().inventoryCapabilities(
+                        requestID: "catalog:\(UUID().uuidString.lowercased())",
+                        credential: try await credentialLoader.load(profile: profile),
+                        codexProviderProfileID: profile.id,
+                        existingMillerCapabilities: local
+                    )
+                    await capabilityController.replaceProviderCatalog(snapshot)
+                } catch {
+                    return
+                }
+            }
         } else {
             codexGateway = UnavailableReasoningGateway()
+            refreshCapabilityCatalog = {}
         }
-        let gateway = ProviderRoutingGateway(
+        let providerGateway = ProviderRoutingGateway(
             selectedKind: { [repository] in
                 guard let profile = try await repository.selectedProviderProfile()
                 else { throw ProviderRoutingError.unsupportedProvider }
@@ -1973,6 +2083,15 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             },
             codex: codexGateway,
             openAICompatible: compatibleGateway
+        )
+        let gateway = CapabilityReasoningGateway(
+            base: providerGateway,
+            selectedProfile: { [repository] in
+                guard let profile = try await repository.selectedProviderProfile()
+                else { throw ProviderRoutingError.unsupportedProvider }
+                return profile
+            },
+            controller: capabilityController
         )
         core = MillerCoordinator(repository: repository, gateway: gateway)
 
@@ -2108,6 +2227,21 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         hasActiveTurn: false
                     )
                 },
+                onCapabilityActivity: { [capabilityController] activity in
+                    await capabilityController.recordProviderActivity(activity)
+                },
+                resolveProviderApproval: { [capabilityController] request in
+                    await capabilityController.resolveProviderApproval(request)
+                },
+                resolveProviderApprovalDetails: { [capabilityController] approval in
+                    await capabilityController.resolveProviderApproval(approval)
+                },
+                millerCapabilityCatalog: {
+                    capabilityBridgeBox?.catalog() ?? []
+                },
+                bridgeConfiguration: {
+                    try capabilityBridgeBox?.configuration()
+                },
                 makePeer: { [livePeerHost] in
                     try await MainActor.run { try livePeerHost.makePeer() }
                 },
@@ -2232,7 +2366,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             providerSettings: providerSettings,
             liveVoice: liveVoice,
             liveTranscriptRecorder: liveTranscriptRecorder,
-            voiceHistory: voiceHistory
+            voiceHistory: voiceHistory,
+            capabilityController: capabilityController
         )
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         overlayController = OverlayPanelController(
@@ -2273,9 +2408,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         }
         model.selectShortcut(model.selectedShortcut)
         Task {
+            await capabilityController.start()
             try? await repository.recoverInterruptedTurns()
             await model.recoverInterruptedVoiceSessions()
             try? await providerController.restoreSelectedProfile()
+            await refreshCapabilityCatalog()
             await model.refresh()
             await model.refreshProviderSettings()
             await model.refreshLiveVoiceAvailability()
@@ -2290,6 +2427,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         }
         model.prepareToAbandonLiveVoiceSession()
         await liveController?.shutdown()
+        await capabilityController.shutdown()
         await model.abandonLiveVoiceSession()
         await supervisor.shutdown()
     }
@@ -2386,6 +2524,33 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         throw CocoaError(.fileNoSuchFile)
     }
 
+    private static func capabilityBridgeURL(
+        environment: [String: String]
+    ) -> URL? {
+        let candidates: [URL?] = [
+            environment["MILLER_CAPABILITY_BRIDGE_PATH"].map {
+                URL(fileURLWithPath: $0)
+            },
+            Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Helpers/MillerCapabilityBridge"),
+            Bundle.main.executableURL?.deletingLastPathComponent()
+                .appendingPathComponent("MillerCapabilityBridge"),
+        ]
+        return candidates.compactMap { $0 }.first {
+            $0.isFileURL && $0.path.hasPrefix("/")
+                && FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+    }
+
+    private static func prepareCapabilityTrustedParent(_ url: URL) throws {
+        guard !FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+    }
+
     private static func nodeURL(environment: [String: String]) throws -> URL {
         if let path = environment["MILLER_NODE_PATH"] {
             return URL(fileURLWithPath: path)
@@ -2420,6 +2585,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         executableURL: URL,
         temporaryParentURL: URL,
         environment: [String: String],
+        bridgeConfiguration: CodexMCPBridgeConfiguration? = nil,
         spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void
     ) throws -> CodexAppServerProcess.Configuration {
         let bridgeKeys = [
@@ -2432,7 +2598,10 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         let values = bridgeKeys.map { environment[$0] }
         let appServerArguments: [String]
         let additionalEnvironment: [String: String]
-        if values.allSatisfy({ $0 != nil }),
+        if let bridgeConfiguration {
+            appServerArguments = bridgeConfiguration.appServerArguments()
+            additionalEnvironment = bridgeConfiguration.additionalEnvironment
+        } else if values.allSatisfy({ $0 != nil }),
            let bridgePath = values[0],
            let socketPath = values[1],
            let token = values[2],

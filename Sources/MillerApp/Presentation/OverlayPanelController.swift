@@ -84,6 +84,7 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
 
     func dismissAfterLiveVoiceCleanup() {
         guard !dismissalInProgress else { return }
+        model.declineCapabilityApprovalForDismissal()
         guard model.requiresLiveVoiceCleanupBeforeDismissal else {
             window?.orderOut(nil)
             return

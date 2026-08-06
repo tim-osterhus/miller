@@ -1217,6 +1217,30 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func appServerProcessConfigurationInjectsEphemeralCapabilityBridge() throws {
+        let token = Data(repeating: 9, count: 32).base64EncodedString()
+        let bridge = try CodexMCPBridgeConfiguration(
+            executableURL: URL(fileURLWithPath: "/Applications/Miller.app/Contents/Helpers/MillerCapabilityBridge"),
+            socketPath: "/private/tmp/miller/capability.sock",
+            sessionToken: token,
+            providerProfileID: UUID(),
+            trustedParentPath: "/private/tmp/miller"
+        )
+
+        let configuration = try GPTLiveController.processConfiguration(
+            helperURL: URL(fileURLWithPath: "/usr/bin/true"),
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp"),
+            bridgeConfiguration: bridge
+        )
+
+        #expect(configuration.arguments.contains {
+            $0.contains("mcp_servers.miller-capability-bridge")
+        })
+        #expect(!configuration.arguments.contains(token))
+        #expect(configuration.environment["MILLER_CAPABILITY_RPC_TOKEN"] == token)
+    }
+
+    @Test
     func appServerProcessConfigurationCarriesItsSpawnedProcessVerifier() throws {
         let probe = SpawnedProcessVerifierProbe()
         let configuration = try GPTLiveController.processConfiguration(

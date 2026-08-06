@@ -193,6 +193,14 @@ struct ConversationView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                CapabilityActivityView(rows: model.capabilityActivityRows)
+
+                if let approval = model.pendingCapabilityApproval {
+                    CapabilityApprovalView(presentation: approval) {
+                        model.resolveCapabilityApproval($0)
+                    }
+                }
+
                 if let attachment = model.pendingVoiceHistoryAttachment {
                     HStack(spacing: 8) {
                         Label(

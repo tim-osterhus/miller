@@ -59,7 +59,7 @@ let package = Package(
             name: "MillerApp",
             dependencies: [
                 "MillerCore", "MillerStorage", "MillerGateway", "MillerLive",
-                "MillerLiveAudio",
+                "MillerLiveAudio", "MillerCapabilities",
             ],
             resources: [.process("Resources")],
             swiftSettings: [
@@ -97,7 +97,10 @@ let package = Package(
         ),
         .testTarget(
             name: "MillerAppTests",
-            dependencies: ["MillerApp", "MillerCore", "MillerStorage"]
+            dependencies: [
+                "MillerApp", "MillerCore", "MillerStorage",
+                "MillerCapabilities", "MillerGateway", "MillerLive",
+            ]
         ),
     ]
 )
