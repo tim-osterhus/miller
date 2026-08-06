@@ -207,6 +207,7 @@ struct CapabilitySettingsTool: Identifiable, Equatable, Sendable {
         policyOverride = record.policyOverride
         self.providerNames = providerNames
         self.providerMandatedApproval = providerMandatedApproval
+            || record.descriptor.visibility == .providerManaged
     }
 
     var providerAvailability: String {
@@ -339,8 +340,6 @@ struct MCPServerEditorDependencies: Sendable {
     let load: @Sendable () async throws -> CapabilitySettingsSnapshot
     let save: @Sendable (MCPServerValidatedDraft) async throws -> Void
     let remove: @Sendable (String) async throws -> Void
-    let persistSecret: @Sendable (String, UUID, String) async throws -> Void
-    let deleteSecret: @Sendable (UUID) async -> Void
     let testConnection: @Sendable (String) async throws -> Int
     let setProviderEnabled: @Sendable (Bool, String, UUID) async throws -> Void
     let setServerPolicy: @Sendable (String, CapabilityPolicy) async throws -> Void
@@ -351,8 +350,6 @@ struct MCPServerEditorDependencies: Sendable {
         load: @escaping @Sendable () async throws -> CapabilitySettingsSnapshot,
         save: @escaping @Sendable (MCPServerValidatedDraft) async throws -> Void,
         remove: @escaping @Sendable (String) async throws -> Void,
-        persistSecret: @escaping @Sendable (String, UUID, String) async throws -> Void,
-        deleteSecret: @escaping @Sendable (UUID) async -> Void = { _ in },
         testConnection: @escaping @Sendable (String) async throws -> Int,
         setProviderEnabled: @escaping @Sendable (Bool, String, UUID) async throws -> Void,
         setServerPolicy: @escaping @Sendable (String, CapabilityPolicy) async throws -> Void,
@@ -362,8 +359,6 @@ struct MCPServerEditorDependencies: Sendable {
         self.load = load
         self.save = save
         self.remove = remove
-        self.persistSecret = persistSecret
-        self.deleteSecret = deleteSecret
         self.testConnection = testConnection
         self.setProviderEnabled = setProviderEnabled
         self.setServerPolicy = setServerPolicy
@@ -373,7 +368,7 @@ struct MCPServerEditorDependencies: Sendable {
 
     static let unavailable = Self(
         load: { .empty }, save: { _ in }, remove: { _ in },
-        persistSecret: { _, _, _ in }, testConnection: { _ in 0 },
+        testConnection: { _ in 0 },
         setProviderEnabled: { _, _, _ in }, setServerPolicy: { _, _ in },
         setToolPolicy: { _, _ in }, refresh: { .empty }
     )
@@ -399,30 +394,7 @@ final class MCPServerEditorModel: ObservableObject {
     func save(_ draft: MCPServerEditorDraft) async {
         await perform("Server could not be saved") {
             let validated = try draft.validated()
-            var written = Set<UUID>()
-            do {
-                for binding in validated.secrets {
-                    guard let value = validated.secretValues[
-                        binding.credentialReference
-                    ] else { continue }
-                    try await dependencies.persistSecret(
-                        KeychainCredentialStore.service,
-                        binding.credentialReference,
-                        value
-                    )
-                    if validated.newCredentialReferences.contains(
-                        binding.credentialReference
-                    ) {
-                        written.insert(binding.credentialReference)
-                    }
-                }
-                try await dependencies.save(validated)
-            } catch {
-                for reference in written {
-                    await dependencies.deleteSecret(reference)
-                }
-                throw error
-            }
+            try await dependencies.save(validated)
             snapshot = try await dependencies.load()
             status = "Server saved"
         }

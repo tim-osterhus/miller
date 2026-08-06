@@ -935,6 +935,73 @@ struct SQLiteCapabilityRepositoryTests {
 
         #expect(try await repository.audits().isEmpty)
     }
+
+    @Test
+    func replacingServerConfigurationReconcilesSecretsAndProvidersExactly() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let server = makeServer()
+        try await repository.saveServer(server)
+        let old = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "OLD_TOKEN", credentialReference: UUID()
+        )
+        try await repository.saveSecretBinding(old)
+
+        let replacement = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .header,
+            name: "Authorization", credentialReference: UUID()
+        )
+        try await repository.replaceServerConfiguration(
+            server: server,
+            secretBindings: [replacement],
+            enabledProviderProfileIDs: []
+        )
+
+        #expect(try await repository.secretBindings(serverID: server.id) == [replacement])
+        #expect(try await repository.enabledProviderProfileIDs(serverID: server.id).isEmpty)
+    }
+
+    @Test
+    func activationRollsBackEnabledProvidersAndCatalogTogether() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let baseline = makeServer()
+        let disabled = CapabilityServerRecord(
+            id: baseline.id, displayName: baseline.displayName,
+            transport: baseline.transport, command: baseline.command,
+            endpoint: baseline.endpoint, arguments: baseline.arguments,
+            enabled: false, defaultPolicy: baseline.defaultPolicy,
+            staleState: .stale, createdAt: baseline.createdAt,
+            updatedAt: baseline.updatedAt
+        )
+        try await repository.saveServer(disabled)
+        let profileRepository = try SQLiteConversationRepository(path: fixture.path)
+        let profile = try ProviderProfile(
+            kind: .openAICompatible,
+            label: "Compatible",
+            baseURL: "https://example.com",
+            model: "model"
+        )
+        try await profileRepository.saveProviderProfile(profile)
+        let failing = try SQLiteCapabilityRepository(
+            path: fixture.path,
+            simulatedReconcileFailure: .writeFailed
+        )
+
+        await #expect(throws: SQLiteError.writeFailed) {
+            try await failing.activateServer(
+                server: baseline,
+                secretBindings: [],
+                enabledProviderProfileIDs: [profile.id],
+                descriptors: [try descriptor(tool: "lookup", summary: "Lookup")]
+            )
+        }
+
+        #expect(try await repository.server(id: baseline.id)?.enabled == false)
+        #expect(try await repository.enabledProviderProfileIDs(serverID: baseline.id).isEmpty)
+        #expect(try await repository.catalog(serverID: baseline.id).isEmpty)
+    }
 }
 
 private func makeServer() -> CapabilityServerRecord {

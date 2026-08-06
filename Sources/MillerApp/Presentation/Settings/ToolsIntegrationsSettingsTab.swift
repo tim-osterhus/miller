@@ -44,7 +44,14 @@ struct ToolsIntegrationsSettingsTab: View {
                             Text("Codex only").foregroundStyle(.secondary)
                         }
                         ForEach(app.tools) { tool in
-                            Text(tool.displayName).font(.caption)
+                            HStack {
+                                Text(tool.displayName).font(.caption)
+                                if tool.providerMandatedApproval {
+                                    Text("Provider approval required")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }
@@ -223,6 +230,10 @@ struct ToolsIntegrationsSettingsTab: View {
                     HStack {
                         TextField("Binding name", text: $secret.name)
                         SecureField("Secret value", text: $secret.value)
+                        Button("Remove secret", role: .destructive) {
+                            let id = secret.id
+                            draft.secrets.removeAll { $0.id == id }
+                        }
                     }
                 }
                 Text(

@@ -6,6 +6,46 @@ import Testing
 @Suite
 struct CapabilityBrokerLifecycleTests {
     @Test
+    func lifecycleSnapshotTracksConfiguredStartingReadyDegradedAndStopped() async throws {
+        let providerID = UUID()
+        let factory = SuspendedSessionFactory()
+        let broker = try CapabilityBroker(
+            configurations: [try Self.configuration(providerID: providerID)],
+            sessionFactory: { configuration in
+                try await factory.connect(serverID: configuration.id)
+            },
+            approval: { _ in .allowOnce }, audit: { _ in }
+        )
+        #expect(await broker.lifecycleSnapshot() == .init(
+            state: .configured, configuredServerCount: 1,
+            activeSessionCount: 0, pendingConnectionCount: 0,
+            activeCallCount: 0
+        ))
+
+        let refresh = Task { await broker.refresh() }
+        try await eventually { await factory.requestCount == 1 }
+        #expect(await broker.lifecycleSnapshot().state == .starting)
+        #expect(await broker.lifecycleSnapshot().pendingConnectionCount == 1)
+
+        let session = ControlledSession(tools: [Self.lookupTool])
+        await factory.resolveNext(with: session)
+        _ = await refresh.value
+        #expect(await broker.lifecycleSnapshot().state == .ready)
+        #expect(await broker.lifecycleSnapshot().activeSessionCount == 1)
+
+        await session.setListFailure(true)
+        _ = await broker.refresh()
+        #expect(await broker.lifecycleSnapshot().state == .degraded)
+
+        await broker.disconnectAll()
+        #expect(await broker.lifecycleSnapshot() == .init(
+            state: .stopped, configuredServerCount: 1,
+            activeSessionCount: 0, pendingConnectionCount: 0,
+            activeCallCount: 0
+        ))
+    }
+
+    @Test
     func concurrentRefreshUsesOnePendingConnection() async throws {
         let providerID = UUID()
         let factory = SuspendedSessionFactory()

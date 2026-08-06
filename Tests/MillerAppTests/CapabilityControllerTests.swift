@@ -2048,6 +2048,323 @@ struct CapabilityControllerTests {
         #expect(snapshot.servers[0].tools[0].staleState == .stale)
         #expect(snapshot.servers[0].tools[0].policyOverride == .fullyTrusted)
     }
+
+    @Test
+    func activeTurnRejectsEverySettingsWriteAndRetainsBrokerPolicy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-busy-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let profileID = UUID()
+        let session = CapabilitySessionProbe(
+            serverID: server.id,
+            tool: .init(
+                name: "change", displayName: "Change", summary: "Change state",
+                inputSchemaJSON: Data("{}".utf8), readOnlyHint: false
+            )
+        )
+        let controller = CapabilityController(
+            loadConfiguration: {
+                .init(
+                    servers: [try MCPServerConfiguration(
+                        id: server.id, displayName: server.displayName,
+                        transport: .stdio(executable: "/usr/bin/true", arguments: []),
+                        enabled: true, defaultPolicy: .askBeforeChanges,
+                        providerProfileIDs: [profileID]
+                    )],
+                    toolPolicies: [:]
+                )
+            },
+            sessionFactory: { _ in session },
+            approvalTimeout: .milliseconds(10),
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+        await controller.start()
+        let association = CapabilityAssociation.typed(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 1
+        )
+        controller.admitTypedAssociation(association, providerProfileID: profileID)
+
+        await #expect(throws: CapabilityControllerError.settingsBusy) {
+            try await controller.setServerPolicyFromSettings(
+                .fullyTrusted, serverID: server.id
+            )
+        }
+
+        #expect(try await repository.server(id: server.id)?.defaultPolicy == .askBeforeChanges)
+        let capabilityID = try CapabilityID(
+            source: .millerMCP, serverID: server.id, toolName: "change"
+        )
+        await #expect(throws: CapabilityBrokerError.declined) {
+            _ = try await controller.execute(
+                callID: CapabilityCallID(), capabilityID: capabilityID,
+                argumentsJSON: Data("{}".utf8), providerProfileID: profileID,
+                association: association, route: .typedPi
+            )
+        }
+        #expect(await session.calls == 0)
+    }
+
+    @Test
+    func successfulPolicyMutationKeepsSQLiteAndBrokerAuthorityInAgreement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-success-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let profileID = UUID()
+        let session = CapabilitySessionProbe(
+            serverID: server.id,
+            tool: .init(
+                name: "change", displayName: "Change", summary: "Change state",
+                inputSchemaJSON: Data("{}".utf8), readOnlyHint: false
+            )
+        )
+        let controller = CapabilityController(
+            loadConfiguration: {
+                guard let record = try await repository.server(id: server.id)
+                else { throw CapabilityControllerError.unavailable }
+                return .init(
+                    servers: [try MCPServerConfiguration(
+                        id: record.id, displayName: record.displayName,
+                        transport: .stdio(executable: "/usr/bin/true", arguments: []),
+                        enabled: true, defaultPolicy: record.defaultPolicy,
+                        providerProfileIDs: [profileID]
+                    )],
+                    toolPolicies: [:]
+                )
+            },
+            sessionFactory: { _ in session },
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+
+        try await controller.setServerPolicyFromSettings(
+            .fullyTrusted, serverID: server.id
+        )
+
+        #expect(try await repository.server(id: server.id)?.defaultPolicy == .fullyTrusted)
+        #expect(try await controller.settingsSnapshot(providerNames: [:])
+            .servers[0].server.defaultPolicy == .fullyTrusted)
+        let association = CapabilityAssociation.typed(
+            conversationID: ConversationID(), turnID: TurnID(), generation: 1
+        )
+        controller.admitTypedAssociation(association, providerProfileID: profileID)
+        _ = try await controller.execute(
+            callID: CapabilityCallID(),
+            capabilityID: CapabilityID(
+                source: .millerMCP, serverID: server.id, toolName: "change"
+            ),
+            argumentsJSON: Data("{}".utf8), providerProfileID: profileID,
+            association: association, route: .typedPi
+        )
+        #expect(await session.calls == 1)
+    }
+
+    @Test
+    func secretRemovalDeletesSQLiteAndKeychainAndCompensatesDeleteFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-secrets-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = settingsControllerServer(policy: .askBeforeChanges)
+        try await repository.saveServer(server)
+        let reference = UUID()
+        let binding = CapabilitySecretBinding(
+            id: UUID(), serverID: server.id, kind: .environment,
+            name: "TOKEN", credentialReference: reference
+        )
+        try await repository.saveSecretBinding(binding)
+        let secrets = CapabilitySettingsSecretProbe(values: [reference: "old"])
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: repository,
+            settingsSecrets: secrets.dependencies
+        )
+        var draft = MCPServerEditorDraft.newStdio
+        draft.id = server.id
+        draft.displayName = server.displayName
+        draft.executable = "/usr/bin/true"
+        draft.createdAt = server.createdAt
+
+        try await controller.saveServerSettings(try draft.validated())
+
+        #expect(try await repository.secretBindings(serverID: server.id).isEmpty)
+        #expect(await secrets.value(reference) == nil)
+
+        try await repository.saveSecretBinding(binding)
+        await secrets.setValue("old", for: reference)
+        await secrets.failNextDelete()
+        await #expect(throws: CapabilitySettingsMutationError.secretMutationFailed) {
+            try await controller.saveServerSettings(try draft.validated())
+        }
+        #expect(try await repository.secretBindings(serverID: server.id) == [binding])
+        #expect(await secrets.value(reference) == "old")
+    }
+
+    @Test
+    func successfulConnectionTestEnablesServerAndCompatibleProviders() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-settings-connect-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let databasePath = root.appendingPathComponent("miller.sqlite3").path
+        let profiles = try SQLiteConversationRepository(path: databasePath)
+        let profile = try ProviderProfile(
+            kind: .openAICompatible, label: "Compatible",
+            baseURL: "https://example.com", model: "model"
+        )
+        try await profiles.saveProviderProfile(profile)
+        let repository = try SQLiteCapabilityRepository(path: databasePath)
+        let server = settingsControllerServer(
+            policy: .askBeforeChanges, enabled: false
+        )
+        try await repository.saveServer(server)
+        let session = CapabilitySessionProbe(
+            serverID: server.id,
+            tool: .init(
+                name: "lookup", displayName: "Lookup", summary: "Lookup",
+                inputSchemaJSON: Data("{}".utf8), readOnlyHint: true
+            )
+        )
+        let controller = CapabilityController(
+            loadConfiguration: {
+                try await settingsRuntimeConfiguration(repository: repository)
+            },
+            sessionFactory: { _ in session },
+            settingsRepository: repository,
+            settingsSecrets: .unavailable
+        )
+
+        let count = try await controller.testAndEnableServer(
+            serverID: server.id,
+            compatibleProviderProfileIDs: [profile.id]
+        )
+
+        #expect(count == 1)
+        #expect(try await repository.server(id: server.id)?.enabled == true)
+        #expect(try await repository.enabledProviderProfileIDs(serverID: server.id) == [profile.id])
+        #expect(try await repository.catalog(serverID: server.id).count == 1)
+    }
+
+    @Test
+    func diagnosticsReportStartupFailureInsteadOfInventingReadiness() async {
+        let controller = CapabilityController(
+            loadConfiguration: { throw CapabilityControllerError.unavailable }
+        )
+
+        await controller.start()
+        let snapshot = await controller.diagnosticsSnapshot()
+
+        #expect(snapshot.controllerState == "Unavailable")
+        #expect(snapshot.broker == nil)
+        #expect(!snapshot.bridgeRPCServerRunning)
+        #expect(!snapshot.adapterProcessRunning)
+    }
+}
+
+private func settingsControllerServer(
+    policy: CapabilityPolicy,
+    enabled: Bool = true
+) -> CapabilityServerRecord {
+    .init(
+        id: "settings", displayName: "Settings", transport: .stdio,
+        command: "/usr/bin/true", endpoint: nil, arguments: [],
+        enabled: enabled, defaultPolicy: policy, staleState: .current,
+        createdAt: .distantPast, updatedAt: .distantPast
+    )
+}
+
+private func settingsRuntimeConfiguration(
+    repository: SQLiteCapabilityRepository
+) async throws -> CapabilityRuntimeConfiguration {
+    let servers = try await repository.servers()
+    var configurations: [MCPServerConfiguration] = []
+    var policies: [CapabilityID: CapabilityPolicy] = [:]
+    for server in servers {
+        let transport: MCPServerTransport
+        switch server.transport {
+        case .stdio:
+            guard let command = server.command else {
+                throw CapabilityControllerError.unavailable
+            }
+            transport = .stdio(executable: command, arguments: server.arguments)
+        case .streamableHTTP:
+            guard let endpoint = server.endpoint.flatMap(URL.init(string:)) else {
+                throw CapabilityControllerError.unavailable
+            }
+            transport = .http(endpoint: endpoint)
+        }
+        configurations.append(try MCPServerConfiguration(
+            id: server.id, displayName: server.displayName, transport: transport,
+            enabled: server.enabled, defaultPolicy: server.defaultPolicy,
+            providerProfileIDs: Set(
+                try await repository.enabledProviderProfileIDs(serverID: server.id)
+            )
+        ))
+        for tool in try await repository.catalog(serverID: server.id) {
+            if let policy = tool.policyOverride {
+                policies[tool.descriptor.id] = policy
+            }
+        }
+    }
+    return .init(servers: configurations, toolPolicies: policies)
+}
+
+private enum CapabilitySettingsSecretProbeError: Error {
+    case injected
+}
+
+private actor CapabilitySettingsSecretProbe {
+    private var values: [UUID: String]
+    private var shouldFailDelete = false
+
+    init(values: [UUID: String] = [:]) {
+        self.values = values
+    }
+
+    nonisolated var dependencies: CapabilitySettingsSecretDependencies {
+        .init(
+            load: { [self] reference in await value(reference) },
+            store: { [self] reference, value in
+                await setValue(value, for: reference)
+            },
+            delete: { [self] reference in try await deleteValue(reference) }
+        )
+    }
+
+    func value(_ reference: UUID) -> String? { values[reference] }
+
+    func setValue(_ value: String, for reference: UUID) {
+        values[reference] = value
+    }
+
+    func failNextDelete() { shouldFailDelete = true }
+
+    private func deleteValue(_ reference: UUID) throws {
+        if shouldFailDelete {
+            shouldFailDelete = false
+            throw CapabilitySettingsSecretProbeError.injected
+        }
+        values[reference] = nil
+    }
 }
 
 private struct ControllerFixture {

@@ -105,9 +105,7 @@ struct MCPServerEditorModelTests {
         #expect(saved.server.id == "notes")
         #expect(saved.secrets.count == 1)
         #expect(saved.secrets[0].name == "NOTES_TOKEN")
-        #expect(await recorder.secretWrites.count == 1)
-        #expect(await recorder.secretWrites[0].service == KeychainCredentialStore.service)
-        #expect(await recorder.secretWrites[0].reference == saved.secrets[0].credentialReference)
+        #expect(saved.secretValues[saved.secrets[0].credentialReference] == "private")
         #expect(!model.status.contains("private"))
 
         draft.displayName = "Edited Notes"
@@ -139,15 +137,8 @@ struct MCPServerEditorModelTests {
 }
 
 private actor MCPSettingsRecorder {
-    struct SecretWrite: Sendable {
-        let service: String
-        let reference: UUID
-        let value: String
-    }
-
     var saved: [MCPServerValidatedDraft] = []
     var removed: [String] = []
-    var secretWrites: [SecretWrite] = []
     var connectionTests: [String] = []
 
     nonisolated var dependencies: MCPServerEditorDependencies {
@@ -155,9 +146,6 @@ private actor MCPSettingsRecorder {
             load: { .empty },
             save: { [self] value in await appendSaved(value) },
             remove: { [self] id in await appendRemoved(id) },
-            persistSecret: { [self] service, reference, value in
-                await appendSecret(service, reference, value)
-            },
             testConnection: { [self] id in
                 await appendConnection(id)
                 return 2
@@ -171,8 +159,5 @@ private actor MCPSettingsRecorder {
 
     private func appendSaved(_ value: MCPServerValidatedDraft) { saved.append(value) }
     private func appendRemoved(_ value: String) { removed.append(value) }
-    private func appendSecret(_ service: String, _ reference: UUID, _ value: String) {
-        secretWrites.append(.init(service: service, reference: reference, value: value))
-    }
     private func appendConnection(_ value: String) { connectionTests.append(value) }
 }

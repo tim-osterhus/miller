@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import Darwin
 import Foundation
 import MillerCapabilities
 import MillerCore
@@ -13,6 +14,11 @@ enum CapabilityControllerError: Error, Equatable {
     case staleGeneration
     case providerMismatch
     case settingsBusy
+}
+
+enum CapabilitySettingsMutationError: Error, Equatable {
+    case secretMutationFailed
+    case recoveryFailed
 }
 
 enum CapabilityInvocationRoute: Equatable, Sendable {
@@ -36,6 +42,13 @@ struct CapabilityProviderCallbacks: Sendable {
 struct CapabilityProviderCallbackAuthority: Equatable, Sendable {
     let generation: UUID
     let isVoice: Bool
+}
+
+struct CapabilityControllerDiagnostics: Equatable, Sendable {
+    let controllerState: String
+    let broker: CapabilityBrokerLifecycleSnapshot?
+    let bridgeRPCServerRunning: Bool
+    let adapterProcessRunning: Bool
 }
 
 @MainActor
@@ -113,6 +126,18 @@ struct CapabilityPersistenceDependencies: Sendable {
         beginAudit: { _ in },
         requireApproval: { _, _ in },
         terminalizeAudit: { _, _, _ in }
+    )
+}
+
+struct CapabilitySettingsSecretDependencies: Sendable {
+    let load: @Sendable (UUID) async throws -> String?
+    let store: @Sendable (UUID, String) async throws -> Void
+    let delete: @Sendable (UUID) async throws -> Void
+
+    static let unavailable = Self(
+        load: { _ in nil },
+        store: { _, _ in throw CapabilityControllerError.unavailable },
+        delete: { _ in throw CapabilityControllerError.unavailable }
     )
 }
 
@@ -287,6 +312,11 @@ final class CapabilityController: ObservableObject {
         let timeout: Task<Void, Never>
     }
 
+    private enum StoredSecret {
+        case absent
+        case value(String)
+    }
+
     @Published private(set) var pendingApproval: CapabilityApprovalPresentation?
     @Published private(set) var activityRows: [CapabilityActivityRow] = []
     @Published private(set) var liveVoiceConfirmationMessage: String?
@@ -307,6 +337,7 @@ final class CapabilityController: ObservableObject {
         CapabilityProviderCallbackAuthorityBox?
     private let confirmationAnnouncer: @MainActor @Sendable (String) -> Void
     private let settingsRepository: SQLiteCapabilityRepository?
+    private let settingsSecrets: CapabilitySettingsSecretDependencies
 
     private var broker: CapabilityBroker?
     private var descriptors: [CapabilityID: CapabilityDescriptor] = [:]
@@ -342,6 +373,7 @@ final class CapabilityController: ObservableObject {
     private var providerCallStartedAt: [CapabilityCallID: Date] = [:]
     private var approvalCanAllowOnce: [CapabilityCallID: Bool] = [:]
     private var completedProviderCallKeys = Set<String>()
+    private var settingsMutationInProgress = false
 
     init(
         loadConfiguration: @escaping @Sendable () async throws
@@ -357,6 +389,7 @@ final class CapabilityController: ObservableObject {
         providerCallbackAuthorityBox:
             CapabilityProviderCallbackAuthorityBox? = nil,
         settingsRepository: SQLiteCapabilityRepository? = nil,
+        settingsSecrets: CapabilitySettingsSecretDependencies = .unavailable,
         confirmationAnnouncer: @escaping @MainActor @Sendable (String) -> Void = {
             _ in
         }
@@ -370,6 +403,7 @@ final class CapabilityController: ObservableObject {
         self.bridgeBox = bridgeBox
         self.providerCallbackAuthorityBox = providerCallbackAuthorityBox
         self.settingsRepository = settingsRepository
+        self.settingsSecrets = settingsSecrets
         self.confirmationAnnouncer = confirmationAnnouncer
     }
 
@@ -422,6 +456,39 @@ final class CapabilityController: ObservableObject {
             bridgeBox: bridgeBox,
             providerCallbackAuthorityBox: providerCallbackAuthorityBox,
             settingsRepository: repository,
+            settingsSecrets: CapabilitySettingsSecretDependencies(
+                load: { [credentialStore] reference in
+                    do {
+                        let envelope = try await credentialStore.load(for: reference)
+                        guard let value = String(data: envelope.payload, encoding: .utf8),
+                              !value.isEmpty, value.utf8.count <= 65_536,
+                              !value.contains("\0")
+                        else { throw CapabilitySettingsMutationError.secretMutationFailed }
+                        return value
+                    } catch CredentialError.itemNotFound {
+                        return nil
+                    }
+                },
+                store: { [credentialStore] reference, value in
+                    guard let payload = value.data(using: .utf8), !payload.isEmpty,
+                          payload.count <= 65_536, !value.contains("\0")
+                    else { throw CapabilitySettingsMutationError.secretMutationFailed }
+                    try await credentialStore.store(
+                        try CredentialEnvelope(
+                            providerKind: .openAICompatible,
+                            payload: payload
+                        ),
+                        for: reference
+                    )
+                },
+                delete: { [credentialStore] reference in
+                    do {
+                        try await credentialStore.delete(for: reference)
+                    } catch CredentialError.itemNotFound {
+                        return
+                    }
+                }
+            ),
             confirmationAnnouncer: { [confirmationSpeaker] message in
                 confirmationSpeaker.announce(message)
             }
@@ -616,6 +683,7 @@ final class CapabilityController: ObservableObject {
         _ association: CapabilityAssociation,
         providerProfileID: UUID
     ) {
+        guard !settingsMutationInProgress else { return }
         activeTypedAssociation = association
         activeProviderProfileID = providerProfileID
     }
@@ -641,10 +709,14 @@ final class CapabilityController: ObservableObject {
     }
 
     func admitVoiceAssociation(sessionID: UUID) {
+        guard !settingsMutationInProgress else { return }
         activeVoiceAssociation = .voice(sessionID: sessionID, generation: 1)
     }
 
     func prepareLiveVoice(providerProfileID: UUID) async throws {
+        guard !settingsMutationInProgress else {
+            throw CapabilityControllerError.settingsBusy
+        }
         await finalizeProviderActivities()
         activeProviderProfileID = providerProfileID
         try await prepareBridge(
@@ -917,11 +989,314 @@ final class CapabilityController: ObservableObject {
         )
     }
 
+    func diagnosticsSnapshot() async -> CapabilityControllerDiagnostics {
+        CapabilityControllerDiagnostics(
+            controllerState: startupError == nil
+                ? (broker == nil ? "Not started" : "Ready")
+                : "Unavailable",
+            broker: await broker?.lifecycleSnapshot(),
+            bridgeRPCServerRunning: rpcServer != nil,
+            adapterProcessRunning: trustedParent.map(Self.adapterIsRunning) ?? false
+        )
+    }
+
+    func saveServerSettings(_ draft: MCPServerValidatedDraft) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+
+        let oldServer = try await repository.server(id: draft.server.id)
+        let oldBindings = try await repository.secretBindings(
+            serverID: draft.server.id
+        )
+        let oldProviderIDs = Set(try await repository.enabledProviderProfileIDs(
+            serverID: draft.server.id
+        ))
+        let references = Set(oldBindings.map(\.credentialReference))
+            .union(draft.secrets.map(\.credentialReference))
+        let oldSecrets = try await secretSnapshot(references)
+        do {
+            for (reference, value) in draft.secretValues {
+                try await settingsSecrets.store(reference, value)
+            }
+            let desiredReferences = Set(draft.secrets.map(\.credentialReference))
+            for reference in references.subtracting(desiredReferences) {
+                try await settingsSecrets.delete(reference)
+            }
+        } catch {
+            do {
+                try await restoreSecrets(oldSecrets)
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw CapabilitySettingsMutationError.secretMutationFailed
+        }
+        do {
+            try await repository.replaceServerConfiguration(
+                server: draft.server,
+                secretBindings: draft.secrets,
+                enabledProviderProfileIDs: draft.providerProfileIDs
+            )
+            try await reloadRuntimeAuthority()
+        } catch {
+            do {
+                if let oldServer {
+                    try await repository.replaceServerConfiguration(
+                        server: oldServer,
+                        secretBindings: oldBindings,
+                        enabledProviderProfileIDs: oldProviderIDs
+                    )
+                } else if try await repository.server(id: draft.server.id) != nil {
+                    try await repository.deleteServer(id: draft.server.id)
+                }
+                try await restoreSecrets(oldSecrets)
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
+    func removeServerFromSettings(serverID: String) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        guard let server = try await repository.server(id: serverID) else {
+            throw CapabilityStorageError.serverNotFound
+        }
+        let bindings = try await repository.secretBindings(serverID: serverID)
+        let providerIDs = Set(try await repository.enabledProviderProfileIDs(
+            serverID: serverID
+        ))
+        let secrets = try await secretSnapshot(Set(bindings.map(\.credentialReference)))
+        do {
+            for reference in secrets.keys {
+                try await settingsSecrets.delete(reference)
+            }
+            try await repository.deleteServer(id: serverID)
+            try await reloadRuntimeAuthority()
+        } catch {
+            do {
+                try await repository.replaceServerConfiguration(
+                    server: server,
+                    secretBindings: bindings,
+                    enabledProviderProfileIDs: providerIDs
+                )
+                try await restoreSecrets(secrets)
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
+    func setProviderEnabledFromSettings(
+        _ enabled: Bool,
+        serverID: String,
+        providerProfileID: UUID
+    ) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        let previous = Set(try await repository.enabledProviderProfileIDs(
+            serverID: serverID
+        ))
+        do {
+            try await repository.setProviderEnabled(
+                enabled,
+                serverID: serverID,
+                providerProfileID: providerProfileID
+            )
+            try await reloadRuntimeAuthority()
+        } catch {
+            do {
+                try await restoreProviderSettings(
+                    previous, serverID: serverID, repository: repository
+                )
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
+    func setServerPolicyFromSettings(
+        _ policy: CapabilityPolicy,
+        serverID: String
+    ) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        guard let previous = try await repository.server(id: serverID) else {
+            throw CapabilityStorageError.serverNotFound
+        }
+        let bindings = try await repository.secretBindings(serverID: serverID)
+        let providerIDs = Set(try await repository.enabledProviderProfileIDs(
+            serverID: serverID
+        ))
+        let updated = CapabilityServerRecord(
+            id: previous.id,
+            displayName: previous.displayName,
+            transport: previous.transport,
+            command: previous.command,
+            endpoint: previous.endpoint,
+            arguments: previous.arguments,
+            enabled: previous.enabled,
+            defaultPolicy: policy,
+            staleState: previous.staleState,
+            createdAt: previous.createdAt,
+            updatedAt: Date()
+        )
+        do {
+            try await repository.replaceServerConfiguration(
+                server: updated,
+                secretBindings: bindings,
+                enabledProviderProfileIDs: providerIDs
+            )
+            try await reloadRuntimeAuthority()
+        } catch {
+            do {
+                try await repository.replaceServerConfiguration(
+                    server: previous,
+                    secretBindings: bindings,
+                    enabledProviderProfileIDs: providerIDs
+                )
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
+    func setToolPolicyFromSettings(
+        _ policy: CapabilityPolicy?,
+        toolID: CapabilityID
+    ) async throws {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        let identity = toolID.rawValue.split(separator: "/", maxSplits: 2)
+        guard identity.count == 3 else {
+            throw CapabilityStorageError.toolNotFound
+        }
+        let serverID = String(identity[1])
+        let previous = try await repository.catalog(serverID: serverID)
+            .first(where: { $0.descriptor.id == toolID })?.policyOverride
+        do {
+            try await repository.setPolicyOverride(policy, toolID: toolID)
+            try await reloadRuntimeAuthority()
+        } catch {
+            do {
+                try await repository.setPolicyOverride(previous, toolID: toolID)
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
+    func testAndEnableServer(
+        serverID: String,
+        compatibleProviderProfileIDs: Set<UUID>
+    ) async throws -> Int {
+        let repository = try settingsRepositoryOrThrow()
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        guard let previous = try await repository.server(id: serverID) else {
+            throw CapabilityStorageError.serverNotFound
+        }
+        let bindings = try await repository.secretBindings(serverID: serverID)
+        let oldProviderIDs = Set(try await repository.enabledProviderProfileIDs(
+            serverID: serverID
+        ))
+        let enabled = CapabilityServerRecord(
+            id: previous.id,
+            displayName: previous.displayName,
+            transport: previous.transport,
+            command: previous.command,
+            endpoint: previous.endpoint,
+            arguments: previous.arguments,
+            enabled: true,
+            defaultPolicy: previous.defaultPolicy,
+            staleState: .current,
+            createdAt: previous.createdAt,
+            updatedAt: Date()
+        )
+        let configuration = try Self.configuration(
+            server: enabled,
+            bindings: bindings,
+            providerProfileIDs: compatibleProviderProfileIDs
+        )
+        let session = try await makeSession(configuration)
+        let tools: [MCPDiscoveredTool]
+        do {
+            tools = try await session.listTools()
+            await session.disconnect()
+        } catch {
+            await session.disconnect()
+            throw error
+        }
+        let descriptors = try tools.map { tool in
+            try CapabilityDescriptor(
+                id: CapabilityID(
+                    source: .millerMCP,
+                    serverID: serverID,
+                    toolName: tool.name
+                ),
+                source: .millerMCP,
+                serverID: serverID,
+                toolName: tool.name,
+                displayName: tool.displayName,
+                summary: tool.summary,
+                inputSchemaJSON: tool.inputSchemaJSON,
+                readOnlyHint: tool.readOnlyHint,
+                providerProfileIDs: compatibleProviderProfileIDs,
+                isAvailable: true
+            )
+        }
+        do {
+            try await repository.activateServer(
+                server: enabled,
+                secretBindings: bindings,
+                enabledProviderProfileIDs: compatibleProviderProfileIDs,
+                descriptors: descriptors
+            )
+            try await reloadRuntimeAuthority()
+            return tools.count
+        } catch {
+            do {
+                try await repository.replaceServerConfiguration(
+                    server: previous,
+                    secretBindings: bindings,
+                    enabledProviderProfileIDs: oldProviderIDs
+                )
+                try await reloadRuntimeAuthority()
+            } catch {
+                await leaveRuntimeUnavailable()
+                throw CapabilitySettingsMutationError.recoveryFailed
+            }
+            throw error
+        }
+    }
+
     func reloadLocalConfiguration() async throws {
-        guard activeTypedAssociation == nil,
-              activeVoiceAssociation == nil,
-              pendingApprovalCount == 0
-        else { throw CapabilityControllerError.settingsBusy }
+        try beginSettingsMutation()
+        defer { settingsMutationInProgress = false }
+        try await reloadRuntimeAuthority()
+    }
+
+    private func reloadRuntimeAuthority() async throws {
         await broker?.disconnectAll()
         broker = nil
         descriptors.removeAll()
@@ -932,6 +1307,87 @@ final class CapabilityController: ObservableObject {
         await start()
         if let startupError { throw startupError }
         await reconcileProviderProjection()
+    }
+
+    private func beginSettingsMutation() throws {
+        guard !settingsMutationInProgress,
+              activeTypedAssociation == nil,
+              activeVoiceAssociation == nil,
+              pendingApprovalCount == 0,
+              rpcTasks.isEmpty,
+              callContexts.isEmpty
+        else { throw CapabilityControllerError.settingsBusy }
+        settingsMutationInProgress = true
+    }
+
+    private func settingsRepositoryOrThrow() throws -> SQLiteCapabilityRepository {
+        guard let settingsRepository else {
+            throw CapabilityControllerError.unavailable
+        }
+        return settingsRepository
+    }
+
+    private func secretSnapshot(
+        _ references: Set<UUID>
+    ) async throws -> [UUID: StoredSecret] {
+        var result: [UUID: StoredSecret] = [:]
+        do {
+            for reference in references {
+                if let value = try await settingsSecrets.load(reference) {
+                    result[reference] = .value(value)
+                } else {
+                    result[reference] = .absent
+                }
+            }
+            return result
+        } catch {
+            throw CapabilitySettingsMutationError.secretMutationFailed
+        }
+    }
+
+    private func restoreSecrets(_ snapshot: [UUID: StoredSecret]) async throws {
+        for (reference, value) in snapshot {
+            switch value {
+            case .value(let value):
+                try await settingsSecrets.store(reference, value)
+            case .absent:
+                try await settingsSecrets.delete(reference)
+            }
+        }
+    }
+
+    private func restoreProviderSettings(
+        _ providerIDs: Set<UUID>,
+        serverID: String,
+        repository: SQLiteCapabilityRepository
+    ) async throws {
+        guard let server = try await repository.server(id: serverID) else {
+            throw CapabilityStorageError.serverNotFound
+        }
+        try await repository.replaceServerConfiguration(
+            server: server,
+            secretBindings: try await repository.secretBindings(serverID: serverID),
+            enabledProviderProfileIDs: providerIDs
+        )
+    }
+
+    private func makeSession(
+        _ configuration: MCPServerConfiguration
+    ) async throws -> any MCPClientSessionProtocol {
+        if let sessionFactory {
+            return try await sessionFactory(configuration)
+        }
+        return try await MCPClientSession.connect(
+            configuration: configuration,
+            credentialResolver: credentialResolver
+        )
+    }
+
+    private func leaveRuntimeUnavailable() async {
+        await broker?.disconnectAll()
+        broker = nil
+        descriptors.removeAll()
+        startupError = CapabilitySettingsMutationError.recoveryFailed
     }
 
     func configureProviderProjection(
@@ -1083,6 +1539,9 @@ final class CapabilityController: ObservableObject {
         providerProfileID: UUID,
         kind: ProviderKind
     ) async throws -> ReasoningRequest {
+        guard !settingsMutationInProgress else {
+            throw CapabilityControllerError.settingsBusy
+        }
         await finalizeProviderActivities()
         let association = CapabilityAssociation.typed(
             conversationID: request.conversationID,
@@ -1701,6 +2160,70 @@ final class CapabilityController: ObservableObject {
             servers: servers,
             toolPolicies: policies
         )
+    }
+
+    private static func configuration(
+        server: CapabilityServerRecord,
+        bindings: [CapabilitySecretBinding],
+        providerProfileIDs: Set<UUID>
+    ) throws -> MCPServerConfiguration {
+        let transport: MCPServerTransport
+        switch server.transport {
+        case .stdio:
+            guard let command = server.command else {
+                throw CapabilityControllerError.unavailable
+            }
+            transport = .stdio(
+                executable: command,
+                arguments: server.arguments
+            )
+        case .streamableHTTP:
+            guard let endpoint = server.endpoint.flatMap(URL.init(string:)) else {
+                throw CapabilityControllerError.unavailable
+            }
+            transport = .http(endpoint: endpoint)
+        }
+        return try MCPServerConfiguration(
+            id: server.id,
+            displayName: server.displayName,
+            transport: transport,
+            secrets: try bindings.map { binding in
+                try MCPSecretBinding(
+                    destination: binding.kind == .environment
+                        ? .environment : .header,
+                    name: binding.name,
+                    credentialReference: binding.credentialReference
+                )
+            },
+            enabled: server.enabled,
+            defaultPolicy: server.defaultPolicy,
+            providerProfileIDs: providerProfileIDs
+        )
+    }
+
+    private static func adapterIsRunning(trustedParent: URL) -> Bool {
+        let leaseURL = CapabilityRPCRuntime.managedRoot(in: trustedParent)
+            .appending(path: CapabilityRPCRuntime.processLeaseName)
+        let descriptor = open(leaseURL.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+        var value = stat()
+        guard fstat(descriptor, &value) == 0,
+              (value.st_mode & S_IFMT) == S_IFREG,
+              value.st_uid == geteuid(),
+              (value.st_mode & 0o777) == 0o600,
+              value.st_size > 0,
+              value.st_size <= 32
+        else { return false }
+        var bytes = [UInt8](repeating: 0, count: Int(value.st_size))
+        let count = Darwin.read(descriptor, &bytes, bytes.count)
+        guard count == bytes.count,
+              let text = String(bytes: bytes, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int32(text),
+              pid > 1
+        else { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
     }
 
     private static func persist(

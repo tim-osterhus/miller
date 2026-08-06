@@ -57,6 +57,23 @@ struct CapabilitySettingsTests {
         #expect(resolution.note == "Provider requires approval")
     }
 
+    @Test
+    func providerManagedDescriptorsCarryTruthfulApprovalMandates() throws {
+        let tool = try settingsTool(
+            source: .millerMCP,
+            serverID: "managed",
+            toolName: "change",
+            readOnly: false,
+            visibility: .providerManaged
+        )
+
+        let resolution = tool.effectivePolicy(serverPolicy: .fullyTrusted)
+
+        #expect(tool.providerMandatedApproval)
+        #expect(resolution.requiresApproval)
+        #expect(resolution.note == "Provider requires approval")
+    }
+
     @Test @MainActor
     func enablementPoliciesAndRefreshPreserveExplicitOverridesAndStaleCatalog() async throws {
         let recorder = CapabilitySettingsRecorder()
@@ -101,8 +118,9 @@ struct CapabilitySettingsTests {
             managedCacheBytes: 456
         )
         #expect(snapshot.rows.map(\.label) == [
-            "Miller version", "Last failure", "Catalog", "Broker process",
-            "Adapter process", "Managed data", "Managed cache",
+            "Miller version", "Last failure", "Catalog", "Capability controller",
+            "Broker process", "Bridge RPC", "Adapter process",
+            "MCP child sessions", "Managed data", "Managed cache",
         ])
         #expect(snapshot.rows.last?.value == "456 bytes")
     }
@@ -134,7 +152,7 @@ private actor CapabilitySettingsRecorder {
     nonisolated var dependencies: MCPServerEditorDependencies {
         MCPServerEditorDependencies(
             load: { [self] in await initial },
-            save: { _ in }, remove: { _ in }, persistSecret: { _, _, _ in },
+            save: { _ in }, remove: { _ in },
             testConnection: { _ in 0 },
             setProviderEnabled: { [self] enabled, server, provider in
                 await setProvider(enabled, server, provider)
@@ -182,7 +200,8 @@ private func settingsTool(
     toolName: String,
     providers: Set<UUID> = [],
     readOnly: Bool? = true,
-    override: CapabilityPolicy? = nil
+    override: CapabilityPolicy? = nil,
+    visibility: CapabilityVisibility = .ownerManaged
 ) throws -> CapabilitySettingsTool {
     let descriptor = try CapabilityDescriptor(
         id: CapabilityID(source: source, serverID: serverID, toolName: toolName),
@@ -190,7 +209,8 @@ private func settingsTool(
         displayName: toolName.capitalized, summary: "Bounded summary",
         inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
         readOnlyHint: readOnly, providerProfileIDs: providers,
-        isAvailable: true
+        isAvailable: true,
+        visibility: visibility
     )
     return .init(
         record: .init(

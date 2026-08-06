@@ -12,6 +12,9 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
     let catalogFreshness: String
     let brokerProcessState: String
     let adapterProcessState: String
+    var controllerState = "Unavailable"
+    var bridgeRPCState = "Unavailable"
+    var mcpChildState = "Unavailable"
     let managedDataBytes: Int64
     let managedCacheBytes: Int64
 
@@ -22,8 +25,11 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
         return versionRows + [
             .init(label: "Last failure", value: sanitizedLastFailure ?? "None"),
             .init(label: "Catalog", value: catalogFreshness),
+            .init(label: "Capability controller", value: controllerState),
             .init(label: "Broker process", value: brokerProcessState),
+            .init(label: "Bridge RPC", value: bridgeRPCState),
             .init(label: "Adapter process", value: adapterProcessState),
+            .init(label: "MCP child sessions", value: mcpChildState),
             .init(label: "Managed data", value: "\(managedDataBytes) bytes"),
             .init(label: "Managed cache", value: "\(managedCacheBytes) bytes"),
         ]

@@ -146,11 +146,19 @@ final class PrivacyDataSettingsModel: ObservableObject {
         }
         do {
             try await dependencies.resetWakePreferences()
+            resetResults.append(.init(
+                root: "preferences.wake.reset",
+                succeeded: true
+            ))
             transcriptSavingEnabled = true
             nextSessionSavingEnabled = true
             storageUsage = try await dependencies.storageUsage()
             status = "Reset completed; secure erasure is not claimed."
         } catch {
+            resetResults.append(.init(
+                root: "preferences.wake.reset",
+                succeeded: false
+            ))
             status = "Reset incomplete; review Diagnostics."
         }
     }

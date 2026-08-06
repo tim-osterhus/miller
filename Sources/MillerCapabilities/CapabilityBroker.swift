@@ -24,6 +24,36 @@ public struct CapabilityBrokerCatalog: Equatable, Sendable {
     }
 }
 
+public enum CapabilityBrokerLifecycleState: String, Equatable, Sendable {
+    case configured
+    case starting
+    case ready
+    case degraded
+    case stopped
+}
+
+public struct CapabilityBrokerLifecycleSnapshot: Equatable, Sendable {
+    public let state: CapabilityBrokerLifecycleState
+    public let configuredServerCount: Int
+    public let activeSessionCount: Int
+    public let pendingConnectionCount: Int
+    public let activeCallCount: Int
+
+    public init(
+        state: CapabilityBrokerLifecycleState,
+        configuredServerCount: Int,
+        activeSessionCount: Int,
+        pendingConnectionCount: Int,
+        activeCallCount: Int
+    ) {
+        self.state = state
+        self.configuredServerCount = configuredServerCount
+        self.activeSessionCount = activeSessionCount
+        self.pendingConnectionCount = pendingConnectionCount
+        self.activeCallCount = activeCallCount
+    }
+}
+
 public typealias MCPClientSessionFactory = @Sendable (
     MCPServerConfiguration
 ) async throws -> any MCPClientSessionProtocol
@@ -68,6 +98,7 @@ public actor CapabilityBroker {
     private var visibleStaleServerIDs = Set<String>()
     private var activeCallIDs = Set<CapabilityCallID>()
     private var completedCallIDs = Set<CapabilityCallID>()
+    private var isStopped = false
 
     public init(
         configurations: [MCPServerConfiguration],
@@ -107,6 +138,7 @@ public actor CapabilityBroker {
     }
 
     public func refresh() async -> CapabilityBrokerCatalog {
+        isStopped = false
         refreshGeneration &+= 1
         let generation = refreshGeneration
         let baselineCatalogs = successfulCatalogs
@@ -369,6 +401,7 @@ public actor CapabilityBroker {
     }
 
     public func disconnectAll() async {
+        isStopped = true
         lifecycleGeneration &+= 1
         refreshGeneration &+= 1
         let pending = pendingConnections.values.map(\.task)
@@ -380,6 +413,28 @@ public actor CapabilityBroker {
         visibleStaleServerIDs.removeAll()
         for task in pending { task.cancel() }
         await disconnectConcurrently(sessions, maximumParallel: 4)
+    }
+
+    public func lifecycleSnapshot() -> CapabilityBrokerLifecycleSnapshot {
+        let state: CapabilityBrokerLifecycleState
+        if isStopped {
+            state = .stopped
+        } else if !pendingConnections.isEmpty {
+            state = .starting
+        } else if !visibleStaleServerIDs.isEmpty {
+            state = .degraded
+        } else if !sessions.isEmpty {
+            state = .ready
+        } else {
+            state = .configured
+        }
+        return CapabilityBrokerLifecycleSnapshot(
+            state: state,
+            configuredServerCount: configurations.count,
+            activeSessionCount: sessions.count,
+            pendingConnectionCount: pendingConnections.count,
+            activeCallCount: activeCallIDs.count
+        )
     }
 
     private func session(
