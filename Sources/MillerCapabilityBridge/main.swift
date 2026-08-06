@@ -13,6 +13,7 @@ public enum MillerCapabilityBridgeError: Error, Equatable, Sendable {
 public struct MillerCapabilityBridgeRuntime: Sendable {
     private let rpcClient: CapabilityRPCClient
     private let providerProfileID: UUID
+    private let trustedParent: URL?
     private let catalog = ProjectedCapabilityCatalog()
 
     public init(
@@ -21,6 +22,7 @@ public struct MillerCapabilityBridgeRuntime: Sendable {
     ) {
         self.rpcClient = rpcClient
         self.providerProfileID = providerProfileID
+        self.trustedParent = nil
     }
 
     public init(environment: [String: String]) throws {
@@ -30,17 +32,32 @@ public struct MillerCapabilityBridgeRuntime: Sendable {
               let profileValue = environment[
                 CapabilityRPCEnvironment.providerProfileID
               ],
-              let profileID = UUID(uuidString: profileValue)
+              let profileID = UUID(uuidString: profileValue),
+              let trustedParentPath = environment[
+                CapabilityRPCEnvironment.trustedParent
+              ],
+              trustedParentPath.hasPrefix("/"),
+              !trustedParentPath.contains("\0")
         else { throw MillerCapabilityBridgeError.invalidEnvironment }
         let token: CapabilityRPCSessionToken
         do { token = try CapabilityRPCSessionToken(environmentValue: tokenValue) }
         catch { throw MillerCapabilityBridgeError.invalidEnvironment }
-        self.init(
-            rpcClient: CapabilityRPCClient(
-                socketURL: URL(filePath: socketPath), token: token
-            ),
-            providerProfileID: profileID
+        let socketURL = URL(filePath: socketPath)
+        let trustedParent = URL(
+            filePath: trustedParentPath,
+            directoryHint: .isDirectory
         )
+        do {
+            try CapabilityRPCRuntime.validateEndpoint(
+                socketURL: socketURL,
+                trustedParent: trustedParent
+            )
+        } catch {
+            throw MillerCapabilityBridgeError.invalidEnvironment
+        }
+        self.rpcClient = CapabilityRPCClient(socketURL: socketURL, token: token)
+        self.providerProfileID = profileID
+        self.trustedParent = trustedParent
     }
 
     public func makeServer() async -> Server {
@@ -136,6 +153,19 @@ public struct MillerCapabilityBridgeRuntime: Sendable {
     }
 
     public func run() async throws {
+        let lease: CapabilityRPCBridgeProcessLease?
+        if let trustedParent {
+            do {
+                lease = try CapabilityRPCBridgeProcessLease.acquire(
+                    trustedParent: trustedParent
+                )
+            } catch {
+                throw MillerCapabilityBridgeError.invalidEnvironment
+            }
+        } else {
+            lease = nil
+        }
+        defer { lease?.release() }
         let server = await makeServer()
         try await server.start(transport: StdioTransport())
         await withTaskGroup(of: Void.self) { group in

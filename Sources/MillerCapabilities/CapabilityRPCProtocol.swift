@@ -17,6 +17,7 @@ public enum CapabilityRPCEnvironment {
     public static let socketPath = "MILLER_CAPABILITY_RPC_SOCKET"
     public static let sessionToken = "MILLER_CAPABILITY_RPC_TOKEN"
     public static let providerProfileID = "MILLER_CAPABILITY_PROVIDER_PROFILE_ID"
+    public static let trustedParent = "MILLER_CAPABILITY_RPC_TRUSTED_PARENT"
 }
 
 public struct CapabilityRPCSessionToken: Equatable, Sendable {

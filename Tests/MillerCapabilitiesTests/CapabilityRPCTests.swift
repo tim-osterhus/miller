@@ -61,7 +61,6 @@ struct CapabilityRPCTests {
             return .catalog([descriptor])
         }
         let endpoint = try await server.start()
-        defer { Task { await server.stop() } }
 
         let unauthenticated = try connectUnixSocket(endpoint.socketURL)
         defer { Darwin.close(unauthenticated) }
@@ -80,6 +79,7 @@ struct CapabilityRPCTests {
         let client = CapabilityRPCClient(endpoint: endpoint, timeout: .seconds(1))
         let response = try await client.send(.list(providerProfileID: profileID))
         #expect(response == .catalog([descriptor]))
+        await server.stop()
     }
 
     @Test
@@ -282,11 +282,183 @@ struct CapabilityRPCTests {
             _ = try await nonOwnedParent.start()
         }
     }
+
+    @Test
+    func peerDisconnectCancelsInFlightCallWithoutLateSideEffects() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let probe = HandlerCancellationProbe()
+        let callID = CapabilityCallID()
+        let server = CapabilityRPCServer(trustedParent: parent) { request in
+            guard case .call = request else { return .catalog([]) }
+            return await withTaskCancellationHandler {
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return .failed(callID, code: "cancelled") }
+                probe.recordSideEffect()
+                return .result(
+                    callID,
+                    contentJSON: Data(#"{"content":[]}"#.utf8),
+                    isError: false
+                )
+            } onCancel: {
+                probe.recordCancellation()
+            }
+        }
+        let endpoint = try await server.start()
+        let descriptor = try connectUnixSocket(endpoint.socketURL)
+        try writeRPCFrame(
+            CapabilityRPCAuthenticationFrame(token: endpoint.token),
+            to: descriptor
+        )
+        try writeRPCFrame(
+            CapabilityRPCRequestEnvelope(
+                requestID: UUID(),
+                request: .call(
+                    callID,
+                    capabilityID: try CapabilityID(
+                        source: .millerMCP,
+                        serverID: "local",
+                        toolName: "change"
+                    ),
+                    argumentsJSON: Data("{}".utf8)
+                )
+            ),
+            to: descriptor
+        )
+        shutdown(descriptor, SHUT_RDWR)
+        Darwin.close(descriptor)
+
+        #expect(await probe.waitForCancellation())
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probe.sideEffectCount == 0)
+
+        let healthy = CapabilityRPCClient(endpoint: endpoint, timeout: .seconds(1))
+        #expect(try await healthy.send(.list(providerProfileID: UUID())) == .catalog([]))
+        await server.stop()
+        #expect(await server.activeClientCountForTesting() == 0)
+    }
+
+    @Test
+    func stopRestartInvalidatesOldAcceptGenerationAndToken() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(
+            trustedParent: parent,
+            authenticationTimeout: .milliseconds(100),
+            requestFrameTimeout: .milliseconds(100)
+        ) { _ in .catalog([]) }
+
+        var oldToken: CapabilityRPCSessionToken?
+        for _ in 0..<12 {
+            let endpoint = try await server.start()
+            let staleClient = try connectUnixSocket(endpoint.socketURL)
+            oldToken = endpoint.token
+            await server.stop()
+            Darwin.close(staleClient)
+            #expect(await server.activeClientCountForTesting() == 0)
+            #expect(!FileManager.default.fileExists(
+                atPath: CapabilityRPCRuntime.managedRoot(in: parent).path
+            ))
+        }
+
+        let current = try await server.start()
+        let stale = CapabilityRPCClient(
+            socketURL: current.socketURL,
+            token: try #require(oldToken),
+            timeout: .seconds(1)
+        )
+        await #expect(throws: CapabilityRPCError.authenticationFailed) {
+            _ = try await stale.send(.list(providerProfileID: UUID()))
+        }
+        #expect(try await CapabilityRPCClient(
+            endpoint: current,
+            timeout: .seconds(1)
+        ).send(.list(providerProfileID: UUID())) == .catalog([]))
+        await server.stop()
+        #expect(await server.activeClientCountForTesting() == 0)
+    }
+
+    @Test
+    func boundsClientsAndUsesAbsoluteInputDeadlines() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(
+            trustedParent: parent,
+            authenticationTimeout: .milliseconds(120),
+            requestFrameTimeout: .milliseconds(120)
+        ) { _ in
+            try? await Task.sleep(for: .milliseconds(250))
+            return .catalog([])
+        }
+        let endpoint = try await server.start()
+
+        var stalled: [Int32] = []
+        for _ in 0..<CapabilityRPCServer.maximumActiveClients {
+            stalled.append(try connectUnixSocket(endpoint.socketURL))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(
+            await server.activeClientCountForTesting()
+                == CapabilityRPCServer.maximumActiveClients
+        )
+        let excess = try connectUnixSocket(endpoint.socketURL)
+        await #expect(throws: (any Error).self) {
+            _ = try await Task.detached { try readFrame(from: excess) }.value
+        }
+        Darwin.close(excess)
+        for descriptor in stalled { Darwin.close(descriptor) }
+
+        let trickle = try connectUnixSocket(endpoint.socketURL)
+        for byte in Data(#"{"token":"# .utf8) {
+            _ = Darwin.write(trickle, [byte], 1)
+            try await Task.sleep(for: .milliseconds(35))
+        }
+        await #expect(throws: (any Error).self) {
+            _ = try await Task.detached { try readFrame(from: trickle) }.value
+        }
+        Darwin.close(trickle)
+
+        let longHandlerClient = CapabilityRPCClient(
+            endpoint: endpoint,
+            timeout: .seconds(1)
+        )
+        #expect(try await longHandlerClient.send(
+            .list(providerProfileID: UUID())
+        ) == .catalog([]))
+        await server.stop()
+        #expect(await server.activeClientCountForTesting() == 0)
+    }
 }
 
 private actor CancellationProbe {
     private(set) var callID: CapabilityCallID?
     func record(_ callID: CapabilityCallID) { self.callID = callID }
+}
+
+private final class HandlerCancellationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancellations = 0
+    private var sideEffects = 0
+
+    var sideEffectCount: Int {
+        lock.withLock { sideEffects }
+    }
+
+    func recordCancellation() {
+        lock.withLock { cancellations += 1 }
+    }
+
+    func recordSideEffect() {
+        lock.withLock { sideEffects += 1 }
+    }
+
+    func waitForCancellation() async -> Bool {
+        for _ in 0..<80 {
+            if lock.withLock({ cancellations > 0 }) { return true }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return false
+    }
 }
 
 private func makeDescriptor(profileID: UUID) throws -> CapabilityDescriptor {
@@ -322,6 +494,22 @@ private func mode(_ url: URL) -> mode_t {
 private func connectUnixSocket(_ url: URL) throws -> Int32 {
     let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw POSIXError(.ENOTSOCK) }
+    var noSignal: Int32 = 1
+    _ = setsockopt(
+        descriptor,
+        SOL_SOCKET,
+        SO_NOSIGPIPE,
+        &noSignal,
+        socklen_t(MemoryLayout<Int32>.size)
+    )
+    var timeout = timeval(tv_sec: 0, tv_usec: 300_000)
+    _ = setsockopt(
+        descriptor,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        &timeout,
+        socklen_t(MemoryLayout<timeval>.size)
+    )
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     let bytes = Array(url.path.utf8CString)

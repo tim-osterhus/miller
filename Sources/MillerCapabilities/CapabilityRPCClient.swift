@@ -20,7 +20,12 @@ public struct CapabilityRPCClient: Sendable {
         timeout: Duration = .seconds(60)
     ) {
         self.init(
-            endpoint: CapabilityRPCEndpoint(socketURL: socketURL, token: token),
+            endpoint: CapabilityRPCEndpoint(
+                socketURL: socketURL,
+                token: token,
+                trustedParentURL: socketURL.deletingLastPathComponent()
+                    .deletingLastPathComponent()
+            ),
             timeout: timeout
         )
     }

@@ -39,7 +39,6 @@ struct MillerCapabilityBridgeTests {
             }
         }
         let endpoint = try await rpcServer.start()
-        defer { Task { await rpcServer.stop() } }
 
         let runtime = MillerCapabilityBridgeRuntime(
             rpcClient: CapabilityRPCClient(endpoint: endpoint, timeout: .seconds(1)),
@@ -87,6 +86,7 @@ struct MillerCapabilityBridgeTests {
                 CapabilityRPCEnvironment.socketPath: "/tmp/socket",
                 CapabilityRPCEnvironment.sessionToken: "not-a-token",
                 CapabilityRPCEnvironment.providerProfileID: UUID().uuidString,
+                CapabilityRPCEnvironment.trustedParent: "/tmp",
             ])
         }
     }
@@ -184,7 +184,8 @@ struct MillerCapabilityBridgeTests {
         let endpoint = try await rpcServer.start()
         let wrongEndpoint = CapabilityRPCEndpoint(
             socketURL: endpoint.socketURL,
-            token: .random()
+            token: .random(),
+            trustedParentURL: endpoint.trustedParentURL
         )
         let child = try launchBridgeSubprocess(
             executable: try bridgeExecutableURL(),
@@ -206,6 +207,107 @@ struct MillerCapabilityBridgeTests {
         #expect(!FileManager.default.fileExists(
             atPath: CapabilityRPCRuntime.managedRoot(in: trustedParent).path
         ))
+    }
+
+    @Test
+    func cleanupTerminatesOnlyTheBridgeHoldingTheExactManagedLease() async throws {
+        let managedParent = try cleanTrustedParent()
+        let otherParent = try bridgeTrustedParent(prefix: "miller-bridge-other")
+        defer {
+            try? FileManager.default.removeItem(at: managedParent)
+            try? FileManager.default.removeItem(at: otherParent)
+        }
+        let managedServer = CapabilityRPCServer(trustedParent: managedParent) {
+            _ in .catalog([])
+        }
+        let otherServer = CapabilityRPCServer(trustedParent: otherParent) {
+            _ in .catalog([])
+        }
+        let managedEndpoint = try await managedServer.start()
+        let otherEndpoint = try await otherServer.start()
+        let executable = try bridgeExecutableURL()
+        let managedBridge = try launchBridgeSubprocess(
+            executable: executable,
+            endpoint: managedEndpoint,
+            providerProfileID: UUID()
+        )
+        let otherBridge = try launchBridgeSubprocess(
+            executable: executable,
+            endpoint: otherEndpoint,
+            providerProfileID: UUID()
+        )
+        defer {
+            managedBridge.forceCleanup()
+            otherBridge.forceCleanup()
+        }
+
+        #expect(await waitForLease(in: managedParent))
+        #expect(await waitForLease(in: otherParent))
+        let clean = try runBridgeRuntimeClean(parent: managedParent)
+        #expect(clean.status == 0, Comment(rawValue: clean.error))
+        #expect(await waitForExit(managedBridge.process))
+        #expect(otherBridge.process.isRunning)
+        #expect(FileManager.default.fileExists(atPath: managedParent.path))
+        #expect(!FileManager.default.fileExists(
+            atPath: CapabilityRPCRuntime.managedRoot(in: managedParent).path
+        ))
+        #expect(FileManager.default.fileExists(
+            atPath: CapabilityRPCRuntime.managedRoot(in: otherParent).path
+        ))
+
+        otherBridge.closeInput()
+        #expect(await waitForExit(otherBridge.process))
+        await managedServer.stop()
+        await otherServer.stop()
+    }
+
+    @Test
+    func cleanupRefusesUnsafeRuntimeMetadata() throws {
+        let unsafeModeParent = try cleanTrustedParent()
+        defer { try? FileManager.default.removeItem(at: unsafeModeParent) }
+        let unsafeRoot = CapabilityRPCRuntime.managedRoot(in: unsafeModeParent)
+        try FileManager.default.createDirectory(
+            at: unsafeRoot,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let unsafeMode = try runBridgeRuntimeClean(parent: unsafeModeParent)
+        #expect(unsafeMode.status != 0)
+        #expect(FileManager.default.fileExists(atPath: unsafeRoot.path))
+
+        try FileManager.default.removeItem(at: unsafeRoot)
+        try FileManager.default.createDirectory(
+            at: unsafeRoot,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let unsafeLease = unsafeRoot.appending(
+            path: CapabilityRPCRuntime.processLeaseName
+        )
+        try Data("\(getpid())\n".utf8).write(to: unsafeLease)
+        _ = chmod(unsafeLease.path, 0o644)
+        let unsafeLeaseResult = try runBridgeRuntimeClean(
+            parent: unsafeModeParent
+        )
+        #expect(unsafeLeaseResult.status != 0)
+        #expect(FileManager.default.fileExists(atPath: unsafeLease.path))
+
+        let symlinkParent = try cleanTrustedParent()
+        defer { try? FileManager.default.removeItem(at: symlinkParent) }
+        let destination = symlinkParent.appending(path: "destination")
+        try FileManager.default.createDirectory(
+            at: destination,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let linkedRoot = CapabilityRPCRuntime.managedRoot(in: symlinkParent)
+        try FileManager.default.createSymbolicLink(
+            at: linkedRoot,
+            withDestinationURL: destination
+        )
+        let symlink = try runBridgeRuntimeClean(parent: symlinkParent)
+        #expect(symlink.status != 0)
+        #expect(FileManager.default.fileExists(atPath: destination.path))
     }
 }
 
@@ -330,6 +432,7 @@ private func launchBridgeSubprocess(
         CapabilityRPCEnvironment.socketPath: endpoint.socketURL.path,
         CapabilityRPCEnvironment.sessionToken: endpoint.token.environmentValue,
         CapabilityRPCEnvironment.providerProfileID: providerProfileID.uuidString,
+        CapabilityRPCEnvironment.trustedParent: endpoint.trustedParentURL.path,
     ]
     process.standardInput = input
     process.standardOutput = output
@@ -389,6 +492,43 @@ private func waitForExit(_ process: Process) async -> Bool {
     return !process.isRunning
 }
 
+private func waitForLease(in trustedParent: URL) async -> Bool {
+    let lease = CapabilityRPCRuntime.managedRoot(in: trustedParent)
+        .appending(path: CapabilityRPCRuntime.processLeaseName)
+    for _ in 0..<80 {
+        if FileManager.default.fileExists(atPath: lease.path) { return true }
+        try? await Task.sleep(for: .milliseconds(25))
+    }
+    return false
+}
+
+private func runBridgeRuntimeClean(parent: URL) throws -> (
+    status: Int32,
+    error: String
+) {
+    let process = Process()
+    let error = Pipe()
+    process.executableURL = repositoryRoot().appending(path: "scripts/clean.sh")
+    process.arguments = ["--bridge-runtime"]
+    process.environment = [
+        "HOME": "/nonexistent",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "MILLER_CLEAN_TESTING": "1",
+        "MILLER_CLEAN_BRIDGE_PARENT": parent.path,
+    ]
+    process.standardOutput = Pipe()
+    process.standardError = error
+    try process.run()
+    process.waitUntilExit()
+    return (
+        process.terminationStatus,
+        String(
+            data: error.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+    )
+}
+
 private func tokenIsAbsent(_ token: String, beneath root: URL) throws -> Bool {
     guard FileManager.default.fileExists(atPath: root.path) else { return true }
     let keys: [URLResourceKey] = [.isRegularFileKey]
@@ -418,6 +558,19 @@ private func repositoryRoot() -> URL {
 private func bridgeTrustedParent(prefix: String) throws -> URL {
     let url = URL(filePath: "/private/tmp", directoryHint: .isDirectory)
         .appending(path: "\(prefix.prefix(12))-\(UUID().uuidString.prefix(8))")
+    try FileManager.default.createDirectory(
+        at: url,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+    )
+    return url
+}
+
+private func cleanTrustedParent() throws -> URL {
+    let url = URL(filePath: "/private/tmp", directoryHint: .isDirectory)
+        .appending(
+            path: "miller-clean-test-\(geteuid())-\(UUID().uuidString.prefix(8))"
+        )
     try FileManager.default.createDirectory(
         at: url,
         withIntermediateDirectories: false,
