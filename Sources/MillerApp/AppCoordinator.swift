@@ -2453,7 +2453,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             guard values.allSatisfy({ $0 == nil }) else {
                 throw LiveProcessError.invalidConfiguration
             }
-            appServerArguments = ["app-server", "--listen", "stdio://"]
+            appServerArguments = [
+                "app-server", "--listen", "stdio://", "--strict-config",
+            ]
             additionalEnvironment = [:]
         }
         return try .init(

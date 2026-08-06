@@ -234,6 +234,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             ))
             let helperThreadID = try await awaitTypedThread(
                 id: threadRequestID,
+                cwd: cwd,
                 currentCredential: &currentCredential,
                 codec: codec,
                 iterator: &iterator
@@ -264,7 +265,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 case .turnCompleted(let threadID, let turnID, let outcome)
                     where threadID == helperThreadID && turnID == helperTurnID:
                     guard outcome == .completed else {
-                        throw CodexTypedProtocolError.featureUnavailable
+                        throw CodexTypedProtocolError.providerFailed
                     }
                     sawTerminal = true
                 case .assistantTextDelta, .assistantMessageCompleted,
@@ -282,6 +283,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     try process.send(try codec.declineUnsupportedPermissionsApproval(
                         id: approvalID
                     ))
+                case .requestError:
+                    throw CodexTypedProtocolError.providerFailed
                 default:
                     throw CodexTypedProtocolError.featureUnavailable
                 }
@@ -304,12 +307,15 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     let message = try codec.decode(data)
                     switch message {
                     case .featureResponse(let responseID) where responseID == id,
-                         .threadStartResponse(let responseID, _) where responseID == id,
+                         .threadStartResponse(let responseID, _, _) where responseID == id,
                          .turnStartResponse(let responseID, _) where responseID == id,
                          .emptyResponse(let responseID) where responseID == id:
                         observed.insert(method)
-                    case .requestError(let responseID, _) where responseID == id:
-                        throw CodexTypedProtocolError.featureUnavailable
+                    case .requestError(let responseID, let code) where responseID == id:
+                        if code == -32601 || code == -32602 {
+                            throw CodexTypedProtocolError.featureUnavailable
+                        }
+                        throw CodexTypedProtocolError.providerFailed
                     case .credentialRefresh(let refreshID, let previousAccountID):
                         try await refreshCredential(
                             id: refreshID,
@@ -344,7 +350,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         } catch {
             await process.stop(onCleanupPending: onCleanupPending)
             if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
-            throw CodexTypedProtocolError.featureUnavailable
+            throw error
         }
     }
 
@@ -647,6 +653,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 ))
                 let helperThreadID = try await awaitTypedThread(
                     id: threadRequestID,
+                    cwd: cwd,
                     currentCredential: &currentCredential,
                     codec: codec,
                     iterator: &iterator
@@ -782,6 +789,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     private func awaitTypedThread(
         id: String,
+        cwd: String,
         currentCredential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
         iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
@@ -790,10 +798,14 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var startedThreadID: String?
         while let data = try await iterator.next() {
             switch try codec.decode(data) {
-            case .threadStartResponse(let responseID, let threadID) where responseID == id:
+            case .threadStartResponse(let responseID, let threadID, let authority)
+                where responseID == id:
                 guard responseThreadID == nil else {
                     throw CodexTypedProtocolError.invalidSequence
                 }
+                guard authority.cwd == cwd,
+                      authority.runtimeWorkspaceRoots == [cwd]
+                else { throw CodexTypedProtocolError.invalidField }
                 responseThreadID = threadID
             case .threadStarted(let threadID):
                 guard startedThreadID == nil else {
@@ -841,9 +853,15 @@ public final class CodexAppServerClient: @unchecked Sendable {
         while let data = try await iterator.next() {
             switch try codec.decode(data) {
             case .turnStartResponse(let responseID, let turnID) where responseID == id:
+                guard responseTurnID == nil else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
                 responseTurnID = turnID
             case .turnStarted(let startedThreadID, let turnID)
                 where startedThreadID == threadID:
+                guard startedTurnID == nil else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
                 startedTurnID = turnID
             case .ignored, .threadStarted:
                 continue

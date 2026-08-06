@@ -67,6 +67,37 @@ function initializeResult() {
   };
 }
 
+function typedThreadStartResult(id, cwd) {
+  const returnedCwd = mode === "typed-authority-wrong-cwd"
+    ? "/private/tmp/other"
+    : cwd;
+  const result = {
+    approvalPolicy: "never",
+    cwd: returnedCwd,
+    runtimeWorkspaceRoots: mode === "typed-authority-wrong-root"
+      ? ["/private/tmp/other"]
+      : [returnedCwd],
+    activePermissionProfile: {
+      id: mode === "typed-authority-wrong-profile"
+        ? "wrong"
+        : "miller-typed-read-only",
+    },
+    sandbox: {
+      type: mode === "typed-authority-writable" ? "workspaceWrite" : "readOnly",
+      networkAccess: mode === "typed-authority-network",
+    },
+    thread: {
+      id,
+      cwd: returnedCwd,
+      ephemeral: mode !== "typed-authority-persistent",
+    },
+  };
+  if (mode === "typed-authority-missing-profile") {
+    delete result.activePermissionProfile;
+  }
+  return result;
+}
+
 const answerSDP = "v=0\r\ns=-\r\n";
 
 function emitRealtimeStarted() {
@@ -202,7 +233,8 @@ lines.on("line", (line) => {
   }
   const request = JSON.parse(line);
   if (mode.startsWith("typed-")) {
-    if ((mode === "typed-record" || mode === "typed-probe-record") && pidPath) {
+    if ((mode === "typed-record" || mode === "typed-probe-record" ||
+         mode.startsWith("typed-authority-")) && pidPath) {
       fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 });
     }
     if (request.method === "initialize") {
@@ -230,13 +262,20 @@ lines.on("line", (line) => {
         send({ id: request.id, error: { code: -32000, message: "bridge unavailable" } });
         return;
       }
+      if (mode === "typed-probe-malformed") {
+        process.stdout.write("{malformed\n");
+        return;
+      }
       if (mode === "typed-startup-wait") {
         if (pidPath) fs.writeFileSync(pidPath, "thread-start-pending\n", { mode: 0o600 });
         return;
       }
       helperThreadCreated = true;
       threadId = "typed-thread-1";
-      const response = { id: request.id, result: { thread: { id: threadId } } };
+      const response = {
+        id: request.id,
+        result: typedThreadStartResult(threadId, request.params.cwd),
+      };
       const started = () => notify("thread/started", { thread: { id: threadId } });
       if (mode === "typed-thread-notification-first") {
         started();
@@ -269,18 +308,56 @@ lines.on("line", (line) => {
         threadId,
         turn: { id: typedTurnId, status: "inProgress", items: [], error: null },
       });
-      if (mode === "typed-turn-notification-first") {
+      if (mode === "typed-turn-duplicate-response-same" ||
+          mode === "typed-turn-duplicate-response-different") {
+        send(typedTurnResponse);
+        send({ id: request.id, result: {
+          turn: {
+            id: mode.endsWith("different") ? "typed-turn-other" : typedTurnId,
+            status: "inProgress", items: [], error: null,
+          },
+        } });
+        emitTypedTurnStarted();
+      } else if (mode === "typed-turn-duplicate-notification-same" ||
+                 mode === "typed-turn-duplicate-notification-different") {
+        emitTypedTurnStarted();
+        notify("turn/started", {
+          threadId,
+          turn: {
+            id: mode.endsWith("different") ? "typed-turn-other" : typedTurnId,
+            status: "inProgress", items: [], error: null,
+          },
+        });
+        send(typedTurnResponse);
+      } else if (mode === "typed-turn-notification-first") {
         emitTypedTurnStarted();
         send(typedTurnResponse);
       } else {
         send(typedTurnResponse);
         emitTypedTurnStarted();
       }
+      if (mode.startsWith("typed-turn-duplicate-")) return;
       if (mode === "typed-wait") {
         if (pidPath) fs.writeFileSync(pidPath, "turn-started\n", { mode: 0o600 });
         return;
       }
       if (mode.startsWith("typed-probe-")) {
+        if (mode === "typed-probe-refresh-unavailable" ||
+            mode === "typed-probe-refresh-rejected") {
+          send({
+            id: "typed-probe-refresh-1",
+            method: "account/chatgptAuthTokens/refresh",
+            params: { reason: "unauthorized", previousAccountId: "account-1" },
+          });
+          return;
+        }
+        if (mode === "typed-probe-post-admission-error") {
+          send({
+            id: "typed-probe-post-admission-error-1",
+            error: { code: -32000, message: "provider execution failed" },
+          });
+          return;
+        }
         if (mode !== "typed-probe-no-stream") {
           notify("item/agentMessage/delta", {
             threadId, turnId: typedTurnId, itemId: "typed-probe-message-1", delta: "OK",
@@ -290,9 +367,14 @@ lines.on("line", (line) => {
           threadId,
           turn: {
             id: typedTurnId,
-            status: mode === "typed-probe-failed-terminal" ? "failed" : "completed",
+            status: mode === "typed-probe-failed-terminal"
+              ? "failed"
+              : mode === "typed-probe-interrupted-terminal"
+                ? "interrupted"
+                : "completed",
             items: [],
-            error: mode === "typed-probe-failed-terminal"
+            error: mode === "typed-probe-failed-terminal" ||
+              mode === "typed-probe-interrupted-terminal"
               ? { message: "probe failed" }
               : null,
           },
@@ -342,6 +424,19 @@ lines.on("line", (line) => {
             threadId, turnId: typedTurnId, itemId: "typed-message-1", delta: "x",
           });
         }
+        return;
+      }
+      if (mode === "typed-burst") {
+        for (let index = 0; index < 64; index += 1) {
+          notify("item/agentMessage/delta", {
+            threadId, turnId: typedTurnId,
+            itemId: "typed-message-1", delta: "x",
+          });
+        }
+        notify("turn/completed", {
+          threadId,
+          turn: { id: typedTurnId, status: "completed", items: [], error: null },
+        });
         return;
       }
       if (mode === "typed-hidden-only") {

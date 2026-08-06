@@ -104,6 +104,95 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         }
     }
 
+    private final class FrameQueue: @unchecked Sendable {
+        private enum Terminal {
+            case finished
+            case failed(Error)
+        }
+
+        private let condition = NSCondition()
+        private let maximumFrames = 128
+        private let maximumBytes = 4 * 1_048_576
+        private var frames: [Data] = []
+        private var queuedBytes = 0
+        private var waiter: CheckedContinuation<Data?, Error>?
+        private var terminal: Terminal?
+
+        func enqueue(_ frame: Data) -> Bool {
+            condition.lock()
+            while terminal == nil, waiter == nil,
+                  frames.count >= maximumFrames
+                    || queuedBytes + frame.count > maximumBytes
+            {
+                condition.wait()
+            }
+            guard terminal == nil else {
+                condition.unlock()
+                return false
+            }
+            if let waiter {
+                self.waiter = nil
+                condition.unlock()
+                waiter.resume(returning: frame)
+            } else {
+                frames.append(frame)
+                queuedBytes += frame.count
+                condition.unlock()
+            }
+            return true
+        }
+
+        func next() async throws -> Data? {
+            try await withCheckedThrowingContinuation { continuation in
+                condition.lock()
+                if !frames.isEmpty {
+                    let frame = frames.removeFirst()
+                    queuedBytes -= frame.count
+                    condition.signal()
+                    condition.unlock()
+                    continuation.resume(returning: frame)
+                    return
+                }
+                if let terminal {
+                    condition.unlock()
+                    switch terminal {
+                    case .finished:
+                        continuation.resume(returning: nil)
+                    case .failed(let error):
+                        continuation.resume(throwing: error)
+                    }
+                    return
+                }
+                guard waiter == nil else {
+                    condition.unlock()
+                    continuation.resume(throwing: LiveProcessError.invalidFrame)
+                    return
+                }
+                waiter = continuation
+                condition.unlock()
+            }
+        }
+
+        func finish(throwing error: Error? = nil) {
+            condition.lock()
+            guard terminal == nil else {
+                condition.unlock()
+                return
+            }
+            terminal = error.map(Terminal.failed) ?? .finished
+            let waiter = self.waiter
+            self.waiter = nil
+            condition.broadcast()
+            condition.unlock()
+            guard let waiter else { return }
+            if let error {
+                waiter.resume(throwing: error)
+            } else {
+                waiter.resume(returning: nil)
+            }
+        }
+    }
+
     private final class State: @unchecked Sendable {
         let lock = NSLock()
         let transportLock = NSLock()
@@ -111,7 +200,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         var input: Int32?
         var output: Int32?
         var error: Int32?
-        var continuation: AsyncThrowingStream<Data, Error>.Continuation?
+        var frameQueue: FrameQueue?
         var buffer = Data()
         var running = false
         var exitStatus: Int32?
@@ -219,13 +308,13 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         _ = fcntl(stdinPipe[1], F_SETFD, FD_CLOEXEC)
         _ = fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
         _ = fcntl(stderrPipe[0], F_SETFD, FD_CLOEXEC)
-        var captured: AsyncThrowingStream<Data, Error>.Continuation?
-        let stream = AsyncThrowingStream<Data, Error>(bufferingPolicy: .bufferingOldest(8)) {
-            captured = $0
-        }
+        let frameQueue = FrameQueue()
+        let stream = AsyncThrowingStream<Data, Error>(unfolding: {
+            try await frameQueue.next()
+        })
         state.locked {
             $0.pid = pid; $0.input = stdinPipe[1]; $0.output = stdoutPipe[0]
-            $0.error = stderrPipe[0]; $0.continuation = captured
+            $0.error = stderrPipe[0]; $0.frameQueue = frameQueue
             $0.buffer = Data(); $0.running = true; $0.exitStatus = nil
             $0.terminationRequested = false; $0.cleanupPendingReported = false
         }
@@ -390,18 +479,13 @@ public final class CodexAppServerProcess: @unchecked Sendable {
                     }
                     return frames
                 }
-                guard let continuation = state.locked(\.continuation) else { return }
+                guard let frameQueue = state.locked(\.frameQueue) else { return }
                 for frame in frames {
-                    switch continuation.yield(frame) {
-                    case .enqueued: break
-                    case .dropped: throw LiveProcessError.invalidFrame
-                    case .terminated: return
-                    @unknown default: throw LiveProcessError.invalidFrame
-                    }
+                    guard frameQueue.enqueue(frame) else { return }
                 }
             }
         } catch {
-            state.locked(\.continuation)?.finish(throwing: error)
+            state.locked(\.frameQueue)?.finish(throwing: error)
             signalGroup(pid, signal: SIGTERM)
         }
     }
@@ -423,18 +507,18 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             : 128 + terminationSignal
         _ = removePrivateRoot(root, parent: parent)
         state.transportLock.lock()
-        let (continuation, requested) = state.locked {
-            value -> (AsyncThrowingStream<Data, Error>.Continuation?, Bool) in
+        let (frameQueue, requested) = state.locked {
+            value -> (FrameQueue?, Bool) in
             guard value.pid == pid else { return (nil, value.terminationRequested) }
             if let input = value.input { Darwin.close(input) }
             value.input = nil; value.output = nil; value.error = nil
             value.pid = nil; value.running = false; value.exitStatus = exitCode
-            let continuation = value.continuation; value.continuation = nil
-            return (continuation, value.terminationRequested)
+            let frameQueue = value.frameQueue; value.frameQueue = nil
+            return (frameQueue, value.terminationRequested)
         }
         state.transportLock.unlock()
-        if exitCode == 0 || requested { continuation?.finish() }
-        else { continuation?.finish(throwing: LiveProcessError.helperExited) }
+        if exitCode == 0 || requested { frameQueue?.finish() }
+        else { frameQueue?.finish(throwing: LiveProcessError.helperExited) }
     }
 
     private static func removePrivateRoot(_ root: URL, parent: URL) -> Bool {

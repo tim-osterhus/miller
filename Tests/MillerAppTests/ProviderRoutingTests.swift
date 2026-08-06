@@ -30,6 +30,19 @@ struct ProviderRoutingTests {
         })
         #expect(!configuration.arguments.joined().contains(token))
         #expect(configuration.environment["MILLER_CAPABILITY_RPC_TOKEN"] == token)
+        #expect(configuration.arguments.suffix(4) == [
+            "app-server", "--listen", "stdio://", "--strict-config",
+        ])
+
+        let withoutBridge = try AppCoordinator.typedCodexProcessConfiguration(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller"),
+            environment: [:],
+            spawnedProcessVerifier: { _ in }
+        )
+        #expect(withoutBridge.arguments.suffix(4) == [
+            "app-server", "--listen", "stdio://", "--strict-config",
+        ])
 
         #expect(throws: (any Error).self) {
             _ = try AppCoordinator.typedCodexProcessConfiguration(

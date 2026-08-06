@@ -127,6 +127,41 @@ struct CodexTypedProtocolTests {
     }
 
     @Test
+    func requiresReturnedReadOnlyThreadAuthority() throws {
+        let cwd = "/private/tmp/miller"
+        let valid = try codec.decode(frame(threadStartResponse(cwd: cwd)))
+        #expect(valid == .threadStartResponse(
+            id: "typed:thread-start",
+            threadID: "thr_1",
+            authority: .init(
+                permissionProfileID: "miller-typed-read-only",
+                cwd: cwd,
+                runtimeWorkspaceRoots: [cwd],
+                sandboxType: "readOnly",
+                networkAccess: false,
+                ephemeral: true
+            )
+        ))
+
+        var invalidResponses: [[String: Any]] = []
+        var missingProfile = threadStartResponse(cwd: cwd)
+        missingProfile["result"] = threadStartResult(cwd: cwd, profileID: nil)
+        invalidResponses.append(missingProfile)
+        invalidResponses.append(threadStartResponse(cwd: cwd, profileID: "wrong"))
+        invalidResponses.append(threadStartResponse(cwd: cwd, sandboxType: "workspaceWrite"))
+        invalidResponses.append(threadStartResponse(cwd: cwd, networkAccess: true))
+        invalidResponses.append(threadStartResponse(
+            cwd: cwd, runtimeWorkspaceRoots: ["/private/tmp/other"]
+        ))
+        invalidResponses.append(threadStartResponse(cwd: cwd, ephemeral: false))
+        for response in invalidResponses {
+            #expect(throws: CodexTypedProtocolError.invalidField) {
+                _ = try codec.decode(frame(response))
+            }
+        }
+    }
+
+    @Test
     func projectsSafeCapabilityKindsAndIgnoresSensitiveItems() throws {
         for (item, expected) in [
             (["type": "webSearch", "id": "item_1"], CodexTypedCapabilityKind.webSearch),
@@ -267,5 +302,47 @@ struct CodexTypedProtocolTests {
 
     private func frame(_ value: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: value)
+    }
+
+    private func threadStartResponse(
+        cwd: String,
+        profileID: String? = "miller-typed-read-only",
+        sandboxType: String = "readOnly",
+        networkAccess: Bool = false,
+        runtimeWorkspaceRoots: [String]? = nil,
+        ephemeral: Bool = true
+    ) -> [String: Any] {
+        [
+            "id": "typed:thread-start",
+            "result": threadStartResult(
+                cwd: cwd,
+                profileID: profileID,
+                sandboxType: sandboxType,
+                networkAccess: networkAccess,
+                runtimeWorkspaceRoots: runtimeWorkspaceRoots,
+                ephemeral: ephemeral
+            ),
+        ]
+    }
+
+    private func threadStartResult(
+        cwd: String,
+        profileID: String?,
+        sandboxType: String = "readOnly",
+        networkAccess: Bool = false,
+        runtimeWorkspaceRoots: [String]? = nil,
+        ephemeral: Bool = true
+    ) -> [String: Any] {
+        var result: [String: Any] = [
+            "approvalPolicy": "never",
+            "cwd": cwd,
+            "runtimeWorkspaceRoots": runtimeWorkspaceRoots ?? [cwd],
+            "sandbox": ["type": sandboxType, "networkAccess": networkAccess],
+            "thread": ["id": "thr_1", "cwd": cwd, "ephemeral": ephemeral],
+        ]
+        if let profileID {
+            result["activePermissionProfile"] = ["id": profileID]
+        }
+        return result
     }
 }

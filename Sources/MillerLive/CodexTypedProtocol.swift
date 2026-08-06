@@ -40,10 +40,37 @@ public enum CodexTypedCapabilityPhase: String, Equatable, Sendable {
     case failed
 }
 
+public struct CodexTypedThreadAuthority: Equatable, Sendable {
+    public let permissionProfileID: String
+    public let cwd: String
+    public let runtimeWorkspaceRoots: [String]
+    public let sandboxType: String
+    public let networkAccess: Bool
+    public let ephemeral: Bool
+
+    public init(
+        permissionProfileID: String,
+        cwd: String,
+        runtimeWorkspaceRoots: [String],
+        sandboxType: String,
+        networkAccess: Bool,
+        ephemeral: Bool
+    ) {
+        self.permissionProfileID = permissionProfileID
+        self.cwd = cwd
+        self.runtimeWorkspaceRoots = runtimeWorkspaceRoots
+        self.sandboxType = sandboxType
+        self.networkAccess = networkAccess
+        self.ephemeral = ephemeral
+    }
+}
+
 public enum CodexTypedMessage: Equatable, Sendable {
     case initializeResponse(id: String)
     case loginResponse(id: String)
-    case threadStartResponse(id: String, threadID: String)
+    case threadStartResponse(
+        id: String, threadID: String, authority: CodexTypedThreadAuthority
+    )
     case threadStarted(threadID: String)
     case turnStartResponse(id: String, turnID: String)
     case turnStarted(threadID: String, turnID: String)
@@ -285,9 +312,11 @@ public struct CodexTypedProtocol: Sendable {
         if id.hasSuffix(":initialize") { return .initializeResponse(id: id) }
         if id.hasSuffix(":login") { return .loginResponse(id: id) }
         if id.hasSuffix(":thread") || id.hasSuffix(":thread-start") {
+            let thread = try requireObject(result["thread"])
             return .threadStartResponse(
                 id: id,
-                threadID: try identifier(try requireObject(result["thread"]), key: "id")
+                threadID: try identifier(thread, key: "id"),
+                authority: try threadAuthority(result: result, thread: thread)
             )
         }
         if id.hasSuffix(":turn-start") {
@@ -435,6 +464,47 @@ public struct CodexTypedProtocol: Sendable {
         }
         try validateText(value)
         return value
+    }
+
+    private func threadAuthority(
+        result: [String: Any],
+        thread: [String: Any]
+    ) throws -> CodexTypedThreadAuthority {
+        guard result["approvalPolicy"] as? String == "never" else {
+            throw CodexTypedProtocolError.invalidField
+        }
+        let profile = try requireObject(result["activePermissionProfile"])
+        let profileID = try identifier(profile, key: "id")
+        guard profileID == Self.permissionProfileID else {
+            throw CodexTypedProtocolError.invalidField
+        }
+        let cwd = try text(result, key: "cwd")
+        try validateAbsolutePath(cwd)
+        guard try text(thread, key: "cwd") == cwd,
+              thread["ephemeral"] as? Bool == true
+        else { throw CodexTypedProtocolError.invalidField }
+
+        let roots = try requireArray(result["runtimeWorkspaceRoots"]).map { value in
+            guard let path = value as? String else {
+                throw CodexTypedProtocolError.invalidField
+            }
+            try validateAbsolutePath(path)
+            return path
+        }
+        guard roots == [cwd] else { throw CodexTypedProtocolError.invalidField }
+
+        let sandbox = try requireObject(result["sandbox"])
+        guard sandbox["type"] as? String == "readOnly",
+              sandbox["networkAccess"] as? Bool == false
+        else { throw CodexTypedProtocolError.invalidField }
+        return .init(
+            permissionProfileID: profileID,
+            cwd: cwd,
+            runtimeWorkspaceRoots: roots,
+            sandboxType: "readOnly",
+            networkAccess: false,
+            ephemeral: true
+        )
     }
 
     private func validateIdentifier(_ value: String) throws {

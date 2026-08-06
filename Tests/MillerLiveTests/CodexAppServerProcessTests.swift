@@ -65,12 +65,13 @@ struct CodexAppServerProcessTests {
     }
 
     @Test
-    func stalledConsumerOverflowTerminatesBoundedOutputTransport() async throws {
+    func stalledConsumerBackpressuresBoundedOutputUntilOperatorStop() async throws {
         let process = CodexAppServerProcess(configuration: try configuration(mode: "flood-output"))
         _ = try process.start()
-        await #expect(throws: LiveProcessError.helperExited) {
-            try await process.waitForExit(timeout: .seconds(2))
-        }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(process.isRunning)
+        #expect(FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+        await process.stop()
         #expect(!process.isRunning)
         #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
     }

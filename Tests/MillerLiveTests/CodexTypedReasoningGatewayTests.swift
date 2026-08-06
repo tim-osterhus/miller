@@ -51,6 +51,28 @@ struct CodexTypedReasoningGatewayTests {
     }
 
     @Test
+    func rejectsDuplicateTurnAdmissionAuthority() async throws {
+        for mode in [
+            "typed-turn-duplicate-response-same",
+            "typed-turn-duplicate-response-different",
+            "typed-turn-duplicate-notification-same",
+            "typed-turn-duplicate-notification-different",
+        ] {
+            let factory = TypedClientFactory(mode: mode)
+            let gateway = CodexTypedReasoningGateway(
+                makeClient: { try factory.makeClient() }, credential: { credential },
+                model: { "gpt-5.6-terra" }, cwd: repository.path,
+                timeout: .milliseconds(500)
+            )
+            await #expect(throws: CodexTypedProtocolError.invalidSequence) {
+                _ = try await collect(try await gateway.start(request(
+                    context: [], userText: "hello"
+                )))
+            }
+        }
+    }
+
+    @Test
     func acceptsThreadStartedBeforeThreadStartResponse() async throws {
         let factory = TypedClientFactory(mode: "typed-thread-notification-first")
         let gateway = CodexTypedReasoningGateway(
@@ -201,7 +223,7 @@ struct CodexTypedReasoningGatewayTests {
 
     @Test
     func rejectsStaleAndOversizeProviderSequencesWithoutLeakingSensitiveItems() async throws {
-        for mode in ["typed-stale", "typed-too-many", "typed-hidden-only"] {
+        for mode in ["typed-stale", "typed-hidden-only"] {
             let factory = TypedClientFactory(mode: mode)
             let gateway = CodexTypedReasoningGateway(
                 makeClient: { try factory.makeClient() }, credential: { credential },
@@ -222,6 +244,70 @@ struct CodexTypedReasoningGatewayTests {
             #expect(factory.createdRoots.allSatisfy {
                 !FileManager.default.fileExists(atPath: $0.path)
             })
+        }
+    }
+
+    @Test
+    func transportsLegitimateBurstsAndPreservesSemanticItemLimit() async throws {
+        let burst = TypedClientFactory(mode: "typed-burst")
+        let burstGateway = CodexTypedReasoningGateway(
+            makeClient: { try burst.makeClient() }, credential: { credential },
+            model: { "gpt-5.6-terra" }, cwd: repository.path
+        )
+        let burstEvents = try await collect(try await burstGateway.start(request(
+            context: [], userText: "burst"
+        )))
+        #expect(burstEvents.filter {
+            if case .textDelta = $0 { return true }
+            return false
+        }.count == 64)
+        #expect(burstEvents.last == .completed)
+
+        let overflow = TypedClientFactory(mode: "typed-too-many")
+        let overflowGateway = CodexTypedReasoningGateway(
+            makeClient: { try overflow.makeClient() }, credential: { credential },
+            model: { "gpt-5.6-terra" }, cwd: repository.path
+        )
+        await #expect(throws: CodexTypedProtocolError.tooManyItems) {
+            _ = try await collect(try await overflowGateway.start(request(
+                context: [], userText: "overflow"
+            )))
+        }
+    }
+
+    @Test
+    func rejectsWrongReturnedThreadAuthorityBeforeTurnInput() async throws {
+        for mode in [
+            "typed-authority-missing-profile",
+            "typed-authority-wrong-profile",
+            "typed-authority-writable",
+            "typed-authority-network",
+            "typed-authority-wrong-root",
+            "typed-authority-wrong-cwd",
+            "typed-authority-persistent",
+        ] {
+            let marker = repository.appendingPathComponent(
+                ".artifacts/\(mode)-\(UUID().uuidString.lowercased()).jsonl"
+            )
+            defer { try? FileManager.default.removeItem(at: marker) }
+            let factory = TypedClientFactory(mode: mode, extraArguments: [marker.path])
+            let gateway = CodexTypedReasoningGateway(
+                makeClient: { try factory.makeClient() }, credential: { credential },
+                model: { "gpt-5.6-terra" }, cwd: repository.path
+            )
+            await #expect(throws: CodexTypedProtocolError.invalidField) {
+                _ = try await collect(try await gateway.start(request(
+                    context: [], userText: "must not be sent"
+                )))
+            }
+            let methods = try String(contentsOf: marker, encoding: .utf8)
+                .split(separator: "\n")
+                .compactMap { line -> String? in
+                    let value = try JSONSerialization.jsonObject(with: Data(line.utf8))
+                    return (value as? [String: Any])?["method"] as? String
+                }
+            #expect(methods.contains("thread/start"))
+            #expect(!methods.contains("turn/start"))
         }
     }
 
@@ -305,14 +391,32 @@ struct CodexTypedReasoningGatewayTests {
         let failedAfterStreaming = try TypedClientFactory(
             mode: "typed-probe-failed-terminal"
         ).makeClient()
-        await #expect(throws: CodexTypedProtocolError.featureUnavailable) {
+        await #expect(throws: CodexTypedProtocolError.providerFailed) {
             _ = try await failedAfterStreaming.probeTypedFeatures(
                 credential: credential, model: "gpt-5.6-terra",
                 cwd: repository.path, timeout: .seconds(2)
             )
         }
+        let interruptedAfterStreaming = try TypedClientFactory(
+            mode: "typed-probe-interrupted-terminal"
+        ).makeClient()
+        await #expect(throws: CodexTypedProtocolError.providerFailed) {
+            _ = try await interruptedAfterStreaming.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
+        let postAdmissionError = try TypedClientFactory(
+            mode: "typed-probe-post-admission-error"
+        ).makeClient()
+        await #expect(throws: CodexTypedProtocolError.providerFailed) {
+            _ = try await postAdmissionError.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
         let failedThread = try TypedClientFactory(mode: "typed-thread-failure").makeClient()
-        await #expect(throws: CodexTypedProtocolError.featureUnavailable) {
+        await #expect(throws: CodexTypedProtocolError.providerFailed) {
             _ = try await failedThread.probeTypedFeatures(
                 credential: credential, model: "gpt-5.6-terra",
                 cwd: repository.path, timeout: .seconds(2)
@@ -343,6 +447,57 @@ struct CodexTypedReasoningGatewayTests {
         })
         let threadParams = try #require(threadStart["params"] as? [String: Any])
         #expect(threadParams["model"] as? String == selectedModel)
+    }
+
+    @Test
+    func readinessPreservesAuthProcessAndProtocolFailureCategories() async throws {
+        let refreshUnavailable = try TypedClientFactory(
+            mode: "typed-probe-refresh-unavailable"
+        ).makeClient()
+        await #expect(throws: CodexAppServerClientError.refreshUnavailable) {
+            _ = try await refreshUnavailable.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
+
+        let refreshRejected = try TypedClientFactory(
+            mode: "typed-probe-refresh-rejected"
+        ).makeClient(refreshProvider: { accountID in
+            .init(
+                accessToken: credential.accessToken,
+                accountID: accountID,
+                planType: credential.planType
+            )
+        })
+        await #expect(throws: CodexAppServerClientError.credentialRejected) {
+            _ = try await refreshRejected.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
+
+        let malformed = try TypedClientFactory(mode: "typed-probe-malformed").makeClient()
+        await #expect(throws: CodexTypedProtocolError.malformedJSON) {
+            _ = try await malformed.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
+
+        let unavailable = CodexAppServerClient(
+            process: CodexAppServerProcess(configuration: try .init(
+                executableURL: URL(fileURLWithPath: "/private/tmp/miller-no-codex"),
+                arguments: ["app-server"],
+                temporaryParentURL: repository.appendingPathComponent(".artifacts")
+            ))
+        )
+        await #expect(throws: LiveProcessError.processUnavailable) {
+            _ = try await unavailable.probeTypedFeatures(
+                credential: credential, model: "gpt-5.6-terra",
+                cwd: repository.path, timeout: .seconds(2)
+            )
+        }
     }
 
     @Test
