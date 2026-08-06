@@ -1606,6 +1606,199 @@ final class AppPresentationModel: ObservableObject {
     }
 }
 
+enum ProviderRoutingError: Error, Equatable, Sendable {
+    case unsupportedProvider
+    case routeChangedDuringActiveTurn
+    case turnAlreadyActive
+}
+
+actor CodexTypedCredentialRefresher {
+    private let refreshSelected: @Sendable () async throws -> Void
+    private let loadSelected: @Sendable () async throws -> CodexOAuthCredential
+
+    init(
+        refreshSelected: @escaping @Sendable () async throws -> Void,
+        loadSelected: @escaping @Sendable () async throws -> CodexOAuthCredential
+    ) {
+        self.refreshSelected = refreshSelected
+        self.loadSelected = loadSelected
+    }
+
+    func refresh(
+        accountID: String,
+        previousAccessToken: Data? = nil
+    ) async throws -> CodexOAuthCredential {
+        try await refreshSelected()
+        let replacement = try await loadSelected()
+        guard replacement.accountID == accountID,
+              previousAccessToken == nil || replacement.accessToken != previousAccessToken
+        else { throw GPTLiveCredentialError.accountMismatch }
+        return replacement
+    }
+}
+
+private struct UnavailableReasoningGateway: ReasoningGateway {
+    func start(
+        _ request: ReasoningRequest
+    ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
+        _ = request
+        throw ProviderRoutingError.unsupportedProvider
+    }
+
+    func cancel(_ cancellation: ReasoningCancellation) async {
+        _ = cancellation
+    }
+}
+
+actor ProviderRoutingGateway: ReasoningGateway {
+    private struct ActiveRoute {
+        var kind: ProviderKind?
+        let turnID: TurnID
+        let generation: Int
+        var cancelled: Bool
+    }
+
+    private let selectedKind: @Sendable () async throws -> ProviderKind
+    private let codex: any ReasoningGateway
+    private let openAICompatible: any ReasoningGateway
+    private var active: ActiveRoute?
+
+    init(
+        selectedKind: @escaping @Sendable () async throws -> ProviderKind,
+        codex: any ReasoningGateway,
+        openAICompatible: any ReasoningGateway
+    ) {
+        self.selectedKind = selectedKind
+        self.codex = codex
+        self.openAICompatible = openAICompatible
+    }
+
+    func start(
+        _ request: ReasoningRequest
+    ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
+        if let active {
+            let selected = try await selectedKind()
+            guard active.kind == nil || active.kind == selected else {
+                throw ProviderRoutingError.routeChangedDuringActiveTurn
+            }
+            throw ProviderRoutingError.turnAlreadyActive
+        }
+        active = .init(
+            kind: nil,
+            turnID: request.turnID,
+            generation: request.generation,
+            cancelled: false
+        )
+        do {
+            let kind = try await selectedKind()
+            try requireActiveAdmission(request, assigning: kind)
+            let gateway = try gateway(for: kind)
+            let source = try await gateway.start(request)
+            guard isActive(request), active?.cancelled == false else {
+                await gateway.cancel(.init(
+                    turnID: request.turnID,
+                    targetGeneration: request.generation
+                ))
+                clear(turnID: request.turnID, generation: request.generation)
+                throw CancellationError()
+            }
+            return routedStream(source, request: request)
+        } catch {
+            clear(turnID: request.turnID, generation: request.generation)
+            throw error
+        }
+    }
+
+    private func routedStream(
+        _ source: AsyncThrowingStream<ReasoningEvent, Error>,
+        request: ReasoningRequest
+    ) -> AsyncThrowingStream<ReasoningEvent, Error> {
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in source {
+                        continuation.yield(event)
+                        if Self.isTerminal(event) { break }
+                    }
+                    self.clear(
+                        turnID: request.turnID,
+                        generation: request.generation
+                    )
+                    continuation.finish()
+                } catch {
+                    self.clear(
+                        turnID: request.turnID,
+                        generation: request.generation
+                    )
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+
+    func cancel(_ cancellation: ReasoningCancellation) async {
+        guard var active,
+              active.turnID == cancellation.turnID,
+              active.generation == cancellation.targetGeneration
+        else { return }
+        active.cancelled = true
+        self.active = active
+        guard let kind = active.kind,
+              let gateway = try? gateway(for: kind)
+        else { return }
+        await gateway.cancel(cancellation)
+    }
+
+    func resolveApproval(
+        callID: CapabilityCallID,
+        decision: CapabilityApprovalDecision
+    ) async throws {
+        guard let kind = active?.kind else {
+            throw ReasoningGatewayError.approvalUnsupported
+        }
+        try await gateway(for: kind).resolveApproval(
+            callID: callID, decision: decision
+        )
+    }
+
+    private func gateway(for kind: ProviderKind) throws -> any ReasoningGateway {
+        switch kind {
+        case .codexOAuth: codex
+        case .openAICompatible: openAICompatible
+        }
+    }
+
+    private func clear(turnID: TurnID, generation: Int) {
+        guard active?.turnID == turnID, active?.generation == generation else { return }
+        active = nil
+    }
+
+    private func isActive(_ request: ReasoningRequest) -> Bool {
+        active?.turnID == request.turnID && active?.generation == request.generation
+    }
+
+    private func requireActiveAdmission(
+        _ request: ReasoningRequest,
+        assigning kind: ProviderKind
+    ) throws {
+        guard var active,
+              active.turnID == request.turnID,
+              active.generation == request.generation,
+              !active.cancelled
+        else { throw CancellationError() }
+        active.kind = kind
+        self.active = active
+    }
+
+    private static func isTerminal(_ event: ReasoningEvent) -> Bool {
+        switch event {
+        case .completed, .stopped, .failed: true
+        default: false
+        }
+    }
+}
+
 @MainActor
 final class AppCoordinator: NSObject, NSMenuDelegate {
     let model: AppPresentationModel
@@ -1637,6 +1830,18 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             at: cacheURL,
             withIntermediateDirectories: true
         )
+        let credentialStore = KeychainCredentialStore()
+        let runtimeVerifier = CodexAppServerHelperVerifier()
+        let runtimeResolver = CodexRuntimeResolver(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            environment: environment,
+            verify: { try runtimeVerifier.verify($0) }
+        )
+        let runtimeSelection = try Self.liveRuntimeSelection(
+            arguments: arguments,
+            savedPath: CodexRuntimePreferences().loadPath(),
+            resolver: runtimeResolver
+        )
         let configuration = GatewayProcess.Configuration(
             executableURL: try Self.nodeURL(environment: environment),
             arguments: Self.helperArguments(
@@ -1652,7 +1857,50 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             ]
         )
         supervisor = GatewaySupervisor(configuration: configuration)
-        let gateway = JSONLReasoningGateway(
+        let typedRefreshHelper = GatewayCredentialHelper(supervisor: supervisor)
+        let typedRefreshCoordinator = CredentialCoordinator(
+            store: credentialStore,
+            helper: typedRefreshHelper,
+            profiles: repository
+        )
+        let credentialLoader = GPTLiveCredentialLoader(
+            load: { [credentialStore] reference in
+                try await credentialStore.load(for: reference)
+            }
+        )
+        let typedCredentialRefresher = CodexTypedCredentialRefresher(
+            refreshSelected: { [repository] in
+                guard let profile = try await repository.selectedProviderProfile(),
+                      profile.kind == .codexOAuth,
+                      try await repository.credentialIsInvalidated(
+                          reference: profile.credentialReference
+                      ) == false
+                else { throw GPTLiveCredentialError.unavailable }
+                try await typedRefreshHelper.authenticate(
+                    reference: profile.credentialReference,
+                    providerKind: .codexOAuth,
+                    refresh: true,
+                    openURL: { _ in },
+                    persistCandidate: { candidate in
+                        try await typedRefreshCoordinator.persistCandidate(
+                            candidate,
+                            for: profile.credentialReference,
+                            hasActiveTurn: false
+                        )
+                    }
+                )
+            },
+            loadSelected: { [repository] in
+                guard let profile = try await repository.selectedProviderProfile(),
+                      profile.kind == .codexOAuth,
+                      try await repository.credentialIsInvalidated(
+                          reference: profile.credentialReference
+                      ) == false
+                else { throw GPTLiveCredentialError.unavailable }
+                return try await credentialLoader.load(profile: profile)
+            }
+        )
+        let compatibleGateway = JSONLReasoningGateway(
             supervisor: supervisor,
             selectedProvider: { [repository] in
                 guard let profile = try await repository.selectedProviderProfile()
@@ -1666,6 +1914,65 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     credentialReference: profile.credentialReference
                 )
             }
+        )
+        let codexGateway: any ReasoningGateway
+        if let codexExecutableURL = runtimeSelection?.executableURL {
+            let typedRoot = cacheURL.appendingPathComponent(
+                "typed-codex", isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: typedRoot,
+                withIntermediateDirectories: true
+            )
+            codexGateway = CodexTypedReasoningGateway(
+                makeClient: {
+                    CodexAppServerClient(
+                        process: CodexAppServerProcess(
+                            configuration: try Self.typedCodexProcessConfiguration(
+                                executableURL: codexExecutableURL,
+                                temporaryParentURL: typedRoot,
+                                environment: environment,
+                                spawnedProcessVerifier: { pid in
+                                    try runtimeVerifier.verifyRunningProcess(
+                                        pid: pid,
+                                        expectedExecutableURL: codexExecutableURL
+                                    )
+                                }
+                            )
+                        ),
+                        refreshProvider: { accountID in
+                            try await typedCredentialRefresher.refresh(accountID: accountID)
+                        }
+                    )
+                },
+                credential: { [repository] in
+                    guard let profile = try await repository.selectedProviderProfile(),
+                          profile.kind == .codexOAuth,
+                          try await repository.credentialIsInvalidated(
+                              reference: profile.credentialReference
+                          ) == false
+                    else { throw GPTLiveCredentialError.unavailable }
+                    return try await credentialLoader.load(profile: profile)
+                },
+                model: { [repository] in
+                    guard let profile = try await repository.selectedProviderProfile(),
+                          profile.kind == .codexOAuth
+                    else { throw GPTLiveCredentialError.unavailable }
+                    return profile.model
+                },
+                cwd: typedRoot.path
+            )
+        } else {
+            codexGateway = UnavailableReasoningGateway()
+        }
+        let gateway = ProviderRoutingGateway(
+            selectedKind: { [repository] in
+                guard let profile = try await repository.selectedProviderProfile()
+                else { throw ProviderRoutingError.unsupportedProvider }
+                return profile.kind
+            },
+            codex: codexGateway,
+            openAICompatible: compatibleGateway
         )
         core = MillerCoordinator(repository: repository, gateway: gateway)
 
@@ -1690,13 +1997,48 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             delete: { [core] id in try await core.delete(conversationID: id) },
             reasoningStatus: { [core] in await core.activeReasoningStatus }
         )
-        let credentialStore = KeychainCredentialStore()
         providerController = ProviderSettingsController(
             repository: repository,
             credentials: credentialStore,
             supervisor: supervisor,
             databaseURL: URL(fileURLWithPath: databasePath),
-            cacheURL: cacheURL
+            cacheURL: cacheURL,
+            codexTypedReadiness: { profile in
+                guard let codexExecutableURL = runtimeSelection?.executableURL
+                else { throw ProviderRoutingError.unsupportedProvider }
+                let loader = GPTLiveCredentialLoader(
+                    load: { [credentialStore] reference in
+                        try await credentialStore.load(for: reference)
+                    }
+                )
+                let typedRoot = cacheURL.appendingPathComponent(
+                    "typed-codex", isDirectory: true
+                )
+                let client = CodexAppServerClient(
+                    process: CodexAppServerProcess(
+                        configuration: try Self.typedCodexProcessConfiguration(
+                            executableURL: codexExecutableURL,
+                            temporaryParentURL: typedRoot,
+                            environment: environment,
+                            spawnedProcessVerifier: { pid in
+                                try runtimeVerifier.verifyRunningProcess(
+                                    pid: pid,
+                                    expectedExecutableURL: codexExecutableURL
+                                )
+                            }
+                        )
+                    ),
+                    refreshProvider: { accountID in
+                        try await typedCredentialRefresher.refresh(accountID: accountID)
+                    }
+                )
+                return try await client.probeTypedFeatures(
+                    credential: try await loader.load(profile: profile),
+                    model: profile.model,
+                    cwd: typedRoot.path,
+                    timeout: .seconds(10)
+                )
+            }
         )
         let providerSettings = ProviderSettingsDependencies(
             load: { [providerController] in
@@ -1741,17 +2083,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             })
         })
         let liveVoice: LiveVoiceDependencies
-        let runtimeVerifier = CodexAppServerHelperVerifier()
-        let runtimeResolver = CodexRuntimeResolver(
-            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
-            environment: environment,
-            verify: { try runtimeVerifier.verify($0) }
-        )
-        let runtimeSelection = try Self.liveRuntimeSelection(
-            arguments: arguments,
-            savedPath: CodexRuntimePreferences().loadPath(),
-            resolver: runtimeResolver
-        )
         if let liveHelperURL = runtimeSelection?.executableURL {
             let liveRoot = cacheURL.appendingPathComponent("gpt-live", isDirectory: true)
             try FileManager.default.createDirectory(
@@ -2085,6 +2416,56 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         return arguments
     }
 
+    nonisolated static func typedCodexProcessConfiguration(
+        executableURL: URL,
+        temporaryParentURL: URL,
+        environment: [String: String],
+        spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void
+    ) throws -> CodexAppServerProcess.Configuration {
+        let bridgeKeys = [
+            "MILLER_CAPABILITY_BRIDGE_PATH",
+            "MILLER_CAPABILITY_RPC_SOCKET",
+            "MILLER_CAPABILITY_RPC_TOKEN",
+            "MILLER_CAPABILITY_PROVIDER_PROFILE_ID",
+            "MILLER_CAPABILITY_RPC_TRUSTED_PARENT",
+        ]
+        let values = bridgeKeys.map { environment[$0] }
+        let appServerArguments: [String]
+        let additionalEnvironment: [String: String]
+        if values.allSatisfy({ $0 != nil }),
+           let bridgePath = values[0],
+           let socketPath = values[1],
+           let token = values[2],
+           let profileText = values[3],
+           let profileID = UUID(uuidString: profileText),
+           let trustedParent = values[4]
+        {
+            let bridge = try CodexMCPBridgeConfiguration(
+                executableURL: URL(fileURLWithPath: bridgePath),
+                socketPath: socketPath,
+                sessionToken: token,
+                providerProfileID: profileID,
+                trustedParentPath: trustedParent
+            )
+            appServerArguments = bridge.appServerArguments()
+            additionalEnvironment = bridge.additionalEnvironment
+        } else {
+            guard values.allSatisfy({ $0 == nil }) else {
+                throw LiveProcessError.invalidConfiguration
+            }
+            appServerArguments = ["app-server", "--listen", "stdio://"]
+            additionalEnvironment = [:]
+        }
+        return try .init(
+            executableURL: executableURL,
+            arguments: CodexTypedProtocol.permissionProfileArguments
+                + appServerArguments,
+            temporaryParentURL: temporaryParentURL,
+            additionalEnvironment: additionalEnvironment,
+            spawnedProcessVerifier: spawnedProcessVerifier
+        )
+    }
+
     private static func cacheURL(environment: [String: String]) -> URL {
         if let path = environment["MILLER_CACHE_PATH"] {
             return URL(fileURLWithPath: path, isDirectory: true)
@@ -2144,13 +2525,20 @@ private actor ProviderSettingsController {
     private let supervisor: GatewaySupervisor
     private let databaseURL: URL
     private let cacheURL: URL
+    private let codexTypedReadiness: @Sendable (
+        ProviderProfile
+    ) async throws -> CodexTypedReadiness
+    private var typedReadinessConfirmed = false
 
     init(
         repository: SQLiteConversationRepository,
         credentials: KeychainCredentialStore,
         supervisor: GatewaySupervisor,
         databaseURL: URL,
-        cacheURL: URL
+        cacheURL: URL,
+        codexTypedReadiness: @escaping @Sendable (
+            ProviderProfile
+        ) async throws -> CodexTypedReadiness
     ) {
         self.repository = repository
         self.credentials = credentials
@@ -2168,6 +2556,7 @@ private actor ProviderSettingsController {
         )
         self.databaseURL = databaseURL
         self.cacheURL = cacheURL
+        self.codexTypedReadiness = codexTypedReadiness
     }
 
     func snapshot() async throws -> ProviderSettingsSnapshot {
@@ -2212,6 +2601,24 @@ private actor ProviderSettingsController {
                 codexModels: codexModels,
                 codexDefaultModel: codexDefaultModel
             )
+        }
+        if selected.kind == .codexOAuth, !typedReadinessConfirmed {
+            do {
+                let observed = try await codexTypedReadiness(selected)
+                guard observed.supportsOrdinaryTurns,
+                      observed.supportsApps,
+                      observed.supportsMCPStatus,
+                      observed.supportsSkills
+                else { throw CodexTypedProtocolError.featureUnavailable }
+                typedReadinessConfirmed = true
+            } catch {
+                return .init(
+                    profiles: profiles.map(ProviderSettingsProfile.init),
+                    readiness: "External Codex protocol unavailable",
+                    codexModels: codexModels,
+                    codexDefaultModel: codexDefaultModel
+                )
+            }
         }
         let readiness: String
         do {
@@ -2394,7 +2801,8 @@ private actor ProviderSettingsController {
     }
 
     func retryReadiness() async throws -> ProviderSettingsSnapshot {
-        try await snapshot()
+        typedReadinessConfirmed = false
+        return try await snapshot()
     }
 
     func localLogout(hasActiveTurn: Bool) async throws {

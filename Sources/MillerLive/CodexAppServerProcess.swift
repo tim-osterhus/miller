@@ -27,6 +27,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             temporaryParentURL: URL,
             terminationGrace: Duration = .seconds(2),
             cleanupPendingDelay: Duration = .seconds(2),
+            additionalEnvironment: [String: String] = [:],
             spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in }
         ) throws {
             try self.init(
@@ -35,6 +36,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
                 temporaryParentURL: temporaryParentURL,
                 terminationGrace: terminationGrace,
                 cleanupPendingDelay: cleanupPendingDelay,
+                additionalEnvironment: additionalEnvironment,
                 spawnedProcessVerifier: spawnedProcessVerifier,
                 testRealtimeFeatureConfig: Data(
                     """
@@ -55,6 +57,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             temporaryParentURL: URL,
             terminationGrace: Duration = .seconds(2),
             cleanupPendingDelay: Duration = .seconds(2),
+            additionalEnvironment: [String: String] = [:],
             spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in },
             testRealtimeFeatureConfig: Data?
         ) throws {
@@ -74,13 +77,30 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             self.cleanupPendingDelay = cleanupPendingDelay
             self.spawnedProcessVerifier = spawnedProcessVerifier
             realtimeFeatureConfig = testRealtimeFeatureConfig
-            environment = [
+            let baseline = [
                 "HOME": root.path,
                 "CODEX_HOME": root.appendingPathComponent("codex-home").path,
                 "TMPDIR": root.appendingPathComponent("tmp").path,
                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "NO_COLOR": "1",
             ]
+            let reserved = Set(baseline.keys)
+            guard additionalEnvironment.count <= 16,
+                  additionalEnvironment.allSatisfy({ key, value in
+                      !reserved.contains(key)
+                          && !key.isEmpty && key.utf8.count <= 128
+                          && key.unicodeScalars.first.map {
+                              $0.value == 95 || (65...90).contains($0.value)
+                          } == true
+                          && key.unicodeScalars.allSatisfy {
+                              $0.value == 95 || (65...90).contains($0.value)
+                                  || (48...57).contains($0.value)
+                          }
+                          && value.utf8.count <= 4_096
+                          && !value.utf8.contains(0)
+                  })
+            else { throw LiveProcessError.invalidConfiguration }
+            environment = baseline.merging(additionalEnvironment) { current, _ in current }
         }
     }
 

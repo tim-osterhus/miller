@@ -60,6 +60,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var realtimeStarted = false
     }
     private enum StopAction { case none, send(String, String), cancelStartup, retainUntilAdmission }
+    private enum TypedStopAction {
+        case none
+        case interrupt(String, String, String)
+        case cancelStartup
+    }
 
     private final class State: @unchecked Sendable {
         let lock = NSLock()
@@ -78,6 +83,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var nextAppendOrdinal = 0
         var pendingAppendIDs: Set<String> = []
         var acknowledgedAppendIDs: Set<String> = []
+        var typedThreadID: String?
+        var typedTurnID: String?
+        var typedInterruptID: String?
+        var typedActive = false
 
         func locked<T>(_ body: (State) throws -> T) rethrows -> T {
             lock.lock(); defer { lock.unlock() }
@@ -120,6 +129,224 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     public var sessionState: LiveSessionState { state.locked { $0.contract.state } }
     public var unacknowledgedAudioCount: Int { state.locked { $0.pendingAppendIDs.count } }
+    package var hasActiveTypedTurn: Bool {
+        state.locked { $0.typedActive && $0.typedThreadID != nil && $0.typedTurnID != nil }
+    }
+
+    public func typedEvents(
+        requestID: String,
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        context: [CodexTypedContextMessage],
+        userText: String,
+        timeout: Duration = .seconds(120),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) -> AsyncThrowingStream<CodexTypedMessage, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await self.executeTyped(
+                        requestID: requestID,
+                        credential: credential,
+                        model: model,
+                        cwd: cwd,
+                        context: context,
+                        userText: userText,
+                        timeout: timeout,
+                        onCleanupPending: onCleanupPending,
+                        emit: { continuation.yield($0) }
+                    )
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                Task {
+                    await self.interruptTyped()
+                    task.cancel()
+                }
+            }
+        }
+    }
+
+    public func interruptTyped(
+        timeout: Duration = .seconds(2),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) async {
+        let action = state.locked { value -> TypedStopAction in
+            guard value.typedActive else { return .none }
+            guard let threadID = value.typedThreadID,
+                  let turnID = value.typedTurnID
+            else { return .cancelStartup }
+            guard value.typedInterruptID == nil else { return .none }
+            let id = "typed:interrupt:\(UUID().uuidString.lowercased())"
+            value.typedInterruptID = id
+            return .interrupt(id, threadID, turnID)
+        }
+        switch action {
+        case .none:
+            return
+        case .cancelStartup:
+            process.cancel()
+            await process.stop(onCleanupPending: onCleanupPending)
+            return
+        case .interrupt(let id, let threadID, let turnID):
+            do {
+                try process.send(try CodexTypedProtocol().turnInterruptRequest(
+                    id: id, threadID: threadID, turnID: turnID
+                ))
+                try await process.waitForTermination(timeout: timeout)
+            } catch {
+                await process.stop(onCleanupPending: onCleanupPending)
+            }
+        }
+    }
+
+    public func probeTypedFeatures(
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        timeout: Duration = .seconds(5),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) async throws -> CodexTypedReadiness {
+        let codec = CodexTypedProtocol()
+        let prefix = "probe:\(UUID().uuidString.lowercased())"
+        let timeoutState = StartupTimeoutState()
+        let watchdog = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            timeoutState.markTimedOut()
+            self.process.cancel()
+        }
+        defer { watchdog.cancel() }
+        do {
+            var currentCredential = credential
+            let source = try process.start()
+            var iterator = source.makeAsyncIterator()
+            try await typedHandshake(
+                prefix: prefix, credential: &currentCredential, codec: codec,
+                iterator: &iterator
+            )
+            let threadRequestID = "\(prefix):probe:thread-start"
+            try process.send(try codec.threadStartRequest(
+                id: threadRequestID, model: model, cwd: cwd
+            ))
+            let helperThreadID = try await awaitTypedThread(
+                id: threadRequestID,
+                currentCredential: &currentCredential,
+                codec: codec,
+                iterator: &iterator
+            )
+            let turnRequestID = "\(prefix):probe:turn-start"
+            try process.send(try codec.turnStartRequest(
+                id: turnRequestID,
+                threadID: helperThreadID,
+                cwd: cwd,
+                context: [],
+                userText: "Reply with OK."
+            ))
+            let helperTurnID = try await awaitTypedTurn(
+                id: turnRequestID,
+                threadID: helperThreadID,
+                currentCredential: &currentCredential,
+                codec: codec,
+                iterator: &iterator
+            )
+            var sawStreamedText = false
+            var sawTerminal = false
+            while let data = try await iterator.next() {
+                switch try codec.decode(data) {
+                case .assistantTextDelta(let threadID, let turnID, _, let text)
+                    where threadID == helperThreadID && turnID == helperTurnID
+                        && !text.isEmpty:
+                    sawStreamedText = true
+                case .turnCompleted(let threadID, let turnID, let outcome)
+                    where threadID == helperThreadID && turnID == helperTurnID:
+                    guard outcome == .completed else {
+                        throw CodexTypedProtocolError.featureUnavailable
+                    }
+                    sawTerminal = true
+                case .assistantTextDelta, .assistantMessageCompleted,
+                     .capabilityActivity, .ignored, .threadStarted:
+                    continue
+                case .credentialRefresh(let refreshID, let previousAccountID):
+                    try await refreshCredential(
+                        id: refreshID,
+                        previousAccountID: previousAccountID,
+                        currentCredential: &currentCredential
+                    )
+                case .unsupportedApproval(let approvalID):
+                    try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+                case .unsupportedPermissionsApproval(let approvalID):
+                    try process.send(try codec.declineUnsupportedPermissionsApproval(
+                        id: approvalID
+                    ))
+                default:
+                    throw CodexTypedProtocolError.featureUnavailable
+                }
+                if sawTerminal { break }
+            }
+            guard sawStreamedText, sawTerminal else {
+                throw CodexTypedProtocolError.featureUnavailable
+            }
+            let requests = try codec.featureProbeRequests(
+                requestPrefix: "\(prefix):probe", cwd: cwd
+            )
+            var observed: Set<String> = ["thread/start", "turn/start"]
+            for request in requests {
+                let object = try JSONSerialization.jsonObject(with: request) as? [String: Any]
+                guard let method = object?["method"] as? String,
+                      let id = object?["id"] as? String
+                else { throw CodexTypedProtocolError.invalidField }
+                try process.send(request)
+                while let data = try await iterator.next() {
+                    let message = try codec.decode(data)
+                    switch message {
+                    case .featureResponse(let responseID) where responseID == id,
+                         .threadStartResponse(let responseID, _) where responseID == id,
+                         .turnStartResponse(let responseID, _) where responseID == id,
+                         .emptyResponse(let responseID) where responseID == id:
+                        observed.insert(method)
+                    case .requestError(let responseID, _) where responseID == id:
+                        throw CodexTypedProtocolError.featureUnavailable
+                    case .credentialRefresh(let refreshID, let previousAccountID):
+                        try await refreshCredential(
+                            id: refreshID,
+                            previousAccountID: previousAccountID,
+                            currentCredential: &currentCredential
+                        )
+                    case .unsupportedApproval(let approvalID):
+                        try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+                    case .unsupportedPermissionsApproval(let approvalID):
+                        try process.send(try codec.declineUnsupportedPermissionsApproval(
+                            id: approvalID
+                        ))
+                    case .ignored, .threadStarted:
+                        continue
+                    default:
+                        throw CodexTypedProtocolError.invalidSequence
+                    }
+                    if observed.contains(method) { break }
+                }
+                guard observed.contains(method) else {
+                    throw CodexTypedProtocolError.featureUnavailable
+                }
+            }
+            await process.stop(onCleanupPending: onCleanupPending)
+            return .init(
+                supportsOrdinaryTurns: observed.contains("thread/start")
+                    && observed.contains("turn/start"),
+                supportsApps: observed.contains("app/list"),
+                supportsMCPStatus: observed.contains("mcpServerStatus/list"),
+                supportsSkills: observed.contains("skills/list")
+            )
+        } catch {
+            await process.stop(onCleanupPending: onCleanupPending)
+            if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
+            throw CodexTypedProtocolError.featureUnavailable
+        }
+    }
 
     /// The former PCM route has no WebRTC offer and cannot start a realtime session.
     public func eventsWithoutWebRTCOffer(
@@ -363,6 +590,288 @@ public final class CodexAppServerClient: @unchecked Sendable {
             }
             throw error
         }
+    }
+
+    private func executeTyped(
+        requestID: String,
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        context: [CodexTypedContextMessage],
+        userText: String,
+        timeout: Duration,
+        onCleanupPending: @escaping @Sendable () async -> Void,
+        emit: @escaping @Sendable (CodexTypedMessage) -> Void
+    ) async throws {
+        let admitted = state.locked { value -> Bool in
+            guard !value.typedActive, !value.sessionAdmitted else { return false }
+            value.typedActive = true
+            value.typedThreadID = nil
+            value.typedTurnID = nil
+            value.typedInterruptID = nil
+            return true
+        }
+        guard admitted else { throw CodexAppServerClientError.sessionAlreadyActive }
+        defer {
+            state.locked {
+                $0.typedActive = false
+                $0.typedThreadID = nil
+                $0.typedTurnID = nil
+                $0.typedInterruptID = nil
+            }
+        }
+        let timeoutState = StartupTimeoutState()
+        let watchdog = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            timeoutState.markTimedOut()
+            self.process.cancel()
+        }
+        defer { watchdog.cancel() }
+        do {
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                let codec = CodexTypedProtocol()
+                var currentCredential = credential
+                let source = try process.start()
+                try Task.checkCancellation()
+                var iterator = source.makeAsyncIterator()
+                try await typedHandshake(
+                    prefix: requestID,
+                    credential: &currentCredential,
+                    codec: codec,
+                    iterator: &iterator
+                )
+                let threadRequestID = "\(requestID):thread-start"
+                try process.send(try codec.threadStartRequest(
+                    id: threadRequestID, model: model, cwd: cwd
+                ))
+                let helperThreadID = try await awaitTypedThread(
+                    id: threadRequestID,
+                    currentCredential: &currentCredential,
+                    codec: codec,
+                    iterator: &iterator
+                )
+                state.locked { $0.typedThreadID = helperThreadID }
+                let turnRequestID = "\(requestID):turn-start"
+                try process.send(try codec.turnStartRequest(
+                    id: turnRequestID,
+                    threadID: helperThreadID,
+                    cwd: cwd,
+                    context: context,
+                    userText: userText
+                ))
+                let responseTurnID = try await awaitTypedTurn(
+                    id: turnRequestID,
+                    threadID: helperThreadID,
+                    currentCredential: &currentCredential,
+                    codec: codec,
+                    iterator: &iterator
+                )
+                state.locked { $0.typedTurnID = responseTurnID }
+                var sequence = CodexTypedTerminalSequence()
+                _ = try sequence.accept(.turnStarted(
+                    threadID: helperThreadID,
+                    turnID: responseTurnID
+                ))
+                while let data = try await iterator.next() {
+                    let message = try codec.decode(data)
+                    switch message {
+                    case .ignored, .threadStarted:
+                        continue
+                    case .emptyResponse(let id):
+                        let expected = state.locked { $0.typedInterruptID }
+                        guard id == expected else {
+                            throw CodexTypedProtocolError.invalidSequence
+                        }
+                        continue
+                    case .requestError:
+                        throw CodexTypedProtocolError.providerFailed
+                    case .credentialRefresh(let refreshID, let previousAccountID):
+                        try await refreshCredential(
+                            id: refreshID,
+                            previousAccountID: previousAccountID,
+                            currentCredential: &currentCredential
+                        )
+                    case .unsupportedApproval(let approvalID):
+                        try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+                    case .unsupportedPermissionsApproval(let approvalID):
+                        try process.send(try codec.declineUnsupportedPermissionsApproval(
+                            id: approvalID
+                        ))
+                    default:
+                        let isTerminal = try sequence.accept(message)
+                        if isTerminal {
+                            await process.stop(onCleanupPending: onCleanupPending)
+                            emit(message)
+                            return
+                        }
+                        emit(message)
+                    }
+                }
+                throw CodexAppServerClientError.missingTerminal
+            } onCancel: {
+                self.process.cancel()
+            }
+        } catch {
+            await process.stop(onCleanupPending: onCleanupPending)
+            if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
+            throw error
+        }
+    }
+
+    private func typedHandshake(
+        prefix: String,
+        credential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws {
+        let initializeID = "\(prefix):initialize"
+        try process.send(try codec.initializeRequest(id: initializeID))
+        try await awaitTypedResponse(
+            matching: .initializeResponse(id: initializeID),
+            currentCredential: &credential,
+            codec: codec,
+            iterator: &iterator
+        )
+        try process.send(try codec.initializedNotification())
+        let loginID = "\(prefix):login"
+        try process.send(try bridge.loginRequest(id: loginID, credential: credential))
+        try await awaitTypedResponse(
+            matching: .loginResponse(id: loginID),
+            currentCredential: &credential,
+            codec: codec,
+            iterator: &iterator
+        )
+    }
+
+    private func awaitTypedResponse(
+        matching expected: CodexTypedMessage,
+        currentCredential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws {
+        while let data = try await iterator.next() {
+            let message = try codec.decode(data)
+            if message == expected { return }
+            if message == .ignored { continue }
+            if case .credentialRefresh(let refreshID, let previousAccountID) = message {
+                try await refreshCredential(
+                    id: refreshID,
+                    previousAccountID: previousAccountID,
+                    currentCredential: &currentCredential
+                )
+                continue
+            }
+            if case .unsupportedApproval(let approvalID) = message {
+                try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+                continue
+            }
+            if case .unsupportedPermissionsApproval(let approvalID) = message {
+                try process.send(try codec.declineUnsupportedPermissionsApproval(
+                    id: approvalID
+                ))
+                continue
+            }
+            if case .requestError = message {
+                throw CodexTypedProtocolError.providerFailed
+            }
+            throw CodexTypedProtocolError.invalidSequence
+        }
+        throw CodexAppServerClientError.wrongResponse
+    }
+
+    private func awaitTypedThread(
+        id: String,
+        currentCredential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws -> String {
+        var responseThreadID: String?
+        var startedThreadID: String?
+        while let data = try await iterator.next() {
+            switch try codec.decode(data) {
+            case .threadStartResponse(let responseID, let threadID) where responseID == id:
+                guard responseThreadID == nil else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
+                responseThreadID = threadID
+            case .threadStarted(let threadID):
+                guard startedThreadID == nil else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
+                startedThreadID = threadID
+            case .ignored:
+                continue
+            case .requestError:
+                throw CodexTypedProtocolError.providerFailed
+            case .credentialRefresh(let refreshID, let previousAccountID):
+                try await refreshCredential(
+                    id: refreshID,
+                    previousAccountID: previousAccountID,
+                    currentCredential: &currentCredential
+                )
+            case .unsupportedApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+            case .unsupportedPermissionsApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedPermissionsApproval(
+                    id: approvalID
+                ))
+            default:
+                throw CodexTypedProtocolError.invalidSequence
+            }
+            if let responseThreadID, let startedThreadID {
+                guard responseThreadID == startedThreadID else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
+                return responseThreadID
+            }
+        }
+        throw CodexAppServerClientError.wrongResponse
+    }
+
+    private func awaitTypedTurn(
+        id: String,
+        threadID: String,
+        currentCredential: inout CodexOAuthCredential,
+        codec: CodexTypedProtocol,
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+    ) async throws -> String {
+        var responseTurnID: String?
+        var startedTurnID: String?
+        while let data = try await iterator.next() {
+            switch try codec.decode(data) {
+            case .turnStartResponse(let responseID, let turnID) where responseID == id:
+                responseTurnID = turnID
+            case .turnStarted(let startedThreadID, let turnID)
+                where startedThreadID == threadID:
+                startedTurnID = turnID
+            case .ignored, .threadStarted:
+                continue
+            case .requestError:
+                throw CodexTypedProtocolError.providerFailed
+            case .credentialRefresh(let refreshID, let previousAccountID):
+                try await refreshCredential(
+                    id: refreshID,
+                    previousAccountID: previousAccountID,
+                    currentCredential: &currentCredential
+                )
+            case .unsupportedApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedApproval(id: approvalID))
+            case .unsupportedPermissionsApproval(let approvalID):
+                try process.send(try codec.declineUnsupportedPermissionsApproval(
+                    id: approvalID
+                ))
+            default:
+                throw CodexTypedProtocolError.invalidSequence
+            }
+            if let responseTurnID, let startedTurnID {
+                guard responseTurnID == startedTurnID else {
+                    throw CodexTypedProtocolError.invalidSequence
+                }
+                return responseTurnID
+            }
+        }
+        throw CodexAppServerClientError.wrongResponse
     }
 
     private func run(
@@ -926,5 +1435,18 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 generation: identity.generation
             )
         }
+    }
+}
+
+public struct CodexTypedReadiness: Equatable, Sendable {
+    public static let minimumTestedRelease = "0.146.0"
+
+    public let supportsOrdinaryTurns: Bool
+    public let supportsApps: Bool
+    public let supportsMCPStatus: Bool
+    public let supportsSkills: Bool
+
+    public var isReady: Bool {
+        supportsOrdinaryTurns && supportsApps && supportsMCPStatus && supportsSkills
     }
 }

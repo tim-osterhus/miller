@@ -44,6 +44,7 @@ if (mode === "record-stdin") {
 }
 let threadId = "thread-1";
 let helperThreadCreated = false;
+let typedTurnId = "typed-turn-1";
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
 
 function featureConfigurationIsAdmitted() {
@@ -200,6 +201,269 @@ lines.on("line", (line) => {
     return;
   }
   const request = JSON.parse(line);
+  if (mode.startsWith("typed-")) {
+    if ((mode === "typed-record" || mode === "typed-probe-record") && pidPath) {
+      fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 });
+    }
+    if (request.method === "initialize") {
+      if (request.params?.capabilities?.experimentalApi !== true) {
+        send({ id: request.id, error: { code: -32602, message: "experimental API required" } });
+        return;
+      }
+      send({ id: request.id, result: initializeResult() });
+      return;
+    }
+    if (request.method === "initialized") return;
+    if (request.method === "account/login/start") {
+      send({ id: request.id, result: { type: "chatgptAuthTokens" } });
+      return;
+    }
+    if (request.method === "thread/start") {
+      if (request.params?.approvalPolicy !== "never" ||
+          request.params?.permissions !== undefined ||
+          request.params?.runtimeWorkspaceRoots !== undefined ||
+          request.params?.sandbox !== undefined || request.params?.sandboxPolicy !== undefined) {
+        send({ id: request.id, error: { code: -32602, message: "unsafe thread policy" } });
+        return;
+      }
+      if (mode === "typed-thread-failure") {
+        send({ id: request.id, error: { code: -32000, message: "bridge unavailable" } });
+        return;
+      }
+      if (mode === "typed-startup-wait") {
+        if (pidPath) fs.writeFileSync(pidPath, "thread-start-pending\n", { mode: 0o600 });
+        return;
+      }
+      helperThreadCreated = true;
+      threadId = "typed-thread-1";
+      const response = { id: request.id, result: { thread: { id: threadId } } };
+      const started = () => notify("thread/started", { thread: { id: threadId } });
+      if (mode === "typed-thread-notification-first") {
+        started();
+        send(response);
+      } else {
+        send(response);
+        started();
+      }
+      return;
+    }
+    if (request.method === "thread/resume") {
+      send({ id: request.id, result: { thread: { id: request.params?.threadId } } });
+      notify("thread/started", { thread: { id: request.params?.threadId } });
+      return;
+    }
+    if (request.method === "turn/start") {
+      if (!helperThreadCreated || request.params?.threadId !== threadId ||
+          !Array.isArray(request.params?.input) || request.params.input.length !== 1 ||
+          request.params.input[0]?.type !== "text" || request.params?.approvalPolicy !== "never" ||
+          request.params?.permissions !== undefined ||
+          request.params?.runtimeWorkspaceRoots !== undefined ||
+          request.params?.sandboxPolicy !== undefined) {
+        send({ id: request.id, error: { code: -32602, message: "invalid typed turn" } });
+        return;
+      }
+      const typedTurnResponse = { id: request.id, result: {
+        turn: { id: typedTurnId, status: "inProgress", items: [], error: null },
+      } };
+      const emitTypedTurnStarted = () => notify("turn/started", {
+        threadId,
+        turn: { id: typedTurnId, status: "inProgress", items: [], error: null },
+      });
+      if (mode === "typed-turn-notification-first") {
+        emitTypedTurnStarted();
+        send(typedTurnResponse);
+      } else {
+        send(typedTurnResponse);
+        emitTypedTurnStarted();
+      }
+      if (mode === "typed-wait") {
+        if (pidPath) fs.writeFileSync(pidPath, "turn-started\n", { mode: 0o600 });
+        return;
+      }
+      if (mode.startsWith("typed-probe-")) {
+        if (mode !== "typed-probe-no-stream") {
+          notify("item/agentMessage/delta", {
+            threadId, turnId: typedTurnId, itemId: "typed-probe-message-1", delta: "OK",
+          });
+        }
+        notify("turn/completed", {
+          threadId,
+          turn: {
+            id: typedTurnId,
+            status: mode === "typed-probe-failed-terminal" ? "failed" : "completed",
+            items: [],
+            error: mode === "typed-probe-failed-terminal"
+              ? { message: "probe failed" }
+              : null,
+          },
+        });
+        return;
+      }
+      if (mode === "typed-refresh") {
+        send({
+          id: "typed-refresh-1",
+          method: "account/chatgptAuthTokens/refresh",
+          params: { reason: "unauthorized", previousAccountId: "account-1" },
+        });
+        return;
+      }
+      if (mode === "typed-approval") {
+        send({
+          id: "approval-request-1",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId, turnId: typedTurnId, itemId: "approval-item-1",
+            reason: "private approval reason",
+          },
+        });
+        return;
+      }
+      if (mode === "typed-permissions-approval") {
+        send({
+          id: "permissions-request-1",
+          method: "item/permissions/requestApproval",
+          params: {
+            threadId, turnId: typedTurnId, itemId: "permissions-item-1",
+            cwd: request.params.cwd, startedAtMs: Date.now(),
+            permissions: { network: { enabled: true } },
+          },
+        });
+        return;
+      }
+      if (mode === "typed-stale") {
+        notify("item/agentMessage/delta", {
+          threadId, turnId: "stale-turn", itemId: "typed-message-1", delta: "stale",
+        });
+        return;
+      }
+      if (mode === "typed-too-many") {
+        for (let index = 0; index < 1025; index += 1) {
+          notify("item/agentMessage/delta", {
+            threadId, turnId: typedTurnId, itemId: "typed-message-1", delta: "x",
+          });
+        }
+        return;
+      }
+      if (mode === "typed-hidden-only") {
+        for (const type of ["reasoning", "commandExecution", "fileChange"]) {
+          notify("item/completed", {
+            threadId, turnId: typedTurnId,
+            item: {
+              type, id: `hidden-${type}`, summary: ["private"],
+              content: ["private"], aggregatedOutput: "private", changes: ["private"],
+            },
+          });
+        }
+      } else if (mode === "typed-capabilities") {
+        for (const type of ["webSearch", "mcpToolCall", "app-mcpToolCall"]) {
+          const wireType = type === "app-mcpToolCall" ? "mcpToolCall" : type;
+          const appContext = type === "app-mcpToolCall"
+            ? { resourceUri: "private://resource" }
+            : undefined;
+          notify("item/started", {
+            threadId, turnId: typedTurnId,
+            item: {
+              type: wireType, id: `cap-${type}`, status: "inProgress",
+              appContext, arguments: { secret: "private" },
+            },
+          });
+          notify("item/completed", {
+            threadId, turnId: typedTurnId,
+            item: {
+              type: wireType, id: `cap-${type}`, status: "completed",
+              appContext, result: { secret: "private" },
+            },
+          });
+        }
+      } else if (mode === "typed-failure") {
+        notify("turn/completed", {
+          threadId,
+          turn: {
+            id: typedTurnId, status: "failed", items: [],
+            error: { message: "private provider failure" },
+          },
+        });
+        return;
+      } else {
+        notify("item/agentMessage/delta", {
+          threadId, turnId: typedTurnId, itemId: "typed-message-1", delta: "hel",
+        });
+        notify("item/agentMessage/delta", {
+          threadId, turnId: typedTurnId, itemId: "typed-message-1", delta: "lo",
+        });
+        notify("item/completed", {
+          threadId, turnId: typedTurnId,
+          item: { type: "agentMessage", id: "typed-message-1", text: "hello" },
+        });
+      }
+      notify("turn/completed", {
+        threadId,
+        turn: { id: typedTurnId, status: "completed", items: [], error: null },
+      });
+      return;
+    }
+    if (mode === "typed-refresh" && request.id === "typed-refresh-1") {
+      if (request.result?.accessToken !== "replacement-token" ||
+          request.result?.chatgptAccountId !== "account-1") {
+        process.exit(46);
+      }
+      notify("item/agentMessage/delta", {
+        threadId, turnId: typedTurnId, itemId: "typed-message-1", delta: "refreshed",
+      });
+      notify("item/completed", {
+        threadId, turnId: typedTurnId,
+        item: { type: "agentMessage", id: "typed-message-1", text: "refreshed" },
+      });
+      notify("turn/completed", {
+        threadId,
+        turn: { id: typedTurnId, status: "completed", items: [], error: null },
+      });
+      return;
+    }
+    if (mode === "typed-approval" && request.id === "approval-request-1") {
+      if (request.result?.decision !== "decline") process.exit(47);
+      notify("turn/completed", {
+        threadId,
+        turn: {
+          id: typedTurnId, status: "failed", items: [],
+          error: { message: "private approval unavailable" },
+        },
+      });
+      return;
+    }
+    if (mode === "typed-permissions-approval" && request.id === "permissions-request-1") {
+      if (request.result?.scope !== "turn" ||
+          request.result?.strictAutoReview !== true ||
+          Object.keys(request.result?.permissions ?? {}).length !== 0) process.exit(48);
+      notify("turn/completed", {
+        threadId,
+        turn: {
+          id: typedTurnId, status: "failed", items: [],
+          error: { message: "private permissions unavailable" },
+        },
+      });
+      return;
+    }
+    if (request.method === "turn/interrupt") {
+      if (pidPath) fs.appendFileSync(pidPath, "interrupt\n", { mode: 0o600 });
+      send({ id: request.id, result: {} });
+      notify("turn/completed", {
+        threadId,
+        turn: { id: typedTurnId, status: "interrupted", items: [], error: null },
+      });
+      return;
+    }
+    if (["app/list", "mcpServerStatus/list", "skills/list"].includes(request.method)) {
+      if (mode === "typed-probe-missing" && request.method === "app/list") {
+        send({ id: request.id, error: { code: -32601, message: "method not found" } });
+      } else {
+        send({ id: request.id, result: { data: [], nextCursor: null } });
+      }
+      return;
+    }
+    send({ id: request.id, error: { code: -32601, message: "method not found" } });
+    return;
+  }
   if (mode === "transport-race") {
     if (request.method !== "race" || typeof request.ordinal !== "number" ||
         typeof request.payload !== "string" || request.payload.length !== 32768 ||

@@ -34,7 +34,7 @@ let package = Package(
             name: "MillerGateway",
             dependencies: ["MillerCore"]
         ),
-        .target(name: "MillerLive"),
+        .target(name: "MillerLive", dependencies: ["MillerCore"]),
         .target(
             name: "MillerCapabilities",
             dependencies: [
@@ -78,7 +78,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MillerLiveTests",
-            dependencies: ["MillerLive"],
+            dependencies: ["MillerLive", "MillerCore"],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(

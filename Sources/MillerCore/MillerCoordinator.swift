@@ -189,13 +189,13 @@ public actor MillerCoordinator {
             active = nil
             activeReasoningStatus = nil
         }
-        turn.consumer?.cancel()
         await gateway.cancel(
             ReasoningCancellation(
                 turnID: turn.id,
                 targetGeneration: targetGeneration
             )
         )
+        turn.consumer?.cancel()
     }
 
     public func archive(conversationID: ConversationID) async throws {
@@ -422,13 +422,13 @@ public actor MillerCoordinator {
             active = nil
             activeReasoningStatus = nil
         }
-        consumer?.cancel()
         await gateway.cancel(
             ReasoningCancellation(
                 turnID: turnID,
                 targetGeneration: generation
             )
         )
+        consumer?.cancel()
     }
 
     private func clearReservation(turnID: TurnID) {

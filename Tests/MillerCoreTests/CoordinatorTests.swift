@@ -75,6 +75,7 @@ struct CoordinatorTests {
         #expect(await gateway.cancellations == [
             ReasoningCancellation(turnID: turnID, targetGeneration: 1),
         ])
+        #expect(await gateway.cancelledBeforeConsumerTermination)
         #expect(await trace.values.suffix(2) == ["stop", "cancel"])
         #expect(await coordinator.activeTurnID == nil)
     }
@@ -464,9 +465,11 @@ private actor FakeRepository: ConversationRepository {
 
 private actor FakeGateway: ReasoningGateway {
     private let trace: Trace?
+    private let terminationProbe = ConsumerTerminationProbe()
     private var continuation: AsyncThrowingStream<ReasoningEvent, Error>.Continuation?
     private(set) var starts: [ReasoningRequest] = []
     private(set) var cancellations: [ReasoningCancellation] = []
+    private(set) var cancelledBeforeConsumerTermination = false
 
     init(trace: Trace? = nil) {
         self.trace = trace
@@ -477,18 +480,36 @@ private actor FakeGateway: ReasoningGateway {
     ) async throws -> AsyncThrowingStream<ReasoningEvent, Error> {
         starts.append(request)
         await trace?.append("start")
+        let terminationProbe = terminationProbe
         return AsyncThrowingStream { continuation in
             self.continuation = continuation
+            continuation.onTermination = { _ in terminationProbe.markTerminated() }
         }
     }
 
     func cancel(_ cancellation: ReasoningCancellation) async {
+        cancelledBeforeConsumerTermination = !terminationProbe.isTerminated
         cancellations.append(cancellation)
         await trace?.append("cancel")
     }
 
     func yield(_ event: ReasoningEvent) {
         continuation?.yield(event)
+    }
+}
+
+private final class ConsumerTerminationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminated = false
+
+    var isTerminated: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return terminated
+    }
+
+    func markTerminated() {
+        lock.lock(); defer { lock.unlock() }
+        terminated = true
     }
 }
 
