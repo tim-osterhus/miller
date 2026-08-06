@@ -12,6 +12,7 @@ enum CapabilityControllerError: Error, Equatable {
     case auditUnavailable
     case staleGeneration
     case providerMismatch
+    case settingsBusy
 }
 
 enum CapabilityInvocationRoute: Equatable, Sendable {
@@ -305,6 +306,7 @@ final class CapabilityController: ObservableObject {
     private let providerCallbackAuthorityBox:
         CapabilityProviderCallbackAuthorityBox?
     private let confirmationAnnouncer: @MainActor @Sendable (String) -> Void
+    private let settingsRepository: SQLiteCapabilityRepository?
 
     private var broker: CapabilityBroker?
     private var descriptors: [CapabilityID: CapabilityDescriptor] = [:]
@@ -354,6 +356,7 @@ final class CapabilityController: ObservableObject {
         bridgeBox: CapabilityBridgeSessionBox? = nil,
         providerCallbackAuthorityBox:
             CapabilityProviderCallbackAuthorityBox? = nil,
+        settingsRepository: SQLiteCapabilityRepository? = nil,
         confirmationAnnouncer: @escaping @MainActor @Sendable (String) -> Void = {
             _ in
         }
@@ -366,6 +369,7 @@ final class CapabilityController: ObservableObject {
         self.trustedParent = trustedParent
         self.bridgeBox = bridgeBox
         self.providerCallbackAuthorityBox = providerCallbackAuthorityBox
+        self.settingsRepository = settingsRepository
         self.confirmationAnnouncer = confirmationAnnouncer
     }
 
@@ -417,6 +421,7 @@ final class CapabilityController: ObservableObject {
             trustedParent: trustedParent,
             bridgeBox: bridgeBox,
             providerCallbackAuthorityBox: providerCallbackAuthorityBox,
+            settingsRepository: repository,
             confirmationAnnouncer: { [confirmationSpeaker] message in
                 confirmationSpeaker.announce(message)
             }
@@ -454,10 +459,20 @@ final class CapabilityController: ObservableObject {
             )
             toolPolicies = configuration.toolPolicies
             let catalog = await broker.refresh()
+            if let settingsRepository {
+                try await Self.persist(
+                    catalog: catalog,
+                    repository: settingsRepository,
+                    serverIDs: Set(configuration.servers.map(\.id))
+                )
+            }
             descriptors = Dictionary(
                 uniqueKeysWithValues: catalog.descriptors.map { ($0.id, $0) }
             )
         } catch {
+            await broker?.disconnectAll()
+            broker = nil
+            descriptors.removeAll()
             startupError = error
         }
     }
@@ -841,6 +856,82 @@ final class CapabilityController: ObservableObject {
         providerDescriptors = Dictionary(
             uniqueKeysWithValues: snapshot.descriptors.map { ($0.id, $0) }
         )
+    }
+
+    func settingsSnapshot(
+        providerNames: [UUID: String]
+    ) async throws -> CapabilitySettingsSnapshot {
+        guard let repository = settingsRepository else {
+            throw CapabilityControllerError.unavailable
+        }
+        let serverRecords = try await repository.servers()
+        var serverSnapshots: [MCPServerSettingsSnapshot] = []
+        for server in serverRecords {
+            let enabledIDs = Set(
+                try await repository.enabledProviderProfileIDs(serverID: server.id)
+            )
+            let enabledNames = providerNames.filter { enabledIDs.contains($0.key) }
+            let tools = try await repository.catalog(serverID: server.id).map {
+                CapabilitySettingsTool(record: $0, providerNames: providerNames)
+            }
+            serverSnapshots.append(.init(
+                server: server,
+                providerNames: enabledNames,
+                tools: tools,
+                secretBindings: try await repository.secretBindings(
+                    serverID: server.id
+                )
+            ))
+        }
+
+        let codexTools = providerDescriptors.values
+            .filter { $0.source == .codexAccount }
+            .sorted { $0.id.description < $1.id.description }
+        let appGroups = Dictionary(grouping: codexTools, by: \.serverID)
+        let apps = appGroups.keys.sorted().map { serverID in
+                CodexAccountAppSettings(
+                    id: serverID,
+                    displayName: serverID.replacingOccurrences(
+                        of: "_", with: " "
+                    ).capitalized,
+                    tools: (appGroups[serverID] ?? []).map { descriptor in
+                        let record = CapabilityToolRecord(
+                            descriptor: descriptor,
+                            staleState: .current,
+                            policyOverride: nil,
+                            reconciledAt: Date()
+                        )
+                        return CapabilitySettingsTool(
+                            record: record,
+                            providerNames: providerNames,
+                            providerMandatedApproval:
+                                descriptor.visibility == .providerManaged
+                        )
+                    }
+                )
+            }
+        return CapabilitySettingsSnapshot(
+            codexApps: apps,
+            servers: serverSnapshots,
+            providerNames: providerNames
+        )
+    }
+
+    func reloadLocalConfiguration() async throws {
+        guard activeTypedAssociation == nil,
+              activeVoiceAssociation == nil,
+              pendingApprovalCount == 0
+        else { throw CapabilityControllerError.settingsBusy }
+        await broker?.disconnectAll()
+        broker = nil
+        descriptors.removeAll()
+        serverDisplayNames.removeAll()
+        serverPolicies.removeAll()
+        toolPolicies.removeAll()
+        startupError = nil
+        await start()
+        if let startupError { throw startupError }
+        await reconcileProviderProjection()
     }
 
     func configureProviderProjection(
@@ -1610,6 +1701,24 @@ final class CapabilityController: ObservableObject {
             servers: servers,
             toolPolicies: policies
         )
+    }
+
+    private static func persist(
+        catalog: CapabilityBrokerCatalog,
+        repository: SQLiteCapabilityRepository,
+        serverIDs: Set<String>
+    ) async throws {
+        let grouped = Dictionary(grouping: catalog.descriptors, by: \.serverID)
+        for serverID in serverIDs.sorted() {
+            if catalog.staleServerIDs.contains(serverID) {
+                try await repository.markCatalogStale(serverID: serverID)
+            } else {
+                try await repository.reconcileCatalog(
+                    serverID: serverID,
+                    descriptors: grouped[serverID] ?? []
+                )
+            }
+        }
     }
 }
 

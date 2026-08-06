@@ -799,6 +799,13 @@ public actor SQLiteCapabilityRepository {
         ).map(Self.decodeAudit)
     }
 
+    public func deleteAllAudits() throws {
+        try preflightWrite()
+        try database.transaction {
+            try database.execute("DELETE FROM capability_audit")
+        }
+    }
+
     public func savePlugin(_ plugin: PluginPackageRecord) throws {
         guard plugin.supportedComponentSummary.utf8.count <= 4 * 1_024 else {
             throw CapabilityStorageError.pluginSummaryTooLarge

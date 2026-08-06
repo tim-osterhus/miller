@@ -911,6 +911,30 @@ struct SQLiteCapabilityRepositoryTests {
         #expect(retained.map(\.descriptor.id) == [original.id])
         #expect(retained.first?.staleState == .current)
     }
+
+    @Test
+    func ownerCanDeleteTheSanitizedCapabilityAuditLedger() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(
+            conversationID,
+            database: SQLiteDatabase(path: fixture.path)
+        )
+        try await repository.beginAudit(
+            try makeAudit(
+                id: CapabilityCallID(),
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil
+            )
+        )
+        #expect(try await repository.audits().count == 1)
+
+        try await repository.deleteAllAudits()
+
+        #expect(try await repository.audits().isEmpty)
+    }
 }
 
 private func makeServer() -> CapabilityServerRecord {

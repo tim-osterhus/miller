@@ -1927,6 +1927,127 @@ struct CapabilityControllerTests {
         #expect(fixture.controller.pendingApproval == nil)
         #expect(await base.resolveCalls == 0)
     }
+
+    @Test
+    func settingsSnapshotIsBoundedAndSeparatesCodexAppsFromMillerTools() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-capability-settings-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("miller.sqlite3").path
+        let repository = try SQLiteCapabilityRepository(path: path)
+        let profileID = UUID()
+        let server = CapabilityServerRecord(
+            id: "notes", displayName: "Notes", transport: .stdio,
+            command: "/usr/bin/true", endpoint: nil, arguments: [], enabled: false,
+            defaultPolicy: .askBeforeChanges, staleState: .current,
+            createdAt: .distantPast, updatedAt: .distantPast
+        )
+        try await repository.saveServer(server)
+        let secretReference = UUID()
+        try await repository.saveSecretBinding(.init(
+            id: UUID(),
+            serverID: "notes",
+            kind: .environment,
+            name: "NOTES_TOKEN",
+            credentialReference: secretReference
+        ))
+        let local = try CapabilityDescriptor(
+            id: CapabilityID(source: .millerMCP, serverID: "notes", toolName: "lookup"),
+            source: .millerMCP, serverID: "notes", toolName: "lookup",
+            displayName: "Lookup", summary: "private provider payload must not project",
+            inputSchemaJSON: Data(#"{"secretSchema":"must not project"}"#.utf8),
+            readOnlyHint: true, providerProfileIDs: [profileID], isAvailable: true
+        )
+        try await repository.reconcileCatalog(serverID: "notes", descriptors: [local])
+        try await repository.setPolicyOverride(.fullyTrusted, toolID: local.id)
+        let controller = CapabilityController(
+            loadConfiguration: {
+                .init(
+                    servers: [try MCPServerConfiguration(
+                        id: "notes", displayName: "Notes",
+                        transport: .stdio(executable: "/usr/bin/true", arguments: []),
+                        enabled: false
+                    )],
+                    toolPolicies: [local.id: .fullyTrusted]
+                )
+            },
+            settingsRepository: repository
+        )
+        let codex = try CapabilityDescriptor(
+            id: CapabilityID(source: .codexAccount, serverID: "gmail", toolName: "search"),
+            source: .codexAccount, serverID: "gmail", toolName: "search",
+            displayName: "Search mail", summary: "raw provider details",
+            inputSchemaJSON: Data(#"{"raw":"provider payload"}"#.utf8),
+            readOnlyHint: true, providerProfileIDs: [profileID], isAvailable: true,
+            visibility: .providerManaged
+        )
+        controller.replaceProviderCatalog(try .init([codex]))
+
+        let snapshot = try await controller.settingsSnapshot(
+            providerNames: [profileID: "Codex"]
+        )
+
+        #expect(snapshot.codexApps.map(\.id) == ["gmail"])
+        #expect(snapshot.codexApps[0].availabilityLabel == "Codex only")
+        #expect(snapshot.servers[0].secretBindings.map(\.credentialReference) == [
+            secretReference,
+        ])
+        #expect(snapshot.servers[0].tools[0].policyOverride == .fullyTrusted)
+        let toolFields = Set(Mirror(reflecting: snapshot.servers[0].tools[0]).children.compactMap(\.label))
+        #expect(!toolFields.contains("summary"))
+        #expect(!toolFields.contains("inputSchemaJSON"))
+    }
+
+    @Test
+    func controlledSettingsReloadRetainsOverrideOnStaleCatalog() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-capability-reload-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let server = CapabilityServerRecord(
+            id: "notes", displayName: "Notes", transport: .stdio,
+            command: "/usr/bin/true", endpoint: nil, arguments: [], enabled: false,
+            defaultPolicy: .askBeforeChanges, staleState: .current,
+            createdAt: .distantPast, updatedAt: .distantPast
+        )
+        try await repository.saveServer(server)
+        let descriptor = try CapabilityDescriptor(
+            id: CapabilityID(source: .millerMCP, serverID: "notes", toolName: "lookup"),
+            source: .millerMCP, serverID: "notes", toolName: "lookup",
+            displayName: "Lookup", summary: "Lookup",
+            inputSchemaJSON: Data(#"{"type":"object"}"#.utf8),
+            readOnlyHint: true, providerProfileIDs: [], isAvailable: true
+        )
+        try await repository.reconcileCatalog(serverID: "notes", descriptors: [descriptor])
+        try await repository.setPolicyOverride(.fullyTrusted, toolID: descriptor.id)
+        let controller = CapabilityController(
+            loadConfiguration: {
+                .init(
+                    servers: [try MCPServerConfiguration(
+                        id: "notes", displayName: "Notes",
+                        transport: .stdio(executable: "/usr/bin/true", arguments: []),
+                        enabled: false
+                    )],
+                    toolPolicies: [descriptor.id: .fullyTrusted]
+                )
+            },
+            settingsRepository: repository
+        )
+
+        try await controller.reloadLocalConfiguration()
+        let snapshot = try await controller.settingsSnapshot(providerNames: [:])
+
+        #expect(snapshot.servers[0].tools[0].staleState == .stale)
+        #expect(snapshot.servers[0].tools[0].policyOverride == .fullyTrusted)
+    }
 }
 
 private struct ControllerFixture {

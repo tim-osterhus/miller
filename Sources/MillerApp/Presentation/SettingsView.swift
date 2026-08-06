@@ -2,8 +2,23 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var model: AppPresentationModel
+    @ObservedObject var capabilitySettings: MCPServerEditorModel
+    @ObservedObject var privacySettings: PrivacyDataSettingsModel
+    @ObservedObject var diagnosticsSettings: DiagnosticsSettingsModel
     @AppStorage(SettingsSelectionPreferences.key)
     private var selectedSectionRawValue = SettingsSection.general.rawValue
+
+    init(
+        model: AppPresentationModel,
+        capabilitySettings: MCPServerEditorModel = .init(),
+        privacySettings: PrivacyDataSettingsModel = .init(),
+        diagnosticsSettings: DiagnosticsSettingsModel = .init()
+    ) {
+        self.model = model
+        self.capabilitySettings = capabilitySettings
+        self.privacySettings = privacySettings
+        self.diagnosticsSettings = diagnosticsSettings
+    }
 
     var body: some View {
         TabView(selection: selectedSection) {
@@ -52,11 +67,11 @@ struct SettingsView: View {
         case .voice:
             VoiceSettingsTab(model: model)
         case .toolsIntegrations:
-            ToolsIntegrationsSettingsTab()
+            ToolsIntegrationsSettingsTab(editor: capabilitySettings)
         case .privacyData:
-            PrivacyDataSettingsTab(model: model)
+            PrivacyDataSettingsTab(model: model, privacy: privacySettings)
         case .diagnostics:
-            DiagnosticsSettingsTab(model: model)
+            DiagnosticsSettingsTab(model: model, diagnostics: diagnosticsSettings)
         }
     }
 }

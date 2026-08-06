@@ -2270,6 +2270,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         let preferenceRepository = try SQLitePreferenceRepository(
             path: databasePath
         )
+        let capabilitySettingsRepository = try SQLiteCapabilityRepository(
+            path: databasePath
+        )
         let liveTranscriptRecorder = LiveVoiceTranscriptRecorder(
             persistence: .init(
                 savingEnabled: {
@@ -2372,6 +2375,316 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             voiceHistory: voiceHistory,
             capabilityController: capabilityController
         )
+        let providerNames: @Sendable () async throws -> [UUID: String] = {
+            [repository] in
+            Dictionary(uniqueKeysWithValues: try await repository
+                .providerProfiles().map { ($0.id, $0.label) })
+        }
+        let capabilitySettings = MCPServerEditorModel(
+            dependencies: MCPServerEditorDependencies(
+                load: { [capabilityController] in
+                    try await capabilityController.settingsSnapshot(
+                        providerNames: try await providerNames()
+                    )
+                },
+                save: { [capabilitySettingsRepository, capabilityController,
+                         repository] value in
+                    try await capabilitySettingsRepository.saveServer(value.server)
+                    for binding in value.secrets {
+                        try await capabilitySettingsRepository.saveSecretBinding(binding)
+                    }
+                    let allProfiles = try await repository.providerProfiles()
+                    for profile in allProfiles {
+                        try await capabilitySettingsRepository.setProviderEnabled(
+                            value.providerProfileIDs.contains(profile.id),
+                            serverID: value.server.id,
+                            providerProfileID: profile.id
+                        )
+                    }
+                    try await capabilityController.reloadLocalConfiguration()
+                },
+                remove: { [capabilitySettingsRepository, credentialStore,
+                           capabilityController] serverID in
+                    let references = try await capabilitySettingsRepository
+                        .secretBindings(serverID: serverID)
+                        .map(\.credentialReference)
+                    for reference in references {
+                        try await credentialStore.delete(for: reference)
+                    }
+                    try await capabilitySettingsRepository.deleteServer(id: serverID)
+                    try await capabilityController.reloadLocalConfiguration()
+                },
+                persistSecret: { [credentialStore] service, reference, value in
+                    guard service == KeychainCredentialStore.service,
+                          let data = value.data(using: .utf8), !data.isEmpty
+                    else { throw CredentialError.storageFailed }
+                    try await credentialStore.store(
+                        try CredentialEnvelope(
+                            providerKind: .openAICompatible,
+                            payload: data
+                        ),
+                        for: reference
+                    )
+                },
+                deleteSecret: { [credentialStore] reference in
+                    try? await credentialStore.delete(for: reference)
+                },
+                testConnection: { [capabilitySettingsRepository,
+                                   credentialStore] serverID in
+                    guard let server = try await capabilitySettingsRepository
+                        .server(id: serverID)
+                    else { throw CapabilityStorageError.serverNotFound }
+                    let transport: MCPServerTransport
+                    switch server.transport {
+                    case .stdio:
+                        guard let command = server.command else {
+                            throw MCPConfigurationError.invalidExecutable
+                        }
+                        transport = .stdio(
+                            executable: command,
+                            arguments: server.arguments
+                        )
+                    case .streamableHTTP:
+                        guard let raw = server.endpoint, let endpoint = URL(string: raw)
+                        else { throw MCPConfigurationError.invalidEndpoint }
+                        transport = .http(endpoint: endpoint)
+                    }
+                    let bindings = try await capabilitySettingsRepository
+                        .secretBindings(serverID: serverID).map { binding in
+                            try MCPSecretBinding(
+                                destination: binding.kind == .environment
+                                    ? .environment : .header,
+                                name: binding.name,
+                                credentialReference: binding.credentialReference
+                            )
+                        }
+                    let configuration = try MCPServerConfiguration(
+                        id: server.id,
+                        displayName: server.displayName,
+                        transport: transport,
+                        secrets: bindings,
+                        enabled: true,
+                        defaultPolicy: server.defaultPolicy
+                    )
+                    let session = try await MCPClientSession.connect(
+                        configuration: configuration,
+                        credentialResolver: { reference in
+                            let envelope = try await credentialStore.load(for: reference)
+                            guard let value = String(
+                                data: envelope.payload, encoding: .utf8
+                            ), !value.isEmpty else {
+                                throw CapabilityControllerError.unavailable
+                            }
+                            return value
+                        }
+                    )
+                    let tools: [MCPDiscoveredTool]
+                    do {
+                        tools = try await session.listTools()
+                        await session.disconnect()
+                    } catch {
+                        await session.disconnect()
+                        throw error
+                    }
+                    let enabledIDs = Set(
+                        try await capabilitySettingsRepository
+                            .enabledProviderProfileIDs(serverID: serverID)
+                    )
+                    let descriptors = try tools.map { tool in
+                        try CapabilityDescriptor(
+                            id: CapabilityID(
+                                source: .millerMCP,
+                                serverID: serverID,
+                                toolName: tool.name
+                            ),
+                            source: .millerMCP,
+                            serverID: serverID,
+                            toolName: tool.name,
+                            displayName: tool.displayName,
+                            summary: tool.summary,
+                            inputSchemaJSON: tool.inputSchemaJSON,
+                            readOnlyHint: tool.readOnlyHint,
+                            providerProfileIDs: enabledIDs,
+                            isAvailable: true
+                        )
+                    }
+                    try await capabilitySettingsRepository.reconcileCatalog(
+                        serverID: serverID,
+                        descriptors: descriptors
+                    )
+                    return tools.count
+                },
+                setProviderEnabled: { [capabilitySettingsRepository,
+                                       capabilityController] enabled, serverID,
+                                      profileID in
+                    try await capabilitySettingsRepository.setProviderEnabled(
+                        enabled,
+                        serverID: serverID,
+                        providerProfileID: profileID
+                    )
+                    try await capabilityController.reloadLocalConfiguration()
+                },
+                setServerPolicy: { [capabilitySettingsRepository,
+                                    capabilityController] serverID, policy in
+                    guard let server = try await capabilitySettingsRepository
+                        .server(id: serverID)
+                    else { throw CapabilityStorageError.serverNotFound }
+                    try await capabilitySettingsRepository.saveServer(.init(
+                        id: server.id,
+                        displayName: server.displayName,
+                        transport: server.transport,
+                        command: server.command,
+                        endpoint: server.endpoint,
+                        arguments: server.arguments,
+                        enabled: server.enabled,
+                        defaultPolicy: policy,
+                        staleState: server.staleState,
+                        createdAt: server.createdAt,
+                        updatedAt: Date()
+                    ))
+                    try await capabilityController.reloadLocalConfiguration()
+                },
+                setToolPolicy: { [capabilitySettingsRepository,
+                                  capabilityController] toolID, policy in
+                    try await capabilitySettingsRepository.setPolicyOverride(
+                        policy, toolID: toolID
+                    )
+                    try await capabilityController.reloadLocalConfiguration()
+                },
+                refresh: { [capabilityController] in
+                    try await capabilityController.reloadLocalConfiguration()
+                    return try await capabilityController.settingsSnapshot(
+                        providerNames: try await providerNames()
+                    )
+                }
+            )
+        )
+        let databaseURL = URL(fileURLWithPath: databasePath)
+        let privacySettings = PrivacyDataSettingsModel(
+            dependencies: PrivacyDataSettingsDependencies(
+                loadTranscriptSavingEnabled: { [preferenceRepository] in
+                    try await preferenceRepository.value(
+                        for: .voiceTranscriptSavingEnabled
+                    )
+                },
+                loadNextSessionSavingEnabled: { [preferenceRepository] in
+                    try await preferenceRepository.value(
+                        for: .nextVoiceSessionSavingEnabled
+                    )
+                },
+                setTranscriptSavingEnabled: { [preferenceRepository] value in
+                    try await preferenceRepository.set(
+                        value, for: .voiceTranscriptSavingEnabled
+                    )
+                },
+                setNextSessionSavingEnabled: { [preferenceRepository] value in
+                    try await preferenceRepository.set(
+                        value, for: .nextVoiceSessionSavingEnabled
+                    )
+                },
+                exportVoiceHistory: { [voiceHistoryRepository] url in
+                    let sessions = try await voiceHistoryRepository.sessions()
+                    let projection = try await voiceHistoryRepository
+                        .exportProjection(sessionIDs: sessions.map(\.id))
+                    try VoiceHistoryExportDocument.write(projection, to: url)
+                },
+                deleteVoiceHistory: { [voiceHistoryRepository] in
+                    try await voiceHistoryRepository.deleteAll()
+                },
+                deleteCapabilityAudit: { [capabilitySettingsRepository] in
+                    try await capabilitySettingsRepository.deleteAllAudits()
+                },
+                storageUsage: { [databaseURL, cacheURL] in
+                    ManagedStorageUsage.measure(
+                        dataURLs: [databaseURL], cacheURLs: [cacheURL]
+                    )
+                },
+                reset: { [providerController, voiceHistoryRepository,
+                          preferenceRepository, capabilitySettingsRepository,
+                          capabilityController] in
+                    await capabilityController.shutdown()
+                    await voiceHistoryRepository.close()
+                    await preferenceRepository.close()
+                    await capabilitySettingsRepository.close()
+                    var roots = await providerController.reset().roots
+                    do {
+                        try await voiceHistoryRepository.reopen()
+                        roots.append(.init(
+                            root: "sqlite.voice_history.reopen", succeeded: true
+                        ))
+                    } catch {
+                        roots.append(.init(
+                            root: "sqlite.voice_history.reopen", succeeded: false
+                        ))
+                    }
+                    do {
+                        try await preferenceRepository.reopen()
+                        roots.append(.init(
+                            root: "sqlite.preferences.reopen", succeeded: true
+                        ))
+                    } catch {
+                        roots.append(.init(
+                            root: "sqlite.preferences.reopen", succeeded: false
+                        ))
+                    }
+                    do {
+                        try await capabilitySettingsRepository.reopen()
+                        try await capabilityController.reloadLocalConfiguration()
+                        roots.append(.init(
+                            root: "sqlite.capabilities.reopen", succeeded: true
+                        ))
+                    } catch {
+                        roots.append(.init(
+                            root: "sqlite.capabilities.reopen", succeeded: false
+                        ))
+                    }
+                    return ResetResult(roots: roots)
+                },
+                resetWakePreferences: { [preferenceRepository] in
+                    try await preferenceRepository.set(false, for: .wakewordEnabled)
+                    try await preferenceRepository.set("Hey Miller", for: .wakePhrase)
+                    try await preferenceRepository.set("", for: .wakeMicrophoneID)
+                    try await preferenceRepository.set(
+                        0.5, for: .wakeDetectionThreshold
+                    )
+                    try await preferenceRepository.set(0.0, for: .wakeKeywordScore)
+                }
+            )
+        )
+        let diagnosticsSettings = DiagnosticsSettingsModel(
+            dependencies: DiagnosticsSettingsDependencies(
+                load: { [model, capabilityController, databaseURL, cacheURL] in
+                    let names = (try? await providerNames()) ?? [:]
+                    let capabilities = try? await capabilityController
+                        .settingsSnapshot(providerNames: names)
+                    let freshness = capabilities?.servers.contains(where: {
+                        $0.server.staleState == .stale
+                            || $0.tools.contains(where: { $0.staleState == .stale })
+                    }) == true ? "Stale" : "Current"
+                    let usage = ManagedStorageUsage.measure(
+                        dataURLs: [databaseURL], cacheURLs: [cacheURL]
+                    )
+                    let failure = await MainActor.run { model.errorCode }
+                    return DiagnosticsSettingsSnapshot(
+                        componentVersions: [
+                            "Miller": Bundle.main.object(
+                                forInfoDictionaryKey: "CFBundleShortVersionString"
+                            ) as? String ?? "development",
+                            "MCP SDK": "0.12.1",
+                            "Pi overlay": "0.82.0-a3",
+                        ],
+                        sanitizedLastFailure: failure,
+                        catalogFreshness: freshness,
+                        brokerProcessState: capabilities == nil
+                            ? "Unavailable" : "Ready on demand",
+                        adapterProcessState: runtimeSelection == nil
+                            ? "Unavailable" : "Ready on demand",
+                        managedDataBytes: usage.managedDataBytes,
+                        managedCacheBytes: usage.managedCacheBytes
+                    )
+                }
+            )
+        )
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         overlayController = OverlayPanelController(
             model: model,
@@ -2379,7 +2692,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         )
         conversationController = ConversationWindowController(model: model)
         settingsController = NSWindowController(
-            window: NSHostingWindow(rootView: SettingsView(model: model))
+            window: NSHostingWindow(rootView: SettingsView(
+                model: model,
+                capabilitySettings: capabilitySettings,
+                privacySettings: privacySettings,
+                diagnosticsSettings: diagnosticsSettings
+            ))
         )
         activationService = GlobalActivationService()
         shortcutPreferences = GlobalShortcutPreferences()
