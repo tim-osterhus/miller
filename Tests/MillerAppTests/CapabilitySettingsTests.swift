@@ -108,21 +108,31 @@ struct CapabilitySettingsTests {
 
     @Test
     func diagnosticsExposeApprovedSanitizedFields() throws {
+        let usage = ManagedStorageUsage(
+            managedDataBytes: 123,
+            managedCacheBytes: 0,
+            dataCompleteness: .partial,
+            cacheCompleteness: .unavailable
+        )
         let snapshot = DiagnosticsSettingsSnapshot(
             componentVersions: ["Miller": "0.1.1"],
             sanitizedLastFailure: "provider_unavailable",
             catalogFreshness: "Stale",
             brokerProcessState: "Stopped",
             adapterProcessState: "Ready",
-            managedDataBytes: 123,
-            managedCacheBytes: 456
+            managedDataBytes: usage.managedDataBytes,
+            managedCacheBytes: usage.managedCacheBytes,
+            managedDataLabel: usage.dataLabel(),
+            managedCacheLabel: usage.cacheLabel()
         )
         #expect(snapshot.rows.map(\.label) == [
             "Miller version", "Last failure", "Catalog", "Capability controller",
             "Broker process", "Bridge RPC", "Adapter process",
             "MCP child sessions", "Managed data", "Managed cache",
         ])
-        #expect(snapshot.rows.last?.value == "456 bytes")
+        #expect(snapshot.rows.first(where: { $0.label == "Managed data" })?
+            .value.hasSuffix("(partial)") == true)
+        #expect(snapshot.rows.last?.value == "Unavailable")
     }
 }
 

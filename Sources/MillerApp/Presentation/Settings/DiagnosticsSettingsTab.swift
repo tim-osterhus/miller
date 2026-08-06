@@ -17,6 +17,8 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
     var mcpChildState = "Unavailable"
     let managedDataBytes: Int64
     let managedCacheBytes: Int64
+    var managedDataLabel: String? = nil
+    var managedCacheLabel: String? = nil
 
     var rows: [DiagnosticsSettingsRow] {
         let versionRows = componentVersions.keys.sorted().map {
@@ -30,8 +32,14 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
             .init(label: "Bridge RPC", value: bridgeRPCState),
             .init(label: "Adapter process", value: adapterProcessState),
             .init(label: "MCP child sessions", value: mcpChildState),
-            .init(label: "Managed data", value: "\(managedDataBytes) bytes"),
-            .init(label: "Managed cache", value: "\(managedCacheBytes) bytes"),
+            .init(
+                label: "Managed data",
+                value: managedDataLabel ?? "\(managedDataBytes) bytes"
+            ),
+            .init(
+                label: "Managed cache",
+                value: managedCacheLabel ?? "\(managedCacheBytes) bytes"
+            ),
         ]
     }
 
@@ -42,7 +50,9 @@ struct DiagnosticsSettingsSnapshot: Equatable, Sendable {
         brokerProcessState: "Unavailable",
         adapterProcessState: "Unavailable",
         managedDataBytes: 0,
-        managedCacheBytes: 0
+        managedCacheBytes: 0,
+        managedDataLabel: "Unavailable",
+        managedCacheLabel: "Unavailable"
     )
 }
 

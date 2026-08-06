@@ -3,46 +3,143 @@ import Foundation
 import SwiftUI
 
 struct ManagedStorageUsage: Equatable, Sendable {
+    enum Completeness: Equatable, Sendable {
+        case complete
+        case partial
+        case unavailable
+    }
+
     let managedDataBytes: Int64
     let managedCacheBytes: Int64
+    var dataCompleteness: Completeness = .complete
+    var cacheCompleteness: Completeness = .complete
 
-    static let zero = Self(managedDataBytes: 0, managedCacheBytes: 0)
+    static let zero = Self(
+        managedDataBytes: 0,
+        managedCacheBytes: 0,
+        dataCompleteness: .unavailable,
+        cacheCompleteness: .unavailable
+    )
 
     static func measure(
         dataURLs: [URL],
         cacheURLs: [URL],
         fileManager: FileManager = .default
     ) -> Self {
-        Self(
-            managedDataBytes: dataURLs.reduce(0) {
-                $0 + bytes(at: $1, fileManager: fileManager)
-            },
-            managedCacheBytes: cacheURLs.reduce(0) {
-                $0 + bytes(at: $1, fileManager: fileManager)
-            }
+        let data = measurement(at: dataURLs, fileManager: fileManager)
+        let cache = measurement(at: cacheURLs, fileManager: fileManager)
+        return Self(
+            managedDataBytes: data.bytes,
+            managedCacheBytes: cache.bytes,
+            dataCompleteness: data.completeness,
+            cacheCompleteness: cache.completeness
         )
     }
 
-    private static func bytes(at url: URL, fileManager: FileManager) -> Int64 {
-        guard fileManager.fileExists(atPath: url.path) else { return 0 }
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        if let values = try? url.resourceValues(forKeys: keys),
-           values.isRegularFile == true {
-            return Int64(values.fileSize ?? 0)
-        }
-        guard let enumerator = fileManager.enumerator(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: []
-        ) else { return 0 }
+    func dataLabel() -> String {
+        Self.label(bytes: managedDataBytes, completeness: dataCompleteness)
+    }
+
+    func cacheLabel() -> String {
+        Self.label(bytes: managedCacheBytes, completeness: cacheCompleteness)
+    }
+
+    private static func measurement(
+        at urls: [URL],
+        fileManager: FileManager
+    ) -> (bytes: Int64, completeness: Completeness) {
         var total: Int64 = 0
-        for case let child as URL in enumerator {
-            if let values = try? child.resourceValues(forKeys: keys),
-               values.isRegularFile == true {
-                total += Int64(values.fileSize ?? 0)
+        var measuredAnyRoot = false
+        var encounteredError = false
+        for url in urls {
+            let value = measurement(at: url, fileManager: fileManager)
+            total += value.bytes
+            measuredAnyRoot = measuredAnyRoot || value.measured
+            if value.completeness != .complete {
+                encounteredError = true
             }
         }
-        return total
+        let completeness: Completeness
+        if !encounteredError {
+            completeness = .complete
+        } else {
+            completeness = measuredAnyRoot ? .partial : .unavailable
+        }
+        return (total, completeness)
+    }
+
+    private static func measurement(
+        at url: URL,
+        fileManager: FileManager
+    ) -> (bytes: Int64, completeness: Completeness, measured: Bool) {
+        let rootAttributes: [FileAttributeKey: Any]
+        do {
+            rootAttributes = try fileManager.attributesOfItem(atPath: url.path)
+        } catch {
+            return Self.fileIsAbsent(error)
+                ? (0, .complete, true)
+                : (0, .unavailable, false)
+        }
+        if rootAttributes[.type] as? FileAttributeType == .typeRegular {
+            guard let size = rootAttributes[.size] as? NSNumber else {
+                return (0, .partial, true)
+            }
+            return (size.int64Value, .complete, true)
+        }
+        guard rootAttributes[.type] as? FileAttributeType == .typeDirectory else {
+            return (0, .complete, true)
+        }
+        var encounteredError = false
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: [],
+            errorHandler: { _, _ in
+                encounteredError = true
+                return true
+            }
+        ) else { return (0, .unavailable, false) }
+        var total: Int64 = 0
+        for case let child as URL in enumerator {
+            do {
+                let attributes = try fileManager.attributesOfItem(
+                    atPath: child.path
+                )
+                if attributes[.type] as? FileAttributeType == .typeRegular {
+                    guard let size = attributes[.size] as? NSNumber else {
+                        encounteredError = true
+                        continue
+                    }
+                    total += size.int64Value
+                }
+            } catch {
+                encounteredError = true
+            }
+        }
+        return (
+            total,
+            encounteredError ? .partial : .complete,
+            true
+        )
+    }
+
+    private static func fileIsAbsent(_ error: Error) -> Bool {
+        let error = error as NSError
+        guard error.domain == NSCocoaErrorDomain else { return false }
+        return error.code == CocoaError.Code.fileNoSuchFile.rawValue
+            || error.code == CocoaError.Code.fileReadNoSuchFile.rawValue
+    }
+
+    private static func label(bytes: Int64, completeness: Completeness) -> String {
+        switch completeness {
+        case .complete:
+            ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        case .partial:
+            ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                + " (partial)"
+        case .unavailable:
+            "Unavailable"
+        }
     }
 }
 
@@ -280,9 +377,11 @@ struct PrivacyDataSettingsTab: View {
                 Button("Delete all voice history…", role: .destructive) {
                     voiceDeleteConfirmation = true
                 }
+                .disabled(model.isActiveOperation || privacy.isBusy)
                 Button("Delete capability audit…", role: .destructive) {
                     auditDeleteConfirmation = true
                 }
+                .disabled(model.isActiveOperation || privacy.isBusy)
                 Text("Exports contain transcript text, never audio or credentials.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -295,16 +394,10 @@ struct PrivacyDataSettingsTab: View {
         GroupBox("Managed storage") {
             VStack(alignment: .leading, spacing: 8) {
                 LabeledContent("Data") {
-                    Text(ByteCountFormatter.string(
-                        fromByteCount: privacy.storageUsage.managedDataBytes,
-                        countStyle: .file
-                    ))
+                    Text(privacy.storageUsage.dataLabel())
                 }
                 LabeledContent("Cache") {
-                    Text(ByteCountFormatter.string(
-                        fromByteCount: privacy.storageUsage.managedCacheBytes,
-                        countStyle: .file
-                    ))
+                    Text(privacy.storageUsage.cacheLabel())
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

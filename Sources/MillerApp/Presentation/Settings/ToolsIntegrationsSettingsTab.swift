@@ -27,6 +27,9 @@ struct ToolsIntegrationsSettingsTab: View {
         }
         .accessibilityLabel(section.accessibilityLabel)
         .task { await editor.load() }
+        .onChange(of: editor.resetEpoch) { _, _ in
+            dismissEditor()
+        }
     }
 
     private var codexAppsSection: some View {
@@ -203,12 +206,19 @@ struct ToolsIntegrationsSettingsTab: View {
                 if draft.transport == .stdio {
                     TextField("Absolute executable path", text: $draft.executable)
                     TextField("Arguments JSON array", text: $draft.argumentsJSON)
-                    Text("Arguments are stored as a JSON array; shell command strings are rejected.")
+                    Text("Arguments are stored and launched as a direct JSON argument array.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     TextField("HTTPS MCP endpoint", text: $draft.endpoint)
                 }
-                Toggle("Enabled", isOn: $draft.enabled)
+                if draft.enabled {
+                    Toggle("Enabled", isOn: $draft.enabled)
+                    Text("After disabling a server, test its connection to enable it again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Test the saved connection to enable this server.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Picker("Default policy", selection: $draft.defaultPolicy) {
                     ForEach(CapabilityPolicy.allCases, id: \.self) { policy in
                         Text(policy.settingsLabel).tag(policy)
@@ -244,18 +254,19 @@ struct ToolsIntegrationsSettingsTab: View {
                 HStack {
                     Button("Save server") {
                         let value = draft
+                        let mode: MCPServerMutationMode = editingServerID.map {
+                            .edit(originalID: $0)
+                        } ?? .create
                         Task {
-                            await editor.save(value)
+                            await editor.save(value, mode: mode)
                             if editor.status == "Server saved" {
-                                editingServerID = nil
-                                showingEditor = false
+                                dismissEditor()
                             }
                         }
                     }
                     .disabled(editor.isBusy)
                     Button("Cancel") {
-                        editingServerID = nil
-                        showingEditor = false
+                        dismissEditor()
                     }
                 }
             }
@@ -267,6 +278,7 @@ struct ToolsIntegrationsSettingsTab: View {
     private func edit(_ snapshot: MCPServerSettingsSnapshot) {
         let server = snapshot.server
         editingServerID = server.id
+        editor.clearConnectionStatus(serverID: server.id)
         draft = MCPServerEditorDraft(
             id: server.id,
             displayName: server.displayName,
@@ -292,6 +304,12 @@ struct ToolsIntegrationsSettingsTab: View {
             createdAt: server.createdAt
         )
         showingEditor = true
+    }
+
+    private func dismissEditor() {
+        draft = .newStdio
+        editingServerID = nil
+        showingEditor = false
     }
 }
 

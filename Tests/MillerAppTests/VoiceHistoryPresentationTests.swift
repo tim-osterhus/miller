@@ -183,6 +183,154 @@ struct VoiceHistoryPresentationTests {
     }
 
     @Test
+    func activeVoiceRejectsEveryHistoryDeletionPath() async {
+        let first = UUID()
+        let history = VoiceHistoryProjectionProbe(
+            sessions: [historySession(id: first)],
+            projections: [historyExport(id: first)]
+        )
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .listening,
+                availability: { .listening }, start: { _ in }, mute: { _ in },
+                interrupt: {}, end: {}
+            ),
+            voiceHistory: await history.dependencies()
+        )
+
+        await model.deleteVoiceHistorySession(first)
+        await model.deleteVoiceHistory(
+            from: Date(timeIntervalSince1970: 0), through: Date()
+        )
+        await model.deleteAllVoiceHistory()
+        await #expect(throws: VoiceHistoryMutationError.busy) {
+            try await model.deleteAllVoiceHistoryFromSettings()
+        }
+
+        #expect(await history.deletedSessionIDs.isEmpty)
+        #expect(await history.deletedRanges.isEmpty)
+        #expect(await history.deleteAllCount == 0)
+    }
+
+    @Test
+    func suspendedHistoryDeletionFencesTypedAndVoiceAdmission() async {
+        let history = SuspendedVoiceHistoryDeletionProbe()
+        let submits = VoiceHistorySubmitProbe()
+        let live = LiveVoiceStartProbe()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: submits),
+            liveVoice: live.dependencies(),
+            voiceHistory: history.dependencies()
+        )
+        model.draft = "must wait"
+
+        let deletion = Task { await model.deleteAllVoiceHistory() }
+        #expect(await history.waitUntilRequested())
+        #expect(!model.canSubmit)
+        #expect(!model.canStartLiveVoice)
+
+        await model.submit()
+        await model.startLiveVoice()
+
+        #expect(await submits.calls.isEmpty)
+        #expect(await live.startCount == 0)
+        await history.resume()
+        await deletion.value
+    }
+
+    @Test
+    func resetInvalidatesSuspendedVoiceHistoryRefresh() async {
+        let session = historySession(id: UUID())
+        let history = SuspendedVoiceHistoryRefreshProbe(session: session)
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            voiceHistory: history.dependencies()
+        )
+
+        let refresh = Task { await model.refreshVoiceHistory() }
+        await history.waitUntilRequested()
+
+        _ = await model.performManagedPrivacyReset {
+            .init(roots: [.init(root: "voice_history", succeeded: true)])
+        }
+        await history.resume()
+        await refresh.value
+
+        #expect(model.voiceHistorySessions.isEmpty)
+        #expect(model.voiceHistoryStatus == nil)
+    }
+
+    @Test
+    func capabilityMaintenanceBusyStateFencesPresentationAdmission() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-capability-presentation-fence-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try SQLiteCapabilityRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+        let controller = CapabilityController(
+            loadConfiguration: { .init(servers: [], toolPolicies: [:]) },
+            settingsRepository: repository
+        )
+        let submits = VoiceHistorySubmitProbe()
+        let live = LiveVoiceStartProbe()
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: submits),
+            liveVoice: live.dependencies(), capabilityController: controller
+        )
+        model.draft = "must wait"
+        let resetProbe = SuspendedResetResultProbe()
+        let reset = Task {
+            await controller.performManagedReset { await resetProbe.perform() }
+        }
+        await resetProbe.waitUntilRequested()
+
+        #expect(model.capabilitySettingsBusy)
+        #expect(model.isActiveOperation)
+        #expect(!model.canSubmit)
+        #expect(!model.canStartLiveVoice)
+        await model.submit()
+        await model.startLiveVoice()
+        #expect(await submits.calls.isEmpty)
+        #expect(await live.startCount == 0)
+
+        await resetProbe.resume()
+        _ = await reset.value
+        #expect(!model.capabilitySettingsBusy)
+    }
+
+    @Test
+    func suspendedVoicePreparationFencesHistoryDeletion() async throws {
+        let profileID = UUID()
+        let configuration = SuspendedCapabilityLoadProbe()
+        let controller = CapabilityController(
+            loadConfiguration: { try await configuration.load() }
+        )
+        let history = VoiceHistoryProjectionProbe(sessions: [], projections: [])
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(submits: VoiceHistorySubmitProbe()),
+            providerSettings: selectedProviderDependencies(profileID: profileID),
+            liveVoice: LiveVoiceStartProbe().dependencies(),
+            voiceHistory: await history.dependencies(),
+            capabilityController: controller
+        )
+        await model.refreshProviderSettings()
+
+        let start = Task { await model.startLiveVoice() }
+        await configuration.waitUntilRequested()
+        await model.deleteAllVoiceHistory()
+
+        #expect(await history.deleteAllCount == 0)
+        #expect(model.voiceHistoryStatus == "Voice history deletion unavailable while Miller is active.")
+        await configuration.resume(with: .init(servers: [], toolPolicies: [:]))
+        await start.value
+    }
+
+    @Test
     func cancellationWinsAgainstSuspendedAttachmentProjection() async {
         let sessionID = UUID()
         let gate = VoiceHistoryProjectionGate()
@@ -310,6 +458,9 @@ struct VoiceHistoryPresentationTests {
         if interference == .replacement {
             #expect(model.pendingVoiceHistoryAttachment?.sessionIDs == [replacement])
             #expect(model.voiceHistoryStatus == nil)
+        } else if interference == .deletion {
+            #expect(model.pendingVoiceHistoryAttachment == nil)
+            #expect(model.voiceHistoryStatus == "Selected voice history is no longer available.")
         } else {
             #expect(model.pendingVoiceHistoryAttachment == nil)
             #expect(model.voiceHistoryStatus == nil)
@@ -377,6 +528,26 @@ struct VoiceHistoryPresentationTests {
 
     private func attachmentProjection(id: UUID, text: String) -> VoiceHistoryAttachmentProjection {
         .init(sessionIDs: [id], entries: historyExport(id: id, text: text).entries, hasMore: false)
+    }
+
+    private func selectedProviderDependencies(
+        profileID: UUID
+    ) -> ProviderSettingsDependencies {
+        let snapshot = ProviderSettingsSnapshot(
+            profiles: [.init(
+                id: profileID, label: "Codex", kind: .codexOAuth,
+                endpoint: nil, model: "gpt-test",
+                credentialReference: UUID(), isSelected: true
+            )],
+            readiness: "Ready"
+        )
+        return .init(
+            load: { snapshot }, saveOpenAICompatible: { _, _ in },
+            saveCodexModel: { _ in }, select: { _, _ in },
+            beginCodexLogin: { _ in }, refreshCodexAuthentication: { _ in },
+            retryReadiness: { snapshot }, localLogout: { _ in },
+            delete: { _, _ in }, reset: { .init(roots: []) }
+        )
     }
 }
 
@@ -451,6 +622,179 @@ private actor VoiceHistorySubmitProbe {
             conversationID: conversationID,
             attachment: attachment
         ))
+    }
+}
+
+private actor LiveVoiceStartProbe {
+    private(set) var startCount = 0
+
+    nonisolated func dependencies() -> LiveVoiceDependencies {
+        .init(
+            initialAvailability: .available,
+            availability: { .available },
+            start: { [self] _ in await recordStart() },
+            mute: { _ in }, interrupt: {}, end: {}
+        )
+    }
+
+    private func recordStart() { startCount += 1 }
+}
+
+private actor SuspendedVoiceHistoryDeletionProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var requestCount = 0
+
+    nonisolated func dependencies() -> VoiceHistoryDependencies {
+        .init(
+            sessions: { _, _ in [] }, exportProjection: { _ in [] },
+            attachmentProjection: { _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            rangeAttachmentProjection: { _, _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            deleteSession: { _ in }, deleteRange: { _, _ in },
+            deleteAll: { [self] in await suspend() }
+        )
+    }
+
+    private func suspend() async {
+        requestCount += 1
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilRequested() async -> Bool {
+        if requestCount == 0 {
+            await withCheckedContinuation { continuation in
+                if requestCount > 0 {
+                    continuation.resume()
+                } else {
+                    requestWaiters.append(continuation)
+                }
+            }
+        }
+        return true
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SuspendedVoiceHistoryRefreshProbe {
+    private let session: VoiceHistorySession
+    private var continuation: CheckedContinuation<[VoiceHistorySession], Never>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var requested = false
+
+    init(session: VoiceHistorySession) {
+        self.session = session
+    }
+
+    nonisolated func dependencies() -> VoiceHistoryDependencies {
+        .init(
+            sessions: { [self] _, _ in await suspend() },
+            exportProjection: { _ in [] },
+            attachmentProjection: { _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            rangeAttachmentProjection: { _, _, _ in .init(
+                sessionIDs: [], entries: [], hasMore: false
+            ) },
+            deleteSession: { _ in }, deleteRange: { _, _ in }, deleteAll: {}
+        )
+    }
+
+    private func suspend() async -> [VoiceHistorySession] {
+        requested = true
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilRequested() async {
+        if requested { return }
+        await withCheckedContinuation { continuation in
+            if requested {
+                continuation.resume()
+            } else {
+                requestWaiters.append(continuation)
+            }
+        }
+    }
+
+    func resume() {
+        continuation?.resume(returning: [session])
+        continuation = nil
+    }
+}
+
+private actor SuspendedResetResultProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var requested = false
+
+    func perform() async -> ResetResult {
+        requested = true
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation = $0 }
+        return .init(roots: [])
+    }
+
+    func waitUntilRequested() async {
+        if !requested {
+            await withCheckedContinuation { continuation in
+                if requested {
+                    continuation.resume()
+                } else {
+                    requestWaiters.append(continuation)
+                }
+            }
+        }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SuspendedCapabilityLoadProbe {
+    private var continuation: CheckedContinuation<CapabilityRuntimeConfiguration, any Error>?
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var requested = false
+
+    func load() async throws -> CapabilityRuntimeConfiguration {
+        requested = true
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    func waitUntilRequested() async {
+        if !requested {
+            await withCheckedContinuation { continuation in
+                if requested {
+                    continuation.resume()
+                } else {
+                    requestWaiters.append(continuation)
+                }
+            }
+        }
+    }
+
+    func resume(with configuration: CapabilityRuntimeConfiguration) {
+        continuation?.resume(returning: configuration)
+        continuation = nil
     }
 }
 

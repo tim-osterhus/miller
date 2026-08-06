@@ -50,6 +50,10 @@ enum HostKeyboardCommand: Equatable {
     }
 }
 
+enum VoiceHistoryMutationError: Error, Equatable {
+    case busy
+}
+
 struct MenuState: Equatable {
     let canCreateConversation: Bool
     let canStop: Bool
@@ -338,6 +342,7 @@ final class AppPresentationModel: ObservableObject {
     private var liveVoiceCleanupWaiters: [CheckedContinuation<Void, Never>] = []
     @Published private var typedSubmissionPending = false
     @Published private var providerMutationPending = false
+    @Published private(set) var capabilitySettingsBusy = false
     @Published private var liveVoiceAvailability: LiveVoiceState
     private var liveVoiceAvailabilityGeneration: UInt64 = 0
     private var liveVoiceEventGeneration: UInt64 = 0
@@ -346,6 +351,7 @@ final class AppPresentationModel: ObservableObject {
     private var conversationProjectionGeneration: UInt64 = 0
     private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
+    @Published private var voiceHistoryDeletionPending = false
     private var capabilitySubscriptions = Set<AnyCancellable>()
 
     private struct PendingLiveTranscriptCleanup {
@@ -379,6 +385,9 @@ final class AppPresentationModel: ObservableObject {
             capabilityController.$liveVoiceConfirmationMessage
                 .sink { [weak self] in self?.liveCapabilityConfirmationMessage = $0 }
                 .store(in: &capabilitySubscriptions)
+            capabilityController.$settingsBusy
+                .sink { [weak self] in self?.capabilitySettingsBusy = $0 }
+                .store(in: &capabilitySubscriptions)
         }
     }
 
@@ -398,17 +407,20 @@ final class AppPresentationModel: ObservableObject {
         isActiveTurn || voiceState.isActive
             || typedSubmissionPending
             || liveVoiceStartPending || liveVoiceCleanupPending
+            || voiceHistoryDeletionPending
     }
 
     var isActiveOperation: Bool {
         hasActiveConversationOrVoiceOperation || providerMutationPending
+            || capabilitySettingsBusy
     }
 
     var canSubmit: Bool {
         !isActiveTurn && !voiceState.isActive
             && !typedSubmissionPending
             && !liveVoiceStartPending && !liveVoiceCleanupPending
-            && !providerMutationPending
+            && !voiceHistoryDeletionPending
+            && !providerMutationPending && !capabilitySettingsBusy
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -417,7 +429,8 @@ final class AppPresentationModel: ObservableObject {
             && liveVoiceAvailability == .available
             && !isActiveTurn && !typedSubmissionPending
             && !liveVoiceStartPending && !liveVoiceCleanupPending
-            && !providerMutationPending
+            && !voiceHistoryDeletionPending
+            && !providerMutationPending && !capabilitySettingsBusy
     }
 
     /// Presentation surfaces use this to preserve the attached WebKit peer
@@ -844,10 +857,33 @@ final class AppPresentationModel: ObservableObject {
             )
             return
         }
+        _ = await performResetAndRebuild { [providerSettings] in
+            await providerSettings.reset()
+        }
+    }
+
+    func performManagedPrivacyReset(
+        _ operation: @escaping @Sendable () async -> ResetResult
+    ) async -> ResetResult {
+        guard !isActiveOperation else {
+            return .init(roots: [
+                .init(root: "presentation.runtime_idle", succeeded: false),
+            ])
+        }
+        return await performResetAndRebuild(operation)
+    }
+
+    private func performResetAndRebuild(
+        _ operation: @escaping @Sendable () async -> ResetResult
+    ) async -> ResetResult {
         let generation = beginProviderMutation()
         let projectionGeneration = nextConversationProjectionGeneration()
         defer { providerMutationPending = false }
-        let result = await providerSettings.reset()
+        let result = await operation()
+        clearPresentationAfterReset(
+            providerGeneration: generation,
+            projectionGeneration: projectionGeneration
+        )
         await refreshLiveVoiceAvailability()
         do {
             _ = apply(
@@ -866,6 +902,7 @@ final class AppPresentationModel: ObservableObject {
                 : "Reset incomplete; review failed roots.",
             generation: generation
         )
+        return result
     }
 
     func submit() async {
@@ -873,7 +910,8 @@ final class AppPresentationModel: ObservableObject {
         guard !text.isEmpty, activeTurnID == nil, !voiceState.isActive,
               !typedSubmissionPending,
               !liveVoiceStartPending, !liveVoiceCleanupPending,
-              !providerMutationPending else {
+              !voiceHistoryDeletionPending,
+              !providerMutationPending, !capabilitySettingsBusy else {
             return
         }
         nextLiveVoiceAvailabilityGeneration()
@@ -939,10 +977,14 @@ final class AppPresentationModel: ObservableObject {
         from start: Date? = nil,
         through end: Date? = nil
     ) async {
+        let generation = voiceHistoryGeneration
         do {
-            voiceHistorySessions = try await voiceHistory.sessions(start, end)
+            let sessions = try await voiceHistory.sessions(start, end)
+            guard generation == voiceHistoryGeneration else { return }
+            voiceHistorySessions = sessions
             voiceHistoryStatus = nil
         } catch {
+            guard generation == voiceHistoryGeneration else { return }
             voiceHistorySessions = []
             voiceHistoryStatus = "Voice history is unavailable."
         }
@@ -1015,6 +1057,11 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteVoiceHistorySession(_ id: UUID) async {
+        guard beginVoiceHistoryDeletion() else {
+            voiceHistoryStatus = "Voice history deletion unavailable while Miller is active."
+            return
+        }
+        defer { voiceHistoryDeletionPending = false }
         voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteSession(id)
@@ -1026,6 +1073,11 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteVoiceHistory(from start: Date, through end: Date) async {
+        guard beginVoiceHistoryDeletion() else {
+            voiceHistoryStatus = "Voice history deletion unavailable while Miller is active."
+            return
+        }
+        defer { voiceHistoryDeletionPending = false }
         voiceHistoryGeneration &+= 1
         do {
             let deleted = try await voiceHistory.sessions(start, end).map(\.id)
@@ -1038,6 +1090,11 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func deleteAllVoiceHistory() async {
+        guard beginVoiceHistoryDeletion() else {
+            voiceHistoryStatus = "Voice history deletion unavailable while Miller is active."
+            return
+        }
+        defer { voiceHistoryDeletionPending = false }
         voiceHistoryGeneration &+= 1
         do {
             try await voiceHistory.deleteAll()
@@ -1046,6 +1103,31 @@ final class AppPresentationModel: ObservableObject {
         } catch {
             voiceHistoryStatus = "Voice history deletion failed."
         }
+    }
+
+    func deleteAllVoiceHistoryFromSettings() async throws {
+        guard beginVoiceHistoryDeletion() else {
+            throw VoiceHistoryMutationError.busy
+        }
+        defer { voiceHistoryDeletionPending = false }
+        voiceHistoryGeneration &+= 1
+        try await voiceHistory.deleteAll()
+        pendingVoiceHistoryAttachment = nil
+        await refreshVoiceHistory()
+    }
+
+    private func beginVoiceHistoryDeletion() -> Bool {
+        guard !isActiveTurn,
+              !voiceState.isActive,
+              !typedSubmissionPending,
+              !liveVoiceStartPending,
+              !liveVoiceCleanupPending,
+              !voiceHistoryDeletionPending,
+              !providerMutationPending,
+              !capabilitySettingsBusy
+        else { return false }
+        voiceHistoryDeletionPending = true
+        return true
     }
 
     private func preparedVoiceHistoryAttachment(
@@ -1089,14 +1171,19 @@ final class AppPresentationModel: ObservableObject {
         activationSource: VoiceActivationSource = .manual
     ) async {
         guard canStartLiveVoice else { return }
+        liveVoiceStartPending = true
         if let capabilityController {
             guard let profileID = providerProfiles.first(where: \.isSelected)?.id
-            else { return }
+            else {
+                liveVoiceStartPending = false
+                return
+            }
             do {
                 pendingVoiceCapabilityPreparation = try await capabilityController
                     .prepareLiveVoice(providerProfileID: profileID)
             } catch {
                 pendingVoiceCapabilityPreparation = nil
+                liveVoiceStartPending = false
                 voiceState = .failed
                 liveVoiceFailureCode = "capability_bridge_unavailable"
                 return
@@ -1104,7 +1191,6 @@ final class AppPresentationModel: ObservableObject {
         }
         nextLiveVoiceAvailabilityGeneration()
         let eventGeneration = nextLiveVoiceEventGeneration()
-        liveVoiceStartPending = true
         voiceState = .connecting
         liveVoiceFailureCode = nil
         liveTranscriptPersistenceMessage = nil
@@ -1469,19 +1555,6 @@ final class AppPresentationModel: ObservableObject {
 
     private func rebuildPresentationAfterReset(generation: UInt64) async {
         guard generation == conversationProjectionGeneration else { return }
-        turnObservation?.cancel()
-        turnObservation = nil
-        activeTurnID = nil
-        selectedConversationID = ConversationID()
-        draft = ""
-        presentationState = .ready
-        errorCode = nil
-        reasoningStatus = nil
-        resetLiveTranscripts()
-        liveVoiceFailureCode = nil
-        liveTranscriptPersistenceMessage = nil
-        liveVoiceMuted = false
-        voiceState = liveVoiceAvailability
         do {
             let loaded = ConversationListItem.ordered(
                 try await dependencies.loadConversations().map(
@@ -1504,6 +1577,36 @@ final class AppPresentationModel: ObservableObject {
             guard generation == conversationProjectionGeneration else { return }
             visibleTurns = []
         }
+    }
+
+    private func clearPresentationAfterReset(
+        providerGeneration: UInt64,
+        projectionGeneration: UInt64
+    ) {
+        clearProviderSnapshot(generation: providerGeneration)
+        guard projectionGeneration == conversationProjectionGeneration else {
+            return
+        }
+        voiceHistoryGeneration &+= 1
+        nextLiveVoiceEventGeneration()
+        turnObservation?.cancel()
+        turnObservation = nil
+        activeTurnID = nil
+        selectedConversationID = ConversationID()
+        draft = ""
+        presentationState = .ready
+        errorCode = nil
+        reasoningStatus = nil
+        conversations = []
+        visibleTurns = []
+        voiceHistorySessions = []
+        pendingVoiceHistoryAttachment = nil
+        voiceHistoryStatus = nil
+        resetLiveTranscripts()
+        liveVoiceFailureCode = nil
+        liveTranscriptPersistenceMessage = nil
+        liveVoiceMuted = false
+        voiceState = liveVoiceAvailability
     }
 
     private func loadProviderSettings(generation: UInt64) async throws -> Bool {
@@ -2291,9 +2394,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         let preferenceRepository = try SQLitePreferenceRepository(
             path: databasePath
         )
-        let capabilitySettingsRepository = try SQLiteCapabilityRepository(
-            path: databasePath
-        )
         let liveTranscriptRecorder = LiveVoiceTranscriptRecorder(
             persistence: .init(
                 savingEnabled: {
@@ -2480,11 +2580,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         .exportProjection(sessionIDs: sessions.map(\.id))
                     try VoiceHistoryExportDocument.write(projection, to: url)
                 },
-                deleteVoiceHistory: { [voiceHistoryRepository] in
-                    try await voiceHistoryRepository.deleteAll()
+                deleteVoiceHistory: { [model] in
+                    try await model.deleteAllVoiceHistoryFromSettings()
                 },
-                deleteCapabilityAudit: { [capabilitySettingsRepository] in
-                    try await capabilitySettingsRepository.deleteAllAudits()
+                deleteCapabilityAudit: { [capabilityController] in
+                    try await capabilityController.deleteCapabilityAuditsFromSettings()
                 },
                 storageUsage: { [databaseURL, cacheURL] in
                     ManagedStorageUsage.measure(
@@ -2496,46 +2596,39 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         cacheURLs: [cacheURL]
                     )
                 },
-                reset: { [providerController, voiceHistoryRepository,
-                          preferenceRepository, capabilitySettingsRepository,
-                          capabilityController] in
-                    await capabilityController.shutdown()
-                    await voiceHistoryRepository.close()
-                    await preferenceRepository.close()
-                    await capabilitySettingsRepository.close()
-                    var roots = await providerController.reset().roots
-                    do {
-                        try await voiceHistoryRepository.reopen()
-                        roots.append(.init(
-                            root: "sqlite.voice_history.reopen", succeeded: true
-                        ))
-                    } catch {
-                        roots.append(.init(
-                            root: "sqlite.voice_history.reopen", succeeded: false
-                        ))
+                reset: { [model, providerController, voiceHistoryRepository,
+                          preferenceRepository, capabilityController,
+                          capabilitySettings] in
+                    await model.performManagedPrivacyReset {
+                        let result = await capabilityController.performManagedReset {
+                            await voiceHistoryRepository.close()
+                            await preferenceRepository.close()
+                            var roots = await providerController.reset().roots
+                            await capabilitySettings.clearAfterPrivacyReset()
+                            do {
+                                try await voiceHistoryRepository.reopen()
+                                roots.append(.init(
+                                    root: "sqlite.voice_history.reopen", succeeded: true
+                                ))
+                            } catch {
+                                roots.append(.init(
+                                    root: "sqlite.voice_history.reopen", succeeded: false
+                                ))
+                            }
+                            do {
+                                try await preferenceRepository.reopen()
+                                roots.append(.init(
+                                    root: "sqlite.preferences.reopen", succeeded: true
+                                ))
+                            } catch {
+                                roots.append(.init(
+                                    root: "sqlite.preferences.reopen", succeeded: false
+                                ))
+                            }
+                            return ResetResult(roots: roots)
+                        }
+                        return result
                     }
-                    do {
-                        try await preferenceRepository.reopen()
-                        roots.append(.init(
-                            root: "sqlite.preferences.reopen", succeeded: true
-                        ))
-                    } catch {
-                        roots.append(.init(
-                            root: "sqlite.preferences.reopen", succeeded: false
-                        ))
-                    }
-                    do {
-                        try await capabilitySettingsRepository.reopen()
-                        try await capabilityController.reloadLocalConfiguration()
-                        roots.append(.init(
-                            root: "sqlite.capabilities.reopen", succeeded: true
-                        ))
-                    } catch {
-                        roots.append(.init(
-                            root: "sqlite.capabilities.reopen", succeeded: false
-                        ))
-                    }
-                    return ResetResult(roots: roots)
                 },
                 resetWakePreferences: { [preferenceRepository] in
                     try await preferenceRepository.set(false, for: .wakewordEnabled)
@@ -2588,8 +2681,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         catalogFreshness: freshness,
                         brokerProcessState: capabilityDiagnostics.broker?
                             .state.rawValue.capitalized ?? "Unavailable",
-                        adapterProcessState: capabilityDiagnostics.adapterProcessRunning
-                            ? "Running" : "Stopped",
+                        adapterProcessState: capabilityDiagnostics
+                            .adapterProcessState.diagnosticsLabel,
                         controllerState: capabilityDiagnostics.controllerState,
                         bridgeRPCState: capabilityDiagnostics.bridgeRPCServerRunning
                             ? "Running" : "Stopped",
@@ -2598,7 +2691,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                                 + "\($0.pendingConnectionCount) starting"
                         } ?? "Unavailable",
                         managedDataBytes: usage.managedDataBytes,
-                        managedCacheBytes: usage.managedCacheBytes
+                        managedCacheBytes: usage.managedCacheBytes,
+                        managedDataLabel: usage.dataLabel(),
+                        managedCacheLabel: usage.cacheLabel()
                     )
                 }
             )

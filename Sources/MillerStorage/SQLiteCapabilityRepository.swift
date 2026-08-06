@@ -447,6 +447,135 @@ public actor SQLiteCapabilityRepository {
         }
     }
 
+    /// Restores a previously captured server aggregate after a failed
+    /// destructive settings operation. The server, bindings, provider
+    /// associations, catalog rows, and policy overrides become visible in one
+    /// transaction.
+    public func restoreServerConfiguration(
+        server: CapabilityServerRecord,
+        secretBindings: [CapabilitySecretBinding],
+        enabledProviderProfileIDs: Set<UUID>,
+        catalog: [CapabilityToolRecord]
+    ) throws {
+        let argumentsJSON = try Self.validate(server: server)
+        try Self.validateCatalog(catalog.map(\.descriptor), serverID: server.id)
+        guard secretBindings.allSatisfy({ $0.serverID == server.id }),
+              Set(secretBindings.map(\.id)).count == secretBindings.count,
+              Set(secretBindings.map(\.credentialReference)).count
+                == secretBindings.count
+        else { throw CapabilityStorageError.invalidSecretBinding }
+        try preflightWrite()
+        try database.transaction {
+            try database.execute(
+                """
+                INSERT INTO capability_servers
+                    (id, display_name, transport, command, endpoint,
+                     arguments_json, enabled, default_policy, stale_state,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    transport = excluded.transport,
+                    command = excluded.command,
+                    endpoint = excluded.endpoint,
+                    arguments_json = excluded.arguments_json,
+                    enabled = excluded.enabled,
+                    default_policy = excluded.default_policy,
+                    stale_state = excluded.stale_state,
+                    updated_at = excluded.updated_at
+                """,
+                bindings: [
+                    .text(server.id), .text(server.displayName),
+                    .text(server.transport.rawValue), Self.optional(server.command),
+                    Self.optional(server.endpoint), .text(argumentsJSON),
+                    .integer(server.enabled ? 1 : 0),
+                    .text(server.defaultPolicy.rawValue),
+                    .text(server.staleState.rawValue),
+                    .text(Self.timestamp(server.createdAt)),
+                    .text(Self.timestamp(server.updatedAt)),
+                ]
+            )
+            try database.execute(
+                "DELETE FROM capability_secret_bindings WHERE server_id = ?",
+                bindings: [.text(server.id)]
+            )
+            for binding in secretBindings {
+                try database.execute(
+                    """
+                    INSERT INTO capability_secret_bindings
+                        (id, server_id, binding_kind, binding_name, credential_ref)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    bindings: [
+                        .text(Self.id(binding.id)), .text(binding.serverID),
+                        .text(binding.kind.rawValue), .text(binding.name),
+                        .text(Self.id(binding.credentialReference)),
+                    ]
+                )
+            }
+            try database.execute(
+                "DELETE FROM provider_capability_settings WHERE server_id = ?",
+                bindings: [.text(server.id)]
+            )
+            for profileID in enabledProviderProfileIDs.sorted(by: {
+                $0.uuidString < $1.uuidString
+            }) {
+                try database.execute(
+                    """
+                    INSERT INTO provider_capability_settings
+                        (server_id, provider_profile_id, enabled)
+                    VALUES (?, ?, 1)
+                    """,
+                    bindings: [.text(server.id), .text(Self.id(profileID))]
+                )
+            }
+            try database.execute(
+                "DELETE FROM capability_tools WHERE server_id = ?",
+                bindings: [.text(server.id)]
+            )
+            for record in catalog {
+                let descriptor = record.descriptor
+                try database.execute(
+                    """
+                    INSERT INTO capability_tools
+                        (id, server_id, source, source_server_id, tool_name,
+                         display_name, summary, input_schema_json, read_only_hint,
+                         available, accessible, enabled, callable, visibility,
+                         stale_state, content_hash, reconciled_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                    """,
+                    bindings: [
+                        .text(descriptor.id.description), .text(server.id),
+                        .text(descriptor.source.rawValue), .text(descriptor.serverID),
+                        .text(descriptor.toolName), .text(descriptor.displayName),
+                        .text(descriptor.summary), .blob(descriptor.inputSchemaJSON),
+                        descriptor.readOnlyHint.map { .integer($0 ? 1 : 0) } ?? .null,
+                        .integer(descriptor.isAvailable ? 1 : 0),
+                        .integer(descriptor.isAccessible ? 1 : 0),
+                        .integer(descriptor.isEnabled ? 1 : 0),
+                        .integer(descriptor.isCallable ? 1 : 0),
+                        .text(descriptor.visibility.rawValue),
+                        .text(record.staleState.rawValue),
+                        .text(Self.timestamp(record.reconciledAt)),
+                    ]
+                )
+                if let policy = record.policyOverride {
+                    try database.execute(
+                        """
+                        INSERT INTO capability_policy_overrides
+                            (tool_id, policy, updated_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        bindings: [
+                            .text(descriptor.id.description), .text(policy.rawValue),
+                            .text(Self.timestamp(record.reconciledAt)),
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
     /// Publishes a successful connection test as one durable activation. If
     /// catalog persistence fails, SQLite rolls back the enabled bit, provider
     /// associations, secret bindings, and catalog together.

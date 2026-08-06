@@ -1,4 +1,5 @@
 import Foundation
+import MillerCapabilities
 import MillerCore
 import MillerStorage
 
@@ -7,9 +8,13 @@ enum MCPServerEditorError: Error, Equatable, Sendable {
     case invalidDisplayName
     case executableMustBeAbsolute
     case argumentsMustBeJSONArray
-    case shellSyntaxNotAllowed
     case invalidHTTPSEndpoint
     case invalidSecret
+}
+
+enum MCPServerMutationMode: Equatable, Sendable {
+    case create
+    case edit(originalID: String)
 }
 
 struct MCPServerSecretDraft: Identifiable, Equatable, Sendable {
@@ -55,7 +60,10 @@ struct MCPServerEditorDraft: Equatable, Sendable {
         return value
     }
 
-    func validated(now: Date = Date()) throws -> MCPServerValidatedDraft {
+    func validated(
+        mode: MCPServerMutationMode,
+        now: Date = Date()
+    ) throws -> MCPServerValidatedDraft {
         let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !normalizedID.isEmpty, normalizedID.utf8.count <= 96,
@@ -100,15 +108,26 @@ struct MCPServerEditorDraft: Equatable, Sendable {
             guard keys.insert(key).inserted else {
                 throw MCPServerEditorError.invalidSecret
             }
+            let credentialReference = secret.existingReference ?? UUID()
+            do {
+                _ = try MCPSecretBinding(
+                    destination: secret.kind == .environment ? .environment : .header,
+                    name: name,
+                    credentialReference: credentialReference
+                )
+            } catch {
+                throw MCPServerEditorError.invalidSecret
+            }
             return CapabilitySecretBinding(
                 id: secret.id,
                 serverID: normalizedID,
                 kind: secret.kind,
                 name: name,
-                credentialReference: secret.existingReference ?? UUID()
+                credentialReference: credentialReference
             )
         }
         return MCPServerValidatedDraft(
+            mutationMode: mode,
             server: CapabilityServerRecord(
                 id: normalizedID,
                 displayName: normalizedName,
@@ -143,11 +162,9 @@ struct MCPServerEditorDraft: Equatable, Sendable {
               let value = try? JSONSerialization.jsonObject(with: data),
               let arguments = value as? [String], arguments.count <= 256
         else { throw MCPServerEditorError.argumentsMustBeJSONArray }
-        let shellMarkers = ["&&", "||", ";", "`", "$(", "|", ">", "<"]
         guard arguments.allSatisfy({ argument in
             argument.utf8.count <= 16 * 1_024 && !argument.contains("\0")
-                && !shellMarkers.contains(where: argument.contains)
-        }) else { throw MCPServerEditorError.shellSyntaxNotAllowed }
+        }) else { throw MCPServerEditorError.argumentsMustBeJSONArray }
         return arguments
     }
 
@@ -173,6 +190,7 @@ struct MCPServerEditorDraft: Equatable, Sendable {
 }
 
 struct MCPServerValidatedDraft: Equatable, Sendable {
+    let mutationMode: MCPServerMutationMode
     let server: CapabilityServerRecord
     let providerProfileIDs: Set<UUID>
     let secrets: [CapabilitySecretBinding]
@@ -380,81 +398,153 @@ final class MCPServerEditorModel: ObservableObject {
     @Published private(set) var status = ""
     @Published private(set) var connectionStatus: [String: String] = [:]
     @Published private(set) var isBusy = false
+    @Published private(set) var resetEpoch: UInt64 = 0
 
     private let dependencies: MCPServerEditorDependencies
+    private var operationGeneration: UInt64 = 0
 
     init(dependencies: MCPServerEditorDependencies = .unavailable) {
         self.dependencies = dependencies
     }
 
     func load() async {
-        await perform("Settings unavailable") { snapshot = try await dependencies.load() }
+        await perform("Settings unavailable") { generation in
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+        }
     }
 
-    func save(_ draft: MCPServerEditorDraft) async {
-        await perform("Server could not be saved") {
-            let validated = try draft.validated()
+    func save(
+        _ draft: MCPServerEditorDraft,
+        mode: MCPServerMutationMode
+    ) async {
+        switch mode {
+        case .create:
+            clearConnectionStatus(serverID: draft.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        case let .edit(originalID):
+            clearConnectionStatus(serverID: originalID)
+        }
+        await perform("Server could not be saved") { generation in
+            let validated = try draft.validated(mode: mode)
             try await dependencies.save(validated)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
             status = "Server saved"
         }
     }
 
     func remove(serverID: String) async {
-        await perform("Server could not be removed") {
+        clearConnectionStatus(serverID: serverID)
+        await perform("Server could not be removed") { generation in
             try await dependencies.remove(serverID)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
             status = "Server removed"
         }
     }
 
     func testConnection(serverID: String) async {
-        await perform("Connection failed") {
+        clearConnectionStatus(serverID: serverID)
+        await perform("Connection failed") { generation in
             let count = try await dependencies.testConnection(serverID)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
+            guard let server = snapshot.servers.first(where: {
+                $0.server.id == serverID
+            })?.server,
+            server.enabled, server.staleState == .current
+            else {
+                status = "Connection failed"
+                return
+            }
             connectionStatus[serverID] = "Connected — \(count) tools"
         }
     }
 
     func setProviderEnabled(_ enabled: Bool, serverID: String, providerID: UUID) async {
-        await perform("Provider setting could not be saved") {
+        await perform("Provider setting could not be saved") { generation in
             try await dependencies.setProviderEnabled(enabled, serverID, providerID)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
         }
     }
 
     func setServerPolicy(_ policy: CapabilityPolicy, serverID: String) async {
-        await perform("Server policy could not be saved") {
+        await perform("Server policy could not be saved") { generation in
             try await dependencies.setServerPolicy(serverID, policy)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
         }
     }
 
     func setToolPolicy(_ policy: CapabilityPolicy?, toolID: CapabilityID) async {
-        await perform("Tool policy could not be saved") {
+        await perform("Tool policy could not be saved") { generation in
             try await dependencies.setToolPolicy(toolID, policy)
-            snapshot = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            let loaded = try await dependencies.load()
+            guard isCurrent(generation) else { return }
+            snapshot = loaded
         }
     }
 
     func refreshCatalogs() async {
+        connectionStatus.removeAll()
         await perform("Catalog refresh failed; last catalog retained as stale") {
-            snapshot = try await dependencies.refresh()
+            generation in
+            let refreshed = try await dependencies.refresh()
+            guard isCurrent(generation) else { return }
+            snapshot = refreshed
         }
+    }
+
+    func clearAfterPrivacyReset() {
+        operationGeneration &+= 1
+        resetEpoch &+= 1
+        snapshot = .empty
+        status = ""
+        connectionStatus.removeAll()
+        isBusy = false
+    }
+
+    func clearConnectionStatus(serverID: String?) {
+        guard let serverID else { return }
+        connectionStatus[serverID] = nil
     }
 
     private func perform(
         _ failure: String,
-        operation: () async throws -> Void
+        operation: (UInt64) async throws -> Void
     ) async {
         guard !isBusy else { return }
+        operationGeneration &+= 1
+        let generation = operationGeneration
         isBusy = true
         status = ""
-        defer { isBusy = false }
+        defer {
+            if isCurrent(generation) {
+                isBusy = false
+            }
+        }
         do {
-            try await operation()
+            try await operation(generation)
         } catch {
+            guard isCurrent(generation) else { return }
             status = failure
         }
+    }
+
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        generation == operationGeneration
     }
 }

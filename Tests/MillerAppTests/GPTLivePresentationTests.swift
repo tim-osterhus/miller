@@ -607,15 +607,21 @@ struct GPTLivePresentationTests {
     }
 
     @Test
-    func resetClearsDeletedPresentationStateAndFailedProviderReload() async {
+    func managedPrivacyResetClearsDeletedPresentationStateAndFailedProviderReload() async {
         let probe = ResetPresentationStateProbe()
+        let voiceHistory = ResetVoiceProjectionProbe()
         let model = AppPresentationModel(
             dependencies: probe.hostDependencies(),
             providerSettings: await probe.providerDependencies(),
-            liveVoice: await probe.liveDependencies()
+            liveVoice: await probe.liveDependencies(),
+            voiceHistory: voiceHistory.dependencies()
         )
         await model.refreshProviderSettings()
         await model.refresh()
+        await model.refreshVoiceHistory()
+        await model.prepareVoiceHistoryAttachment(
+            sessionIDs: [voiceHistory.sessionID]
+        )
         await model.selectConversation(probe.conversationID)
         model.draft = "cause typed failure"
         await model.submit()
@@ -626,7 +632,15 @@ struct GPTLivePresentationTests {
         await model.toggleLiveMute()
         await model.applyLiveEvent(.failed(code: "stale_live_failure"))
 
-        await model.resetMiller()
+        let reset = Task {
+            await model.performManagedPrivacyReset {
+                let result = await probe.performReset()
+                await voiceHistory.markReset()
+                return result
+            }
+        }
+
+        await probe.waitUntilPostResetConversationLoad()
 
         #expect(model.conversations.isEmpty)
         #expect(model.visibleTurns.isEmpty)
@@ -637,10 +651,17 @@ struct GPTLivePresentationTests {
         #expect(model.providerProfiles.isEmpty)
         #expect(model.codexModels.isEmpty)
         #expect(model.codexDefaultModel.isEmpty)
+        #expect(model.voiceHistorySessions.isEmpty)
+        #expect(model.pendingVoiceHistoryAttachment == nil)
+        #expect(model.voiceHistoryStatus == nil)
         #expect(model.liveTranscriptTurns.isEmpty)
         #expect(model.liveVoiceFailureCode == nil)
         #expect(!model.liveVoiceMuted)
         #expect(model.voiceState == .unavailable)
+
+        await probe.resumePostResetConversationLoad()
+        _ = await reset.value
+
         #expect(model.providerStatus == "Reset completed; secure erasure is not claimed.")
     }
 
@@ -1915,6 +1936,39 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func resetRejectsDelayedEventsFromThePreviousLiveSession() async throws {
+        let voice = StaleLiveSessionEventProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: await voice.dependencies()
+        )
+
+        let session = Task { await model.startLiveVoice() }
+        try await waitUntil { await voice.sessionCount == 1 }
+        await voice.emit(.sessionAdmitted(id: UUID()), from: 0)
+        await voice.emit(.state(.listening), from: 0)
+        await voice.emit(.state(.closed), from: 0)
+        await voice.finish(session: 0)
+        await session.value
+
+        _ = await model.performManagedPrivacyReset {
+            .init(roots: [.init(root: "live_voice", succeeded: true)])
+        }
+        let resetVoiceState = model.voiceState
+
+        await voice.emit(
+            .transcriptDone(role: .user, text: "deleted transcript"),
+            from: 0
+        )
+        await voice.emit(.state(.speaking), from: 0)
+        await voice.emit(.failed(code: "stale_failure"), from: 0)
+
+        #expect(model.liveTranscriptTurns.isEmpty)
+        #expect(model.liveVoiceFailureCode == nil)
+        #expect(model.voiceState == resetVoiceState)
+    }
+
+    @Test
     func startupFailuresExposeOnlyActionableSanitizedClasses() async {
         await assertSanitizedLiveStartFailure(
             CodexAppServerClientError.timeout,
@@ -3135,6 +3189,11 @@ private actor ResetPresentationStateProbe {
 
     private var didReset = false
     private var providerLoads = 0
+    private var postResetConversationLoadEntered = false
+    private var postResetConversationLoadWaiters: [CheckedContinuation<Void, Never>] = []
+    private var postResetConversationLoadContinuation: CheckedContinuation<
+        [Conversation], Never
+    >?
 
     nonisolated func hostDependencies() -> HostDependencies {
         HostDependencies(
@@ -3175,17 +3234,39 @@ private actor ResetPresentationStateProbe {
         )
     }
 
-    private func conversations() -> [Conversation] {
-        guard !didReset else { return [] }
-        let now = Date()
-        return [
-            Conversation(
-                id: conversationID,
-                title: "Stale conversation",
-                createdAt: now,
-                updatedAt: now
-            ),
-        ]
+    func performReset() -> ResetResult { reset() }
+
+    private func conversations() async -> [Conversation] {
+        guard didReset else {
+            let now = Date()
+            return [
+                Conversation(
+                    id: conversationID,
+                    title: "Stale conversation",
+                    createdAt: now,
+                    updatedAt: now
+                ),
+            ]
+        }
+        postResetConversationLoadEntered = true
+        let waiters = postResetConversationLoadWaiters
+        postResetConversationLoadWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation in
+            postResetConversationLoadContinuation = continuation
+        }
+    }
+
+    func waitUntilPostResetConversationLoad() async {
+        if postResetConversationLoadEntered { return }
+        await withCheckedContinuation { continuation in
+            postResetConversationLoadWaiters.append(continuation)
+        }
+    }
+
+    func resumePostResetConversationLoad() {
+        postResetConversationLoadContinuation?.resume(returning: [])
+        postResetConversationLoadContinuation = nil
     }
 
     private func turns() -> [Turn] {
@@ -3221,6 +3302,54 @@ private actor ResetPresentationStateProbe {
         return ResetResult(roots: [
             ResetRootResult(root: "runtime.resume", succeeded: true),
         ])
+    }
+}
+
+private actor ResetVoiceProjectionProbe {
+    nonisolated let sessionID = UUID()
+    private let session: VoiceHistorySession
+    private let entry: VoiceHistoryEntry
+    private var didReset = false
+
+    init() {
+        let id = sessionID
+        let now = Date()
+        session = .init(
+            id: id, conversationID: nil, activationSource: .manual,
+            startedAt: now, endedAt: now,
+            terminalOutcome: .completed, saveChoice: .save
+        )
+        entry = .init(
+            id: UUID(), sessionID: id, sequence: 0, role: .user,
+            text: "sensitive voice history", completionState: .complete,
+            startedAt: now, completedAt: now
+        )
+    }
+
+    nonisolated func dependencies() -> VoiceHistoryDependencies {
+        .init(
+            sessions: { [self] _, _ in await sessions() },
+            exportProjection: { [self] _ in await exports() },
+            attachmentProjection: { [self] _, _ in await attachment() },
+            rangeAttachmentProjection: { [self] _, _, _ in await attachment() },
+            deleteSession: { _ in }, deleteRange: { _, _ in }, deleteAll: {}
+        )
+    }
+
+    func markReset() { didReset = true }
+
+    private func sessions() -> [VoiceHistorySession] {
+        didReset ? [] : [session]
+    }
+
+    private func exports() -> [VoiceHistoryExportSession] {
+        didReset ? [] : [.init(session: session, entries: [entry])]
+    }
+
+    private func attachment() -> VoiceHistoryAttachmentProjection {
+        didReset
+            ? .init(sessionIDs: [], entries: [], hasMore: false)
+            : .init(sessionIDs: [sessionID], entries: [entry], hasMore: false)
     }
 }
 

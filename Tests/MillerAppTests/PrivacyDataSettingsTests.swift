@@ -47,6 +47,73 @@ struct PrivacyDataSettingsTests {
         let usage = ManagedStorageUsage.measure(dataURLs: urls, cacheURLs: [])
 
         #expect(usage.managedDataBytes == 9)
+        #expect(usage.dataCompleteness == .complete)
+    }
+
+    @Test
+    func missingStorageRootIsCompleteZeroButMetadataFailureIsUnavailable() {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-missing-storage-\(UUID().uuidString)"
+        )
+        let absent = ManagedStorageUsage.measure(
+            dataURLs: [missing], cacheURLs: []
+        )
+        #expect(absent.managedDataBytes == 0)
+        #expect(absent.dataCompleteness == .complete)
+
+        let unavailable = ManagedStorageUsage.measure(
+            dataURLs: [missing], cacheURLs: [],
+            fileManager: MetadataFailureFileManager(failing: [missing])
+        )
+        #expect(unavailable.dataCompleteness == .unavailable)
+        #expect(unavailable.dataLabel() == "Unavailable")
+    }
+
+    @Test
+    func successfulZeroByteRootPlusMetadataFailureIsPartial() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-zero-storage-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true
+        )
+        let measured = root.appendingPathComponent("measured")
+        try Data().write(to: measured)
+        let inaccessible = root.appendingPathComponent("inaccessible")
+
+        let usage = ManagedStorageUsage.measure(
+            dataURLs: [measured, inaccessible], cacheURLs: [],
+            fileManager: MetadataFailureFileManager(failing: [inaccessible])
+        )
+
+        #expect(usage.managedDataBytes == 0)
+        #expect(usage.dataCompleteness == .partial)
+        #expect(usage.dataLabel().hasSuffix("(partial)"))
+    }
+
+    @Test
+    func childMetadataFailureRetainsKnownBytesAsPartial() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-partial-storage-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true
+        )
+        let measured = root.appendingPathComponent("measured")
+        let inaccessible = root.appendingPathComponent("inaccessible")
+        try Data(repeating: 1, count: 3).write(to: measured)
+        try Data(repeating: 2, count: 5).write(to: inaccessible)
+
+        let usage = ManagedStorageUsage.measure(
+            dataURLs: [root], cacheURLs: [],
+            fileManager: MetadataFailureFileManager(failing: [inaccessible])
+        )
+
+        #expect(usage.managedDataBytes == 3)
+        #expect(usage.dataCompleteness == .partial)
+        #expect(usage.dataLabel().hasSuffix("(partial)"))
     }
 
     @Test @MainActor
@@ -123,6 +190,28 @@ struct PrivacyDataSettingsTests {
             .init(root: "managed", succeeded: true),
             .init(root: "preferences.wake.reset", succeeded: false),
         ])
+    }
+}
+
+private final class MetadataFailureFileManager: FileManager, @unchecked Sendable {
+    private let failingPaths: Set<String>
+
+    init(failing urls: [URL]) {
+        failingPaths = Set(urls.map {
+            $0.resolvingSymlinksInPath().standardizedFileURL.path
+        })
+        super.init()
+    }
+
+    override func attributesOfItem(
+        atPath path: String
+    ) throws -> [FileAttributeKey: Any] {
+        let canonicalPath = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        if failingPaths.contains(canonicalPath) {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        return try super.attributesOfItem(atPath: path)
     }
 }
 
