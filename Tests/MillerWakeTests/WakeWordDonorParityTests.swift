@@ -246,6 +246,72 @@ struct WakeWordDonorParityTests {
     }
 
     @Test @MainActor
+    func shutdownSerializesBehindAnInFlightDisableStop() async {
+        let recorder = GatedStopRecorderProbe()
+        let detector = DetectorProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { detector }
+        )
+        await controller.setEnabled(true)
+
+        let disable = Task { @MainActor in
+            await controller.setEnabled(false)
+        }
+        await recorder.waitForStopRequest(count: 1)
+        let shutdown = Task { @MainActor in
+            await controller.shutdown()
+        }
+        await Task.yield()
+        await Task.yield()
+
+        #expect(recorder.stopRequestCount == 1)
+        #expect(recorder.maximumConcurrentStopCount == 1)
+
+        recorder.releaseAllStops()
+        await disable.value
+        #expect(await shutdown.value)
+
+        #expect(controller.state == .disabled)
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(recorder.stopCount == 1)
+        #expect(recorder.maximumConcurrentStopCount == 1)
+        #expect(detector.shutdownCount == 1)
+    }
+
+    @Test @MainActor
+    func disableSerializesBehindAnInFlightSuspensionStop() async {
+        let recorder = GatedStopRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { DetectorProbe() }
+        )
+        await controller.setEnabled(true)
+
+        let suspension = Task { @MainActor in
+            await controller.suspend(.foregroundSession)
+        }
+        await recorder.waitForStopRequest(count: 1)
+        let disable = Task { @MainActor in
+            await controller.setEnabled(false)
+        }
+        await Task.yield()
+        await Task.yield()
+
+        #expect(recorder.stopRequestCount == 1)
+        #expect(recorder.maximumConcurrentStopCount == 1)
+
+        recorder.releaseAllStops()
+        await suspension.value
+        await disable.value
+
+        #expect(controller.state == .disabled)
+        #expect(recorder.isWakeMonitoring == false)
+        #expect(recorder.stopCount == 1)
+        #expect(recorder.maximumConcurrentStopCount == 1)
+    }
+
+    @Test @MainActor
     func detectorFailureReleasesCaptureBeforePublishingUnavailable() async {
         let recorder = RecorderProbe()
         let detector = DetectorProbe(process: { _ in
@@ -494,9 +560,11 @@ private final class GatedStopRecorderProbe: WakeWordCaptureOwning {
     private(set) var isWakeMonitoring = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
-    private var stopRequested = false
-    private var stopWaiters = [CheckedContinuation<Void, Never>]()
-    private var stopGate: CheckedContinuation<Void, Never>?
+    private(set) var stopRequestCount = 0
+    private(set) var maximumConcurrentStopCount = 0
+    private var concurrentStopCount = 0
+    private var stopWaiters = [(Int, CheckedContinuation<Void, Never>)]()
+    private var stopGates = [CheckedContinuation<Void, Never>]()
 
     func startWakeMonitoring() async throws -> UUID {
         startCount += 1
@@ -505,27 +573,39 @@ private final class GatedStopRecorderProbe: WakeWordCaptureOwning {
     }
 
     func stopWakeMonitoring() async {
-        stopRequested = true
-        let waiters = stopWaiters
-        stopWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        stopRequestCount += 1
+        concurrentStopCount += 1
+        maximumConcurrentStopCount = max(
+            maximumConcurrentStopCount,
+            concurrentStopCount
+        )
+        let ready = stopWaiters.filter { $0.0 <= stopRequestCount }
+        stopWaiters.removeAll { $0.0 <= stopRequestCount }
+        ready.forEach { $0.1.resume() }
         await withCheckedContinuation { continuation in
-            stopGate = continuation
+            stopGates.append(continuation)
         }
+        concurrentStopCount -= 1
         isWakeMonitoring = false
         stopCount += 1
     }
 
-    func waitForStopRequest() async {
-        guard !stopRequested else { return }
+    func waitForStopRequest(count: Int = 1) async {
+        guard stopRequestCount < count else { return }
         await withCheckedContinuation { continuation in
-            stopWaiters.append(continuation)
+            stopWaiters.append((count, continuation))
         }
     }
 
     func releaseStop() {
-        stopGate?.resume()
-        stopGate = nil
+        guard !stopGates.isEmpty else { return }
+        stopGates.removeFirst().resume()
+    }
+
+    func releaseAllStops() {
+        let gates = stopGates
+        stopGates.removeAll()
+        gates.forEach { $0.resume() }
     }
 }
 

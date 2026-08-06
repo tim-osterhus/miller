@@ -65,11 +65,12 @@ public final class WakeWordProductionController: ObservableObject {
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
         isEnabled = enabled
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch),
+              isEnabled == enabled else {
+            return
+        }
         if enabled {
-            await waitForEarlierLifecycleOperations(operationEpoch)
-            guard acceptsLifecycleOperation(operationEpoch), isEnabled else {
-                return
-            }
             await startMonitoringIfEligible(operationEpoch: operationEpoch)
         } else {
             await stop(
@@ -86,6 +87,10 @@ public final class WakeWordProductionController: ObservableObject {
             isEnabled = false
             let operationEpoch = beginLifecycleOperation()
             defer { finishLifecycleOperation(operationEpoch) }
+            await waitForEarlierLifecycleOperations(operationEpoch)
+            guard acceptsLifecycleOperation(operationEpoch), !isEnabled else {
+                throw WakeWordProductionError.unavailable(reason)
+            }
             await stop(
                 disable: true,
                 shutDownDetector: false,
@@ -105,6 +110,10 @@ public final class WakeWordProductionController: ObservableObject {
         guard isEnabled else { return state }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch), isEnabled else {
+            return state
+        }
         await stop(
             disable: false,
             shutDownDetector: true,
@@ -122,6 +131,10 @@ public final class WakeWordProductionController: ObservableObject {
         guard isEnabled else { return }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch), isEnabled else {
+            return
+        }
         coordinator?.suspend(reason)
         state = .suspended(reason)
         clearSampleCallback()
@@ -143,6 +156,10 @@ public final class WakeWordProductionController: ObservableObject {
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
         isEnabled = false
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch), !isEnabled else {
+            return !recorder.isWakeMonitoring
+        }
         await stop(
             disable: true,
             shutDownDetector: true,
@@ -282,6 +299,11 @@ public final class WakeWordProductionController: ObservableObject {
         }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch),
+              coordinator === eventCoordinator else {
+            return
+        }
         clearSampleCallback(ifOwnedBy: callbackEpoch)
         monitoringSessionID = nil
         eventCoordinator.shutdown()

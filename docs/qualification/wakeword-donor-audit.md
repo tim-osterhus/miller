@@ -80,8 +80,8 @@ partial-download symlinks while proving their targets remain unchanged. The
 bootstrap additionally proves exact-size local downloads, oversize rejection,
 failure cleanup, and offline behavior. The verifier proves that a tampered
 header and an unexpected retained file are rejected. The real pinned bootstrap
-and verifier then passed, as did all 825 Swift tests, all 49 gateway tests, and
-the focused 19-test linked wakeword run. The repaired dependency cleanup
+and verifier then passed, as did all 827 Swift tests, all 49 gateway tests, and
+the focused 21-test linked wakeword run. The repaired dependency cleanup
 reclaimed `127,762,432` bytes from the wakeword and gateway dependency roots.
 The vendor root remained absent after the ordinary no-download test, while the
 existing release app and running process remained intact.
