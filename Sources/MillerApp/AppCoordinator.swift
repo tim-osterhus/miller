@@ -509,6 +509,7 @@ final class AppPresentationModel: ObservableObject {
            generation == providerSnapshotGeneration
         {
             apply(snapshot)
+            await capabilityController?.reconcileProviderProjection()
         }
         setProviderStatus(status, generation: generation)
     }
@@ -762,7 +763,9 @@ final class AppPresentationModel: ObservableObject {
         defer { providerMutationPending = false }
         do {
             let snapshot = try await providerSettings.retryReadiness()
-            _ = apply(snapshot, generation: generation)
+            if apply(snapshot, generation: generation) {
+                await capabilityController?.reconcileProviderProjection()
+            }
         } catch {
             setProviderStatus(
                 "Provider readiness check failed.",
@@ -853,6 +856,7 @@ final class AppPresentationModel: ObservableObject {
         } catch {
             clearProviderSnapshot(generation: generation)
         }
+        await capabilityController?.reconcileProviderProjection()
         await rebuildPresentationAfterReset(generation: projectionGeneration)
         resetResults = result.roots
         setProviderStatus(
@@ -1235,13 +1239,13 @@ final class AppPresentationModel: ObservableObject {
         guard generation == liveVoiceEventGeneration else { return }
         switch event {
         case let .sessionAdmitted(id):
-            capabilityController?.admitVoiceAssociation(sessionID: id)
             do {
                 try await liveTranscriptRecorder.begin(
                     sessionID: id,
                     conversationID: nil,
                     activationSource: pendingVoiceActivationSource
                 )
+                capabilityController?.admitVoiceAssociation(sessionID: id)
             } catch {
                 presentTranscriptPersistenceFailure()
             }
@@ -1482,7 +1486,14 @@ final class AppPresentationModel: ObservableObject {
     }
 
     private func loadProviderSettings(generation: UInt64) async throws -> Bool {
-        apply(try await providerSettings.load(), generation: generation)
+        let applied = apply(
+            try await providerSettings.load(),
+            generation: generation
+        )
+        if applied {
+            await capabilityController?.reconcileProviderProjection()
+        }
+        return applied
     }
 
     @discardableResult
@@ -1864,7 +1875,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private let providerController: ProviderSettingsController
     private let liveController: GPTLiveController?
     private let capabilityController: CapabilityController
-    private let refreshCapabilityCatalog: @Sendable () async -> Void
 
     init(
         environment: [String: String],
@@ -1881,6 +1891,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             withIntermediateDirectories: true
         )
         let credentialStore = KeychainCredentialStore()
+        let capabilityProviderCallbackAuthorityBox =
+            CapabilityProviderCallbackAuthorityBox()
         let capabilityBridgeBox: CapabilityBridgeSessionBox?
         let capabilityTrustedParent: URL?
         if let bridgeURL = Self.capabilityBridgeURL(environment: environment) {
@@ -1898,7 +1910,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             databasePath: databasePath,
             credentialStore: credentialStore,
             trustedParent: capabilityTrustedParent,
-            bridgeBox: capabilityBridgeBox
+            bridgeBox: capabilityBridgeBox,
+            providerCallbackAuthorityBox: capabilityProviderCallbackAuthorityBox
         )
         let runtimeVerifier = CodexAppServerHelperVerifier()
         let runtimeResolver = CodexRuntimeResolver(
@@ -1997,8 +2010,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 withIntermediateDirectories: true
             )
             let makeCodexClient: @Sendable () throws -> CodexAppServerClient = {
-                [capabilityController, capabilityBridgeBox] in
-                    CodexAppServerClient(
+                [capabilityController, capabilityBridgeBox,
+                 capabilityProviderCallbackAuthorityBox] in
+                    let callbacks = capabilityController.providerCallbacks(
+                        authority: capabilityProviderCallbackAuthorityBox.current()
+                    )
+                    return CodexAppServerClient(
                         process: CodexAppServerProcess(
                             configuration: try Self.typedCodexProcessConfiguration(
                                 executableURL: codexExecutableURL,
@@ -2017,15 +2034,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         refreshProvider: { accountID in
                             try await typedCredentialRefresher.refresh(accountID: accountID)
                         },
-                        onCapabilityActivity: { activity in
-                            await capabilityController.recordProviderActivity(activity)
-                        },
-                        resolveProviderApproval: { request in
-                            await capabilityController.resolveProviderApproval(request)
-                        },
-                        resolveProviderApprovalDetails: { approval in
-                            await capabilityController.resolveProviderApproval(approval)
-                        },
+                        onCapabilityActivity: callbacks.activity,
+                        resolveProviderApproval: callbacks.approval,
+                        resolveProviderApprovalDetails: callbacks.approvalDetails,
                         existingMillerCapabilities: capabilityBridgeBox?.catalog() ?? []
                     )
                 }
@@ -2048,32 +2059,26 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 },
                 cwd: typedRoot.path
             )
-            refreshCapabilityCatalog = {
-                [repository, capabilityController] in
-                do {
-                    guard let profile = try await repository.selectedProviderProfile(),
-                          profile.kind == .codexOAuth,
-                          try await repository.credentialIsInvalidated(
-                              reference: profile.credentialReference
-                          ) == false
-                    else { return }
-                    let local = await capabilityController.catalog(
-                        providerProfileID: profile.id
-                    ).descriptors.filter { $0.source == .millerMCP }
-                    let snapshot = try await makeCodexClient().inventoryCapabilities(
+            capabilityController.configureProviderProjection(.init(
+                selectedProfile: { [repository] in
+                    try await repository.selectedProviderProfile()
+                },
+                inventory: { [repository] profile, local in
+                    guard try await repository.credentialIsInvalidated(
+                        reference: profile.credentialReference
+                    ) == false
+                    else { throw GPTLiveCredentialError.unavailable }
+                    return try await makeCodexClient().inventoryCapabilities(
                         requestID: "catalog:\(UUID().uuidString.lowercased())",
                         credential: try await credentialLoader.load(profile: profile),
                         codexProviderProfileID: profile.id,
                         existingMillerCapabilities: local
                     )
-                    await capabilityController.replaceProviderCatalog(snapshot)
-                } catch {
-                    return
                 }
-            }
+            ))
         } else {
             codexGateway = UnavailableReasoningGateway()
-            refreshCapabilityCatalog = {}
+            capabilityController.configureProviderProjection(nil)
         }
         let providerGateway = ProviderRoutingGateway(
             selectedKind: { [repository] in
@@ -2227,14 +2232,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         hasActiveTurn: false
                     )
                 },
-                onCapabilityActivity: { [capabilityController] activity in
-                    await capabilityController.recordProviderActivity(activity)
-                },
-                resolveProviderApproval: { [capabilityController] request in
-                    await capabilityController.resolveProviderApproval(request)
-                },
-                resolveProviderApprovalDetails: { [capabilityController] approval in
-                    await capabilityController.resolveProviderApproval(approval)
+                providerCallbacks: {
+                    [capabilityController,
+                     capabilityProviderCallbackAuthorityBox] in
+                    capabilityController.providerCallbacks(
+                        authority: capabilityProviderCallbackAuthorityBox.current()
+                    )
                 },
                 millerCapabilityCatalog: {
                     capabilityBridgeBox?.catalog() ?? []
@@ -2412,7 +2415,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             try? await repository.recoverInterruptedTurns()
             await model.recoverInterruptedVoiceSessions()
             try? await providerController.restoreSelectedProfile()
-            await refreshCapabilityCatalog()
             await model.refresh()
             await model.refreshProviderSettings()
             await model.refreshLiveVoiceAvailability()

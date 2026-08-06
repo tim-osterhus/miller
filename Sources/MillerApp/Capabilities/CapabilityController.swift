@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import Foundation
 import MillerCapabilities
@@ -8,6 +9,7 @@ import MillerStorage
 
 enum CapabilityControllerError: Error, Equatable {
     case unavailable
+    case auditUnavailable
     case staleGeneration
     case providerMismatch
 }
@@ -22,6 +24,26 @@ enum CapabilityApprovalTermination: Equatable, Sendable {
     case close
     case interrupt
     case timeout
+}
+
+struct CapabilityProviderCallbacks: Sendable {
+    let activity: CodexCapabilityActivityHandler
+    let approval: CodexProviderApprovalResolver
+    let approvalDetails: CodexProviderApprovalDetailsResolver
+}
+
+struct CapabilityProviderCallbackAuthority: Equatable, Sendable {
+    let generation: UUID
+    let isVoice: Bool
+}
+
+@MainActor
+private final class CapabilityConfirmationSpeaker {
+    private let synthesizer = AVSpeechSynthesizer()
+
+    func announce(_ message: String) {
+        synthesizer.speak(AVSpeechUtterance(string: message))
+    }
 }
 
 enum CapabilityAssociation: Equatable, Sendable {
@@ -84,6 +106,14 @@ struct CapabilityPersistenceDependencies: Sendable {
         beginAudit: { _ in },
         terminalizeAudit: { _, _, _ in }
     )
+}
+
+struct CapabilityProviderProjectionDependencies: Sendable {
+    let selectedProfile: @Sendable () async throws -> ProviderProfile?
+    let inventory: @Sendable (
+        ProviderProfile,
+        [CapabilityDescriptor]
+    ) async throws -> CapabilityCatalogSnapshot
 }
 
 struct CapabilityApprovalPresentation: Identifiable, Equatable, Sendable {
@@ -214,6 +244,26 @@ final class CapabilityBridgeSessionBox: @unchecked Sendable {
     }
 }
 
+final class CapabilityProviderCallbackAuthorityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var authority: CapabilityProviderCallbackAuthority?
+
+    func install(_ authority: CapabilityProviderCallbackAuthority) {
+        lock.lock(); defer { lock.unlock() }
+        self.authority = authority
+    }
+
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        authority = nil
+    }
+
+    func current() -> CapabilityProviderCallbackAuthority? {
+        lock.lock(); defer { lock.unlock() }
+        return authority
+    }
+}
+
 @MainActor
 final class CapabilityController: ObservableObject {
     private struct CallContext {
@@ -245,11 +295,18 @@ final class CapabilityController: ObservableObject {
     private let approvalTimeout: Duration
     private let trustedParent: URL?
     private let bridgeBox: CapabilityBridgeSessionBox?
+    private let providerCallbackAuthorityBox:
+        CapabilityProviderCallbackAuthorityBox?
+    private let confirmationAnnouncer: @MainActor @Sendable (String) -> Void
 
     private var broker: CapabilityBroker?
     private var descriptors: [CapabilityID: CapabilityDescriptor] = [:]
     private var serverDisplayNames: [String: String] = [:]
+    private var serverPolicies: [String: CapabilityPolicy] = [:]
+    private var toolPolicies: [CapabilityID: CapabilityPolicy] = [:]
     private var providerDescriptors: [CapabilityID: CapabilityDescriptor] = [:]
+    private var providerProjection: CapabilityProviderProjectionDependencies?
+    private var providerProjectionGeneration: UInt64 = 0
     private var startupError: Error?
     private var pendingQueue: [PendingApproval] = []
     private var activePending: PendingApproval?
@@ -257,9 +314,11 @@ final class CapabilityController: ObservableObject {
     private var callContexts: [CapabilityCallID: CallContext] = [:]
     private var begunAuditIDs = Set<CapabilityCallID>()
     private var terminalAuditIDs = Set<CapabilityCallID>()
+    private var pendingTerminalAudits: [CapabilityCallID: CapabilityLifecycleEvent] = [:]
     private var activeTypedAssociation: CapabilityAssociation?
     private var activeVoiceAssociation: CapabilityAssociation?
     private var activeProviderProfileID: UUID?
+    private var activeProviderCallbackAuthority: CapabilityProviderCallbackAuthority?
     private var cancelledTypedGenerations = Set<String>()
     private var cancelledTypedGenerationOrder: [String] = []
     private var cancelledVoiceSessionIDs = Set<UUID>()
@@ -284,7 +343,12 @@ final class CapabilityController: ObservableObject {
         persistence: CapabilityPersistenceDependencies = .unavailable,
         approvalTimeout: Duration = .seconds(60),
         trustedParent: URL? = nil,
-        bridgeBox: CapabilityBridgeSessionBox? = nil
+        bridgeBox: CapabilityBridgeSessionBox? = nil,
+        providerCallbackAuthorityBox:
+            CapabilityProviderCallbackAuthorityBox? = nil,
+        confirmationAnnouncer: @escaping @MainActor @Sendable (String) -> Void = {
+            _ in
+        }
     ) {
         self.loadConfiguration = loadConfiguration
         self.credentialResolver = credentialResolver
@@ -293,15 +357,20 @@ final class CapabilityController: ObservableObject {
         self.approvalTimeout = approvalTimeout
         self.trustedParent = trustedParent
         self.bridgeBox = bridgeBox
+        self.providerCallbackAuthorityBox = providerCallbackAuthorityBox
+        self.confirmationAnnouncer = confirmationAnnouncer
     }
 
     convenience init(
         databasePath: String,
         credentialStore: KeychainCredentialStore,
         trustedParent: URL? = nil,
-        bridgeBox: CapabilityBridgeSessionBox? = nil
+        bridgeBox: CapabilityBridgeSessionBox? = nil,
+        providerCallbackAuthorityBox:
+            CapabilityProviderCallbackAuthorityBox? = nil
     ) throws {
         let repository = try SQLiteCapabilityRepository(path: databasePath)
+        let confirmationSpeaker = CapabilityConfirmationSpeaker()
         self.init(
             loadConfiguration: { [repository] in
                 try await Self.runtimeConfiguration(repository: repository)
@@ -327,7 +396,11 @@ final class CapabilityController: ObservableObject {
                 }
             ),
             trustedParent: trustedParent,
-            bridgeBox: bridgeBox
+            bridgeBox: bridgeBox,
+            providerCallbackAuthorityBox: providerCallbackAuthorityBox,
+            confirmationAnnouncer: { [confirmationSpeaker] message in
+                confirmationSpeaker.announce(message)
+            }
         )
     }
 
@@ -354,6 +427,12 @@ final class CapabilityController: ObservableObject {
                     ($0.id, $0.displayName)
                 }
             )
+            serverPolicies = Dictionary(
+                uniqueKeysWithValues: configuration.servers.map {
+                    ($0.id, $0.defaultPolicy)
+                }
+            )
+            toolPolicies = configuration.toolPolicies
             let catalog = await broker.refresh()
             descriptors = Dictionary(
                 uniqueKeysWithValues: catalog.descriptors.map { ($0.id, $0) }
@@ -397,6 +476,7 @@ final class CapabilityController: ObservableObject {
         route _: CapabilityInvocationRoute
     ) async throws -> SanitizedCapabilityResult {
         await start()
+        try await recoverPendingTerminalAudits()
         guard !isCancelled(association), let broker else {
             throw isCancelled(association)
                 ? CapabilityControllerError.staleGeneration
@@ -410,13 +490,46 @@ final class CapabilityController: ObservableObject {
             descriptor: descriptor,
             visibility: .complete
         )
-        defer { releaseCallState(callID) }
-        return try await broker.call(
-            callID: callID,
-            capabilityID: capabilityID,
-            argumentsJSON: argumentsJSON,
-            providerProfileID: providerProfileID
-        )
+        do {
+            try await persistBeginAudit(
+                callID: callID,
+                context: callContexts[callID]!,
+                policy: effectivePolicy(for: descriptor)
+            )
+        } catch {
+            releaseCallState(callID)
+            throw CapabilityControllerError.auditUnavailable
+        }
+        let result: Result<SanitizedCapabilityResult, Error>
+        do {
+            result = .success(try await broker.call(
+                callID: callID,
+                capabilityID: capabilityID,
+                argumentsJSON: argumentsJSON,
+                providerProfileID: providerProfileID
+            ))
+        } catch {
+            result = .failure(error)
+        }
+        if pendingTerminalAudits[callID] == nil,
+           !terminalAuditIDs.contains(callID),
+           let event = try? CapabilityLifecycleEvent(
+               callID: callID,
+               capabilityID: descriptor.id,
+               summary: CapabilitySummary(text: "Capability call ended"),
+               state: .terminal,
+               outcome: Self.terminalOutcome(for: result),
+               policy: effectivePolicy(for: descriptor)
+           ) {
+            await recordLifecycle(event)
+        }
+        do {
+            try await settleTerminalAudit(callID)
+        } catch {
+            throw CapabilityControllerError.auditUnavailable
+        }
+        releaseCallState(callID)
+        return try result.get()
     }
 
     func handlePiToolCall(
@@ -491,8 +604,10 @@ final class CapabilityController: ObservableObject {
     func prepareLiveVoice(providerProfileID: UUID) async throws {
         await finalizeProviderActivities()
         activeProviderProfileID = providerProfileID
-        try await prepareBridge(providerProfileID: providerProfileID)
-        activeVoiceAssociation = .voice(sessionID: UUID(), generation: 1)
+        try await prepareBridge(
+            providerProfileID: providerProfileID,
+            isVoice: true
+        )
     }
 
     func finishLiveVoice() async {
@@ -511,6 +626,11 @@ final class CapabilityController: ObservableObject {
         guard let resolvedAssociation,
               !isCancelled(resolvedAssociation)
         else { return .decline }
+        do {
+            try await recoverPendingTerminalAudits()
+        } catch {
+            return .decline
+        }
         let ownsTemporaryContext = callContexts[request.callID] == nil
         if ownsTemporaryContext,
            let descriptor = descriptor(for: request.capabilityID)
@@ -529,9 +649,22 @@ final class CapabilityController: ObservableObject {
     func resolveProviderApproval(
         _ approval: CodexProviderApproval
     ) async -> CapabilityApprovalDecision {
-        guard let association = activeVoiceAssociation ?? activeTypedAssociation,
-              !isCancelled(association)
+        guard let association = activeVoiceAssociation ?? activeTypedAssociation
         else { return .decline }
+        return await resolveProviderApproval(approval, association: association)
+    }
+
+    private func resolveProviderApproval(
+        _ approval: CodexProviderApproval,
+        association: CapabilityAssociation
+    ) async -> CapabilityApprovalDecision {
+        guard !isCancelled(association)
+        else { return .decline }
+        do {
+            try await recoverPendingTerminalAudits()
+        } catch {
+            return .decline
+        }
         let key = providerCallKey(
             threadID: approval.threadID,
             itemID: approval.itemID
@@ -562,6 +695,32 @@ final class CapabilityController: ObservableObject {
         providerCallPolicies[callID] = request.policy
         approvalCanAllowOnce[callID] = approval.availableDecisions.contains("accept")
         let decision = await requestApproval(request)
+        if decision == .allowOnce, let context = callContexts[callID] {
+            do {
+                try await persistBeginAudit(
+                    callID: callID,
+                    context: context,
+                    policy: request.policy
+                )
+            } catch {
+                approvalDecisions[callID] = .decline
+                if let event = try? CapabilityLifecycleEvent(
+                    callID: callID,
+                    capabilityID: request.capabilityID,
+                    summary: request.summary,
+                    state: .terminal,
+                    outcome: .declined,
+                    policy: request.policy
+                ) {
+                    await recordLifecycle(event)
+                    if terminalAuditIDs.contains(callID) {
+                        completedProviderCallKeys.insert(key)
+                        releaseCallState(callID)
+                    }
+                }
+                return .decline
+            }
+        }
         if decision == .decline,
            let event = try? CapabilityLifecycleEvent(
                 callID: callID,
@@ -572,15 +731,24 @@ final class CapabilityController: ObservableObject {
                 policy: request.policy
            ) {
             await recordLifecycle(event)
-            completedProviderCallKeys.insert(key)
-            releaseCallState(callID)
+            if terminalAuditIDs.contains(callID) {
+                completedProviderCallKeys.insert(key)
+                releaseCallState(callID)
+            }
         }
         return decision
     }
 
     func recordProviderActivity(_ activity: CodexCapabilityActivity) async {
-        let association = activeVoiceAssociation ?? activeTypedAssociation
-        guard let association else { return }
+        guard let association = activeVoiceAssociation ?? activeTypedAssociation
+        else { return }
+        await recordProviderActivity(activity, association: association)
+    }
+
+    private func recordProviderActivity(
+        _ activity: CodexCapabilityActivity,
+        association: CapabilityAssociation
+    ) async {
         let key = providerCallKey(
             threadID: activity.threadID,
             itemID: activity.itemID
@@ -613,7 +781,7 @@ final class CapabilityController: ObservableObject {
         if activity.phase == .terminal, let event {
             await recordLifecycle(event)
         }
-        if activity.phase == .terminal {
+        if activity.phase == .terminal, terminalAuditIDs.contains(callID) {
             completedProviderCallKeys.insert(key)
             releaseCallState(callID)
         }
@@ -625,6 +793,127 @@ final class CapabilityController: ObservableObject {
         )
     }
 
+    func configureProviderProjection(
+        _ dependencies: CapabilityProviderProjectionDependencies?
+    ) {
+        providerProjection = dependencies
+    }
+
+    func reconcileProviderProjection() async {
+        providerProjectionGeneration &+= 1
+        let generation = providerProjectionGeneration
+        guard let providerProjection else {
+            providerDescriptors.removeAll()
+            return
+        }
+        do {
+            guard let profile = try await providerProjection.selectedProfile(),
+                  profile.kind == .codexOAuth,
+                  profile.isSelected
+            else {
+                guard generation == providerProjectionGeneration else { return }
+                providerDescriptors.removeAll()
+                return
+            }
+            await start()
+            let local = await broker?.catalog(providerProfileID: profile.id) ?? []
+            let snapshot = try await providerProjection.inventory(
+                profile,
+                local.filter { $0.source == .millerMCP }
+            )
+            guard generation == providerProjectionGeneration else { return }
+            replaceProviderCatalog(snapshot)
+        } catch {
+            return
+        }
+    }
+
+    nonisolated func providerCallbacks(
+        authority: CapabilityProviderCallbackAuthority? = nil
+    ) -> CapabilityProviderCallbacks {
+        CapabilityProviderCallbacks(
+            activity: { [weak self] activity in
+                guard let authority else { return }
+                await self?.recordProviderActivity(activity, authority: authority)
+            },
+            approval: { [weak self] request in
+                guard let self, let authority else { return .decline }
+                return await self.resolveProviderApproval(
+                    request,
+                    authority: authority
+                )
+            },
+            approvalDetails: { [weak self] approval in
+                guard let self, let authority else { return .decline }
+                return await self.resolveProviderApproval(
+                    approval,
+                    authority: authority
+                )
+            }
+        )
+    }
+
+    func capturedProviderCallbacks() -> CapabilityProviderCallbacks {
+        providerCallbacks(authority: activeProviderCallbackAuthority)
+    }
+
+    private func resolveProviderApproval(
+        _ request: CapabilityApprovalRequest,
+        authority: CapabilityProviderCallbackAuthority
+    ) async -> CapabilityApprovalDecision {
+        guard let association = currentAssociation(for: authority)
+        else { return .decline }
+        let decision = await resolveProviderApproval(
+            request,
+            association: association
+        )
+        guard providerAuthorityIsCurrent(authority) else { return .decline }
+        return decision
+    }
+
+    private func resolveProviderApproval(
+        _ approval: CodexProviderApproval,
+        authority: CapabilityProviderCallbackAuthority
+    ) async -> CapabilityApprovalDecision {
+        guard let association = currentAssociation(for: authority)
+        else { return .decline }
+        let decision = await resolveProviderApproval(
+            approval,
+            association: association
+        )
+        guard providerAuthorityIsCurrent(authority) else { return .decline }
+        return decision
+    }
+
+    private func recordProviderActivity(
+        _ activity: CodexCapabilityActivity,
+        authority: CapabilityProviderCallbackAuthority
+    ) async {
+        guard providerAuthorityIsCurrent(authority) else { return }
+        guard let association = currentAssociation(for: authority) else { return }
+        await recordProviderActivity(
+            activity,
+            association: association
+        )
+    }
+
+    private func providerAuthorityIsCurrent(
+        _ authority: CapabilityProviderCallbackAuthority
+    ) -> Bool {
+        guard activeProviderCallbackAuthority == authority,
+              let association = authority.isVoice
+                ? activeVoiceAssociation : activeTypedAssociation
+        else { return false }
+        return !isCancelled(association)
+    }
+
+    private func currentAssociation(
+        for authority: CapabilityProviderCallbackAuthority
+    ) -> CapabilityAssociation? {
+        guard providerAuthorityIsCurrent(authority) else { return nil }
+        return authority.isVoice ? activeVoiceAssociation : activeTypedAssociation
+    }
+
     func resolveApproval(_ decision: CapabilityApprovalDecision) {
         guard let pending = activePending else { return }
         let admitted = decision == .allowOnce
@@ -634,6 +923,8 @@ final class CapabilityController: ObservableObject {
 
     func declinePendingApprovals(for termination: CapabilityApprovalTermination) {
         if termination != .timeout {
+            activeProviderCallbackAuthority = nil
+            providerCallbackAuthorityBox?.clear()
             cancelActiveRPCWork()
         }
         let pending = [activePending].compactMap { $0 } + pendingQueue
@@ -658,7 +949,10 @@ final class CapabilityController: ObservableObject {
             generation: request.generation
         )
         if kind == .codexOAuth {
-            try await prepareBridge(providerProfileID: providerProfileID)
+            try await prepareBridge(
+                providerProfileID: providerProfileID,
+                isVoice: false
+            )
         }
         admitTypedAssociation(association, providerProfileID: providerProfileID)
         return ReasoningRequest(
@@ -729,8 +1023,12 @@ final class CapabilityController: ObservableObject {
     private func present(_ pending: PendingApproval) {
         activePending = pending
         pendingApproval = pending.presentation
-        liveVoiceConfirmationMessage = callContexts[pending.request.callID]?
-            .association.isVoice == true ? "Confirmation required" : nil
+        let isVoice = callContexts[pending.request.callID]?
+            .association.isVoice == true
+        liveVoiceConfirmationMessage = isVoice ? "Confirmation required" : nil
+        if isVoice {
+            confirmationAnnouncer("Confirmation required")
+        }
     }
 
     private func finish(
@@ -771,63 +1069,128 @@ final class CapabilityController: ObservableObject {
 
     private func recordLifecycle(_ event: CapabilityLifecycleEvent) async {
         guard let context = callContexts[event.callID] else { return }
-        if let emit = eventEmitters[event.callID] {
-            await emit(.capabilityLifecycle(event))
-        }
         if !begunAuditIDs.contains(event.callID) {
-            let summary = SanitizedCapabilitySummary(
-                context.visibility == .complete
-                    ? Self.summaryProjection(context.descriptor)
-                    : .providerDetailsUnavailable
-            )
-            let record = CapabilityAuditRecord(
-                id: event.callID,
-                conversationID: context.association.conversationID,
-                turnID: context.association.turnID,
-                voiceSessionID: context.association.voiceSessionID,
-                source: context.descriptor.source,
-                serverID: context.descriptor.serverID,
-                toolName: context.descriptor.toolName,
-                startedAt: providerCallStartedAt[event.callID] ?? Date(),
-                terminalAt: nil,
-                effectivePolicy: event.policy.value,
-                approvalRequested: event.policy.requiresApproval,
-                approvalDecision: nil,
-                terminalOutcome: nil,
-                summary: summary,
-                visibility: context.visibility
-            )
             do {
-                try await persistence.beginAudit(record)
-                begunAuditIDs.insert(event.callID)
+                try await persistBeginAudit(
+                    callID: event.callID,
+                    context: context,
+                    policy: event.policy
+                )
             } catch {
+                if event.state == .terminal {
+                    pendingTerminalAudits[event.callID] = event
+                }
                 return
             }
         }
-        guard event.state == .terminal,
-              let outcome = event.outcome,
-              !terminalAuditIDs.contains(event.callID)
-        else { return }
+        guard event.state == .terminal else {
+            if let emit = eventEmitters[event.callID] {
+                await emit(.capabilityLifecycle(event))
+            }
+            return
+        }
+        pendingTerminalAudits[event.callID] = event
         do {
-            try await persistence.terminalizeAudit(
-                event.callID,
-                outcome,
-                approvalDecisions[event.callID]
-            )
-            terminalAuditIDs.insert(event.callID)
-            appendActivity(
-                CapabilityActivityRow(
-                    callID: event.callID,
-                    origin: Self.origin(context.descriptor.source),
-                    server: serverDisplayNames[context.descriptor.serverID]
-                        ?? context.descriptor.serverID,
-                    tool: context.descriptor.displayName,
-                    outcome: outcome
-                )
-            )
+            try await persistTerminalAudit(event, context: context)
         } catch {
             return
         }
+    }
+
+    private func persistBeginAudit(
+        callID: CapabilityCallID,
+        context: CallContext,
+        policy: EffectiveCapabilityPolicy
+    ) async throws {
+        guard !begunAuditIDs.contains(callID) else { return }
+        let summary = SanitizedCapabilitySummary(
+            context.visibility == .complete
+                ? Self.summaryProjection(context.descriptor)
+                : .providerDetailsUnavailable
+        )
+        let record = CapabilityAuditRecord(
+            id: callID,
+            conversationID: context.association.conversationID,
+            turnID: context.association.turnID,
+            voiceSessionID: context.association.voiceSessionID,
+            source: context.descriptor.source,
+            serverID: context.descriptor.serverID,
+            toolName: context.descriptor.toolName,
+            startedAt: providerCallStartedAt[callID] ?? Date(),
+            terminalAt: nil,
+            effectivePolicy: policy.value,
+            approvalRequested: policy.requiresApproval,
+            approvalDecision: nil,
+            terminalOutcome: nil,
+            summary: summary,
+            visibility: context.visibility
+        )
+        try await persistence.beginAudit(record)
+        begunAuditIDs.insert(callID)
+    }
+
+    private func persistTerminalAudit(
+        _ event: CapabilityLifecycleEvent,
+        context: CallContext
+    ) async throws {
+        guard !terminalAuditIDs.contains(event.callID),
+              let outcome = event.outcome
+        else {
+            pendingTerminalAudits[event.callID] = nil
+            return
+        }
+        try await persistence.terminalizeAudit(
+            event.callID,
+            outcome,
+            approvalDecisions[event.callID]
+        )
+        terminalAuditIDs.insert(event.callID)
+        pendingTerminalAudits[event.callID] = nil
+        appendActivity(CapabilityActivityRow(
+            callID: event.callID,
+            origin: Self.origin(context.descriptor.source),
+            server: serverDisplayNames[context.descriptor.serverID]
+                ?? context.descriptor.serverID,
+            tool: context.descriptor.displayName,
+            outcome: outcome
+        ))
+        if let emit = eventEmitters[event.callID] {
+            await emit(.capabilityLifecycle(event))
+        }
+    }
+
+    private func settleTerminalAudit(_ callID: CapabilityCallID) async throws {
+        guard !terminalAuditIDs.contains(callID),
+              let event = pendingTerminalAudits[callID],
+              let context = callContexts[callID]
+        else {
+            if terminalAuditIDs.contains(callID) { return }
+            throw CapabilityControllerError.auditUnavailable
+        }
+        try await persistTerminalAudit(event, context: context)
+    }
+
+    private func recoverPendingTerminalAudits() async throws {
+        for callID in Array(pendingTerminalAudits.keys) {
+            guard let event = pendingTerminalAudits[callID],
+                  let context = callContexts[callID]
+            else { throw CapabilityControllerError.auditUnavailable }
+            try await persistBeginAudit(
+                callID: callID,
+                context: context,
+                policy: event.policy
+            )
+            try await persistTerminalAudit(event, context: context)
+            markProviderCallMappingsCompleted(callID)
+            releaseCallState(callID)
+        }
+    }
+
+    private func markProviderCallMappingsCompleted(_ callID: CapabilityCallID) {
+        let keys = providerCallIDs.compactMap { key, value in
+            value == callID ? key : nil
+        }
+        completedProviderCallKeys.formUnion(keys)
     }
 
     private func appendActivity(_ row: CapabilityActivityRow) {
@@ -843,6 +1206,7 @@ final class CapabilityController: ObservableObject {
         approvalDecisions[callID] = nil
         begunAuditIDs.remove(callID)
         terminalAuditIDs.remove(callID)
+        pendingTerminalAudits[callID] = nil
         providerCallPolicies[callID] = nil
         providerCallStartedAt[callID] = nil
         approvalCanAllowOnce[callID] = nil
@@ -856,11 +1220,20 @@ final class CapabilityController: ObservableObject {
         for task in rpcTasks.values { task.cancel() }
     }
 
-    private func prepareBridge(providerProfileID: UUID) async throws {
-        guard let trustedParent, let bridgeBox else { return }
+    private func prepareBridge(
+        providerProfileID: UUID,
+        isVoice: Bool
+    ) async throws {
         await start()
         guard broker != nil else { throw CapabilityControllerError.unavailable }
         await stopBridge()
+        let authority = CapabilityProviderCallbackAuthority(
+            generation: UUID(),
+            isVoice: isVoice
+        )
+        activeProviderCallbackAuthority = authority
+        providerCallbackAuthorityBox?.install(authority)
+        guard let trustedParent, let bridgeBox else { return }
         let server = CapabilityRPCServer(trustedParent: trustedParent) {
             [weak self] request in
             guard let self else { return .failed(nil, code: "broker_unavailable") }
@@ -882,6 +1255,8 @@ final class CapabilityController: ObservableObject {
         rpcServer = nil
         rpcEndpoint = nil
         bridgeBox?.clear()
+        activeProviderCallbackAuthority = nil
+        providerCallbackAuthorityBox?.clear()
     }
 
     private func handleRPC(
@@ -994,7 +1369,9 @@ final class CapabilityController: ObservableObject {
                 policy: providerCallPolicies[callID] ?? Self.providerPolicy()
             )
             if let event { await recordLifecycle(event) }
-            releaseCallState(callID)
+            if terminalAuditIDs.contains(callID) {
+                releaseCallState(callID)
+            }
         }
         resetProviderActivityAuthority()
     }
@@ -1024,11 +1401,37 @@ final class CapabilityController: ObservableObject {
         return .changeLocalFiles
     }
 
+    private static func terminalOutcome(
+        for result: Result<SanitizedCapabilityResult, Error>
+    ) -> CapabilityTerminalOutcome {
+        switch result {
+        case .success(let value):
+            return value.isError ? .failed : .succeeded
+        case .failure(let error):
+            if error is CancellationError { return .cancelled }
+            switch error as? CapabilityBrokerError {
+            case .declined: return .declined
+            case .timedOut: return .timedOut
+            default: return .failed
+            }
+        }
+    }
+
     private static func providerPolicy() -> EffectiveCapabilityPolicy {
         CapabilityPolicyResolver().resolve(
             serverPolicy: .fullyTrusted,
             readOnlyHint: nil,
             mandatoryProviderApproval: false
+        ).effectivePolicy
+    }
+
+    private func effectivePolicy(
+        for descriptor: CapabilityDescriptor
+    ) -> EffectiveCapabilityPolicy {
+        CapabilityPolicyResolver().resolve(
+            serverPolicy: serverPolicies[descriptor.serverID] ?? .askBeforeChanges,
+            toolOverride: toolPolicies[descriptor.id],
+            readOnlyHint: descriptor.readOnlyHint
         ).effectivePolicy
     }
 

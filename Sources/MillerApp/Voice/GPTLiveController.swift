@@ -66,9 +66,7 @@ actor GPTLiveController {
     private let microphonePermission: @Sendable () async -> MicrophonePermission
     private let credentialRefreshTimeout: Duration
     private let cleanupPendingDelay: Duration
-    private let onCapabilityActivity: CodexCapabilityActivityHandler
-    private let resolveProviderApproval: CodexProviderApprovalResolver
-    private let resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver?
+    private let providerCallbacks: @Sendable () -> CapabilityProviderCallbacks
     private let millerCapabilityCatalog: @Sendable () -> [CapabilityDescriptor]
     private let bridgeConfiguration:
         @Sendable () throws -> CodexMCPBridgeConfiguration?
@@ -112,6 +110,7 @@ actor GPTLiveController {
         onCapabilityActivity: @escaping CodexCapabilityActivityHandler = { _ in },
         resolveProviderApproval: @escaping CodexProviderApprovalResolver = { _ in .decline },
         resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver? = nil,
+        providerCallbacks: (@Sendable () -> CapabilityProviderCallbacks)? = nil,
         existingMillerCapabilities: [CapabilityDescriptor] = [],
         millerCapabilityCatalog: (@Sendable () -> [CapabilityDescriptor])? = nil,
         bridgeConfiguration: @escaping @Sendable () throws
@@ -149,9 +148,16 @@ actor GPTLiveController {
         self.microphonePermission = microphonePermission
         self.credentialRefreshTimeout = credentialRefreshTimeout
         self.cleanupPendingDelay = cleanupPendingDelay
-        self.onCapabilityActivity = onCapabilityActivity
-        self.resolveProviderApproval = resolveProviderApproval
-        self.resolveProviderApprovalDetails = resolveProviderApprovalDetails
+        let approvalDetails = resolveProviderApprovalDetails ?? { approval in
+            await resolveProviderApproval(approval.request)
+        }
+        self.providerCallbacks = providerCallbacks ?? {
+            CapabilityProviderCallbacks(
+                activity: onCapabilityActivity,
+                approval: resolveProviderApproval,
+                approvalDetails: approvalDetails
+            )
+        }
         self.millerCapabilityCatalog = millerCapabilityCatalog
             ?? { existingMillerCapabilities }
         self.bridgeConfiguration = bridgeConfiguration
@@ -297,6 +303,7 @@ actor GPTLiveController {
                 cleanupPendingDelay: cleanupPendingDelay,
                 spawnedProcessVerifier: spawnedProcessVerifier
             ))
+            let providerCallbacks = providerCallbacks()
             let client = CodexAppServerClient(
                 process: process,
                 refreshProvider: {
@@ -325,9 +332,9 @@ actor GPTLiveController {
                     }
                     return replacement
                 },
-                onCapabilityActivity: onCapabilityActivity,
-                resolveProviderApproval: resolveProviderApproval,
-                resolveProviderApprovalDetails: resolveProviderApprovalDetails,
+                onCapabilityActivity: providerCallbacks.activity,
+                resolveProviderApproval: providerCallbacks.approval,
+                resolveProviderApprovalDetails: providerCallbacks.approvalDetails,
                 existingMillerCapabilities: millerCapabilityCatalog()
             )
             session = peer.map { LiveAudioSession(client: client, peer: $0) }

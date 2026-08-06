@@ -7,6 +7,54 @@ import Testing
 @MainActor
 struct OverlayLiveVoicePresentationTests {
     @Test(arguments: OverlayDismissalEntryPoint.allCases)
+    fileprivate func everyOverlayDismissalDeclinesPendingCapabilityApproval(
+        entryPoint: OverlayDismissalEntryPoint
+    ) async throws {
+        let capabilityController = CapabilityController(
+            loadConfiguration: {
+                CapabilityRuntimeConfiguration(servers: [], toolPolicies: [:])
+            }
+        )
+        let model = AppPresentationModel(
+            dependencies: hostDependencies(),
+            capabilityController: capabilityController
+        )
+        let controller = OverlayPanelController(model: model)
+        let capabilityID = try CapabilityID(
+            source: .providerNative,
+            serverID: "codex",
+            toolName: "command-execution"
+        )
+        let policy = try JSONDecoder().decode(
+            EffectiveCapabilityPolicy.self,
+            from: Data(
+                #"{"value":"fully_trusted","requiresApproval":true,"reason":"provider_approval_required"}"#.utf8
+            )
+        )
+        let request = try CapabilityApprovalRequest(
+            callID: CapabilityCallID(),
+            capabilityID: capabilityID,
+            summary: CapabilitySummary(text: "Provider confirmation required"),
+            policy: policy
+        )
+        let approval = Task { @MainActor in
+            await capabilityController.resolveProviderApproval(
+                request,
+                association: .voice(sessionID: UUID(), generation: 1)
+            )
+        }
+        try await waitUntil { capabilityController.pendingApproval != nil }
+        controller.show()
+        try await waitUntil { controller.window?.isVisible == true }
+
+        entryPoint.dismiss(controller)
+
+        #expect(await approval.value == .decline)
+        #expect(capabilityController.pendingApproval == nil)
+        #expect(model.pendingCapabilityApproval == nil)
+    }
+
+    @Test(arguments: OverlayDismissalEntryPoint.allCases)
     fileprivate func activeVoiceDismissalWaitsForTheSharedEndCleanupBeforeHiding(
         entryPoint: OverlayDismissalEntryPoint
     ) async throws {

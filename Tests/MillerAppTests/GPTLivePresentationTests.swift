@@ -36,6 +36,36 @@ private actor ProviderApprovalPresentationProbe {
     }
 }
 
+private final class ProviderCallbackFactoryProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private let approvals: ProviderApprovalPresentationProbe
+
+    init(approvals: ProviderApprovalPresentationProbe) {
+        self.approvals = approvals
+    }
+
+    var captures: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+
+    func make() -> CapabilityProviderCallbacks {
+        lock.lock()
+        count += 1
+        lock.unlock()
+        return CapabilityProviderCallbacks(
+            activity: { _ in },
+            approval: { [approvals] request in
+                await approvals.approve(request)
+            },
+            approvalDetails: { [approvals] approval in
+                await approvals.approve(approval.request)
+            }
+        )
+    }
+}
+
 @Suite(.serialized)
 @MainActor
 struct GPTLivePresentationTests {
@@ -76,6 +106,7 @@ struct GPTLivePresentationTests {
             )
         )
         let approvals = ProviderApprovalPresentationProbe()
+        let callbackFactory = ProviderCallbackFactoryProbe(approvals: approvals)
         let controller = try GPTLiveController(
             helperURL: helper,
             temporaryParentURL: temporaryParent,
@@ -83,7 +114,7 @@ struct GPTLivePresentationTests {
             credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
             refreshCredential: {},
             microphonePermission: { .authorized },
-            resolveProviderApproval: { request in await approvals.approve(request) },
+            providerCallbacks: { callbackFactory.make() },
             makeSession: { client in
                 LiveAudioSession(client: client, peer: PresentationTestPeer())
             },
@@ -95,6 +126,7 @@ struct GPTLivePresentationTests {
 
         #expect(await approvals.requests.count == 1)
         #expect(await approvals.requests.first?.policy.requiresApproval == true)
+        #expect(callbackFactory.captures == 1)
     }
 
     @Test
