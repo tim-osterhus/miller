@@ -186,14 +186,17 @@ elif [[ "$#" == 1 && "$1" == "--dependencies" ]]; then
   for target in \
     "$repo_root/Gateway/node_modules" \
     "$repo_root/.cache/npm" \
-    "$repo_root/.artifacts/overlay-build"
+    "$repo_root/.artifacts/overlay-build" \
+    "$repo_root/.build/vendor/wakeword"
   do
     safe_remove_tree \
       "$target" \
       "$repo_root/Gateway/node_modules" \
       "$repo_root/.cache/npm" \
-      "$repo_root/.artifacts/overlay-build"
+      "$repo_root/.artifacts/overlay-build" \
+      "$repo_root/.build/vendor/wakeword"
   done
+  rmdir "$repo_root/.build/vendor" 2>/dev/null || true
   rmdir "$repo_root/.cache" 2>/dev/null || true
   rmdir "$repo_root/.artifacts" 2>/dev/null || true
 else

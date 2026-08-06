@@ -1,5 +1,26 @@
 // swift-tools-version: 6.1
+import Foundation
 import PackageDescription
+
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let wakewordLockedRoot = packageRoot
+    .appendingPathComponent(".build/vendor/wakeword/locked").path
+let wakewordInputsAvailable = FileManager.default.fileExists(
+    atPath: "\(wakewordLockedRoot)/lib/libsherpa-onnx.a"
+) && FileManager.default.fileExists(
+    atPath: "\(wakewordLockedRoot)/lib/libonnxruntime.a"
+)
+
+let wakewordCXXSettings: [CXXSetting] = wakewordInputsAvailable
+    ? [.unsafeFlags(["-I", "\(wakewordLockedRoot)/include"])]
+    : [.define("MILLER_WAKEWORD_INPUTS_UNAVAILABLE")]
+let wakewordLinkerSettings: [LinkerSetting] = wakewordInputsAvailable ? [
+    .unsafeFlags([
+        "\(wakewordLockedRoot)/lib/libsherpa-onnx.a",
+        "\(wakewordLockedRoot)/lib/libonnxruntime.a",
+    ]),
+    .linkedLibrary("c++"),
+] : [.linkedLibrary("c++")]
 
 let package = Package(
     name: "Miller",
@@ -11,6 +32,7 @@ let package = Package(
         .library(name: "MillerLive", targets: ["MillerLive"]),
         .library(name: "MillerLiveAudio", targets: ["MillerLiveAudio"]),
         .library(name: "MillerCapabilities", targets: ["MillerCapabilities"]),
+        .library(name: "MillerWake", targets: ["MillerWake"]),
         .executable(name: "MillerApp", targets: ["MillerApp"]),
         .executable(
             name: "MillerCapabilityBridge",
@@ -47,6 +69,14 @@ let package = Package(
             dependencies: ["MillerLive"],
             linkerSettings: [.linkedFramework("AVFoundation")]
         ),
+        .target(
+            name: "MillerWakeBridge",
+            path: "Sources/MillerWakeBridge",
+            publicHeadersPath: "include",
+            cxxSettings: wakewordCXXSettings,
+            linkerSettings: wakewordLinkerSettings
+        ),
+        .target(name: "MillerWake", dependencies: ["MillerWakeBridge"]),
         .executableTarget(
             name: "MillerCapabilityBridge",
             dependencies: [
@@ -85,6 +115,7 @@ let package = Package(
             name: "MillerLiveAudioTests",
             dependencies: ["MillerLiveAudio", "MillerLive"]
         ),
+        .testTarget(name: "MillerWakeTests", dependencies: ["MillerWake"]),
         .testTarget(
             name: "MillerCapabilitiesTests",
             dependencies: [

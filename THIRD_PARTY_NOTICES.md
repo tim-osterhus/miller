@@ -11,20 +11,21 @@ are licensed under the applicable Apache-2.0 or MIT terms identified by the
 upstream `LICENSE` file. In Task 1 the package is locked but is not linked into
 a Miller target or bundled in a Miller distribution.
 
-## Planned optional wakeword inputs
+## Optional wakeword build inputs
 
-Miller plans to fetch and verify, during a future optional wakeword build,
-Sherpa-ONNX 1.13.2 and the Apache-2.0 GigaSpeech keyword model from the official
+Miller's explicit optional wakeword bootstrap fetches and verifies Sherpa-ONNX
+1.13.2 and the Apache-2.0 GigaSpeech keyword model from the official
 Sherpa-ONNX releases, plus ONNX Runtime 1.24.4 static libraries licensed under
 MIT. Exact source URLs and approved hashes are recorded in `PROVENANCE.md`.
 
-These archives, binaries, and model files are not currently downloaded,
-committed, linked, bundled, or shipped by Miller. Required upstream license
-files and notices must accompany any future distribution that includes them.
+The archives, binaries, and model files are generated build inputs and are not
+committed. The bootstrap deletes archives and extraction trees after retaining
+the minimum verified arm64 inputs. Required upstream license files and notices
+must accompany any distribution that includes those retained inputs.
 
-The planned owner-authored Cortana donor commit is not third-party material;
-its later file-level authorship review is recorded separately in
-`PROVENANCE.md`. No donor source is included in Task 1.
+The owner-authored Cortana donor commit is not third-party material. Its
+file-level scope and immutable-source review are recorded in
+`docs/qualification/wakeword-donor-audit.md` and `PROVENANCE.md`.
 
 ## Pi AI 0.82.0
 

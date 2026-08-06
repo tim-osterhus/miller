@@ -72,26 +72,29 @@ and provenance review before incorporation.
 official repository, revision, and complete SwiftPM resolution. The planned
 Swift MCP broker will consume the SDK in a later task.
 
-### Planned Cortana wakeword donor
+### Cortana wakeword donor
 
 - Canonical donor repository: `/Users/alex/Desktop/bonzo-dashboard/cortana` on
   `kindly-macmini`
 - Approved donor commit: `8f4af867c575c089f45a8df4768663a521f88203`
-- Ownership: owner-authored Cortana material, subject to a later file-level
-  authorship and provenance audit.
-- Current scope: provenance checkpoint only. No donor file was inspected,
-  copied, adapted, or committed in Task 1.
+- Ownership: owner-authored Cortana material.
+- Imported scope: the nine bridge, detector, coordinator, frame accumulator,
+  production-controller, and settings-controller files enumerated in
+  `docs/qualification/wakeword-donor-audit.md`.
 
-The later donor audit must read only committed files from the approved commit.
-It must not use an installed application or a dirty working tree.
+Every donor file was read only with `git show <commit>:<path>` at the approved
+immutable commit. Miller recreated those files with narrow naming and host
+boundary adaptations. The Cortana settings view, tests, probes, installed app,
+and current working tree were not source donors. VoiceInk was neither inspected
+nor used.
 
-### Planned fetched-and-verified wakeword build inputs
+### Fetched-and-verified wakeword build inputs
 
-These are future build inputs for the optional wakeword subsystem. They are
-not currently downloaded, committed, linked, bundled, or shipped by Miller.
-The later bootstrap task will fetch the exact official archives into a bounded
-build directory, verify them before extraction, retain only the required
-arm64 inputs, and verify the retained bytes again.
+These are optional build inputs for the wakeword subsystem. They are never
+committed. `scripts/bootstrap-wakeword-dependencies.sh` fetches the exact
+official archives into a bounded generated directory, verifies each archive
+before extraction, stages only the required arm64 inputs, deletes the archives
+and extraction trees, and verifies the retained bytes again.
 
 - Sherpa-ONNX 1.13.2 static macOS XCFramework archive:
   `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-macos-xcframework-static.tar.bz2`
