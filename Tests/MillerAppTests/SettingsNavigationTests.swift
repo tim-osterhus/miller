@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import MillerApp
@@ -71,6 +72,25 @@ struct SettingsNavigationTests {
         #expect(source.contains("minHeight: SettingsLayout.minimumHeight"))
         #expect(SettingsLayout.minimumWidth >= 700)
         #expect(SettingsLayout.minimumHeight >= 480)
+    }
+
+    @Test
+    @MainActor
+    func appKitHostEnforcesTheSharedResizableContentMinimum() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+
+        SettingsWindowConfiguration.apply(to: window)
+
+        #expect(window.styleMask.contains(.resizable))
+        #expect(window.contentMinSize.width == SettingsLayout.minimumWidth)
+        #expect(window.contentMinSize.height == SettingsLayout.minimumHeight)
+        #expect(window.contentView?.bounds.width == SettingsLayout.minimumWidth)
+        #expect(window.contentView?.bounds.height == SettingsLayout.minimumHeight)
     }
 
     @Test

@@ -3063,16 +3063,36 @@ private actor ProviderSettingsController {
     }
 }
 
+enum SettingsWindowConfiguration {
+    @MainActor
+    static func apply(to window: NSWindow) {
+        let minimumSize = NSSize(
+            width: SettingsLayout.minimumWidth,
+            height: SettingsLayout.minimumHeight
+        )
+        window.styleMask.insert(.resizable)
+        window.contentMinSize = minimumSize
+        let currentSize = window.contentView?.bounds.size ?? .zero
+        window.setContentSize(
+            NSSize(
+                width: max(currentSize.width, minimumSize.width),
+                height: max(currentSize.height, minimumSize.height)
+            )
+        )
+    }
+}
+
 private final class NSHostingWindow<Content: View>: NSWindow {
     init(rootView: Content) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         title = "Miller Settings"
         contentView = NSHostingView(rootView: rootView)
+        SettingsWindowConfiguration.apply(to: self)
         isReleasedWhenClosed = false
     }
 }
