@@ -45,6 +45,7 @@ if (mode === "record-stdin") {
 let threadId = "thread-1";
 let helperThreadCreated = false;
 let typedTurnId = "typed-turn-1";
+let connectorApprovalResponses = 0;
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
 
 function featureConfigurationIsAdmitted() {
@@ -100,6 +101,27 @@ function typedThreadStartResult(id, cwd) {
 
 const answerSDP = "v=0\r\ns=-\r\n";
 
+function connectorApprovalParams(approvalThread, approvalTurn, itemId) {
+  return {
+    itemId,
+    questions: [{
+      header: "Approve app tool call?",
+      id: `mcp_tool_call_approval_${itemId}`,
+      isOther: false,
+      isSecret: false,
+      options: [
+        { description: "Run the tool and continue.", label: "Approve Once" },
+        { description: "Remember for this session.", label: "Approve this Session" },
+        { description: "Decline and continue.", label: "Deny" },
+        { description: "Cancel this tool call.", label: "Cancel" },
+      ],
+      question: "The connector wants to modify data. Allow this action?",
+    }],
+    threadId: approvalThread,
+    turnId: approvalTurn,
+  };
+}
+
 function emitRealtimeStarted() {
   const emittedThread = mode === "wrong-thread" ? "thread-other" : threadId;
   const emittedSession = mode === "upstream-session" ? "session-other" : threadId;
@@ -154,15 +176,15 @@ function emitLifecycle() {
       },
     });
   }
-  if (mode === "realtime-provider-approval") {
+  if (mode === "realtime-provider-approval" ||
+      mode === "realtime-provider-approval-decline" ||
+      mode === "realtime-provider-approval-replay") {
     send({
       id: "realtime-approval-1",
-      method: "item/fileChange/requestApproval",
-      params: {
-        threadId: emittedThread, turnId: "turn-approval-1",
-        itemId: "file-change-1", startedAtMs: 1,
-        reason: "private provider reason",
-      },
+      method: "item/tool/requestUserInput",
+      params: connectorApprovalParams(
+        emittedThread, "turn-approval-1", "connector-call-1"
+      ),
     });
     return;
   }
@@ -271,9 +293,27 @@ lines.on("line", (line) => {
     return;
   }
   const request = JSON.parse(line);
-  if (mode === "realtime-provider-approval" &&
+  if ((mode === "realtime-provider-approval" ||
+       mode === "realtime-provider-approval-decline" ||
+       mode === "realtime-provider-approval-replay") &&
       request.id === "realtime-approval-1") {
-    if (request.result?.decision !== "accept") process.exit(51);
+    const expected = mode === "realtime-provider-approval-decline"
+      ? "Deny"
+      : "Approve Once";
+    if (request.result?.answers?.["mcp_tool_call_approval_connector-call-1"]
+        ?.answers?.[0] !== expected) process.exit(51);
+    connectorApprovalResponses += 1;
+    if (mode === "realtime-provider-approval-replay") {
+      if (connectorApprovalResponses > 1) process.exit(52);
+      send({
+        id: "realtime-approval-1",
+        method: "item/tool/requestUserInput",
+        params: connectorApprovalParams(
+          threadId, "turn-approval-1", "connector-call-1"
+        ),
+      });
+      return;
+    }
     notify("thread/realtime/closed", {
       threadId, reason: "synthetic-complete",
     });
@@ -506,7 +546,24 @@ lines.on("line", (line) => {
         });
         return;
       }
-      if (mode === "typed-approval" || mode === "typed-provider-approval") {
+      if (mode === "typed-provider-approval" ||
+          mode === "typed-provider-approval-decline" ||
+          mode === "typed-provider-approval-replay" ||
+          mode === "typed-provider-approval-wrong-authority") {
+        send({
+          id: "tool-approval-request-1",
+          method: "item/tool/requestUserInput",
+          params: connectorApprovalParams(
+            mode === "typed-provider-approval-wrong-authority"
+              ? "thread-other"
+              : threadId,
+            typedTurnId,
+            "connector-call-1"
+          ),
+        });
+        return;
+      }
+      if (mode === "typed-approval") {
         send({
           id: "approval-request-1",
           method: "item/commandExecution/requestApproval",
@@ -641,19 +698,43 @@ lines.on("line", (line) => {
       });
       return;
     }
-    if ((mode === "typed-approval" || mode === "typed-provider-approval") &&
+    if ((mode === "typed-provider-approval" ||
+         mode === "typed-provider-approval-decline" ||
+         mode === "typed-provider-approval-replay") &&
+        request.id === "tool-approval-request-1") {
+      const expected = mode === "typed-provider-approval-decline"
+        ? "Deny"
+        : "Approve Once";
+      if (request.result?.answers?.["mcp_tool_call_approval_connector-call-1"]
+          ?.answers?.[0] !== expected) process.exit(47);
+      connectorApprovalResponses += 1;
+      if (mode === "typed-provider-approval-replay") {
+        if (connectorApprovalResponses > 1) process.exit(49);
+        send({
+          id: "tool-approval-request-1",
+          method: "item/tool/requestUserInput",
+          params: connectorApprovalParams(
+            threadId, typedTurnId, "connector-call-1"
+          ),
+        });
+        return;
+      }
+      notify("turn/completed", {
+        threadId,
+        turn: { id: typedTurnId, status: "completed", items: [], error: null },
+      });
+      return;
+    }
+    if (mode === "typed-approval" &&
         request.id === "approval-request-1") {
-      const expectedDecision = mode === "typed-provider-approval" ? "accept" : "decline";
-      if (request.result?.decision !== expectedDecision) process.exit(47);
+      if (request.result?.decision !== "decline") process.exit(47);
       notify("turn/completed", {
         threadId,
         turn: {
           id: typedTurnId,
-          status: mode === "typed-provider-approval" ? "completed" : "failed",
+          status: "failed",
           items: [],
-          error: mode === "typed-provider-approval"
-            ? null
-            : { message: "private approval unavailable" },
+          error: { message: "private approval unavailable" },
         },
       });
       return;

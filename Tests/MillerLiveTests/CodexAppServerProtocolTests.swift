@@ -85,6 +85,40 @@ struct CodexAppServerProtocolTests {
     }
 
     @Test
+    func connectorToolApprovalProjectsTheSharedMillerApprovalContract() throws {
+        let message = try protocolCodec.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "id": "connector-approval-1",
+                "method": "item/tool/requestUserInput",
+                "params": [
+                    "itemId": "call-1",
+                    "questions": [[
+                        "header": "Approve app tool call?",
+                        "id": "mcp_tool_call_approval_call-1",
+                        "isOther": false,
+                        "isSecret": false,
+                        "options": [
+                            ["description": "Approve", "label": "Approve Once"],
+                            ["description": "Session", "label": "Approve this Session"],
+                            ["description": "Deny", "label": "Deny"],
+                            ["description": "Cancel", "label": "Cancel"],
+                        ],
+                        "question": "Allow the connector action?",
+                    ] as [String: Any]],
+                    "threadId": "thread-1", "turnId": "turn-1",
+                ] as [String: Any],
+            ] as [String: Any]
+        ))
+
+        guard case .providerApproval(let approval) = message else {
+            Issue.record("Expected connector provider approval")
+            return
+        }
+        #expect(approval.kind == .toolUserInput)
+        #expect(approval.request.policy.requiresApproval)
+    }
+
+    @Test
     func boundsAndIgnoresUnknownFutureCapabilityActivity() throws {
         let message = try protocolCodec.decode(try JSONSerialization.data(
             withJSONObject: [

@@ -39,6 +39,21 @@ private actor CapabilityEventRecorder {
     }
 }
 
+private final class ApprovalSuspensionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+
+    var resolverEntered: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return entered
+    }
+
+    func markResolverEntered() {
+        lock.lock(); defer { lock.unlock() }
+        entered = true
+    }
+}
+
 private let syntheticSHA256Fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 
 private let syntheticWebRTCOffer = """
@@ -140,6 +155,131 @@ struct CodexAppServerClientTests {
             if case .turnCompleted(_, _, .completed) = $0 { true } else { false }
         })
         #expect(!process.isRunning)
+    }
+
+    @Test
+    func connectorApprovalWithWrongAuthorityCannotReachMillerResolver() async throws {
+        let recorder = CapabilityEventRecorder()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-provider-approval-wrong-authority"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            resolveProviderApproval: { request in await recorder.approve(request) }
+        )
+
+        await #expect(throws: (any Error).self) {
+            for try await _ in client.typedEvents(
+                requestID: "typed-approval-wrong-authority-1",
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                context: [],
+                userText: "do not approve",
+                timeout: .seconds(2)
+            ) {}
+        }
+
+        #expect(await recorder.approvals.isEmpty)
+        #expect(!process.isRunning)
+    }
+
+    @Test
+    func connectorApprovalReplayCannotReachMillerResolverTwice() async throws {
+        for (mode, realtime) in [
+            ("typed-provider-approval-replay", false),
+            ("realtime-provider-approval-replay", true),
+        ] {
+            let recorder = CapabilityEventRecorder()
+            let process = CodexAppServerProcess(configuration: try configuration(mode: mode))
+            let client = CodexAppServerClient(
+                process: process,
+                resolveProviderApproval: { request in await recorder.approve(request) }
+            )
+
+            if realtime {
+                await #expect(throws: (any Error).self) {
+                    _ = try await client.runUntilClosed(
+                        identity: identity, credential: credential, timeout: .seconds(2)
+                    )
+                }
+            } else {
+                await #expect(throws: (any Error).self) {
+                    for try await _ in client.typedEvents(
+                        requestID: "typed-approval-replay-1",
+                        credential: credential,
+                        model: "gpt-5.6-terra",
+                        cwd: repository.path,
+                        context: [],
+                        userText: "do not replay",
+                        timeout: .seconds(2)
+                    ) {}
+                }
+            }
+
+            #expect(await recorder.approvals.count == 1)
+            #expect(!process.isRunning)
+        }
+    }
+
+    @Test
+    func connectorApprovalDeclineUsesDenyWithoutSessionTrust() async throws {
+        for (mode, realtime) in [
+            ("typed-provider-approval-decline", false),
+            ("realtime-provider-approval-decline", true),
+        ] {
+            let process = CodexAppServerProcess(configuration: try configuration(mode: mode))
+            let client = CodexAppServerClient(
+                process: process,
+                resolveProviderApproval: { _ in .decline }
+            )
+
+            if realtime {
+                _ = try await client.runUntilClosed(
+                    identity: identity, credential: credential, timeout: .seconds(2)
+                )
+            } else {
+                for try await _ in client.typedEvents(
+                    requestID: "typed-approval-decline-1",
+                    credential: credential,
+                    model: "gpt-5.6-terra",
+                    cwd: repository.path,
+                    context: [],
+                    userText: "decline connector",
+                    timeout: .seconds(2)
+                ) {}
+            }
+
+            #expect(!process.isRunning)
+        }
+    }
+
+    @Test
+    func cancellationWhileConnectorApprovalIsPendingCleansTheHelper() async throws {
+        let probe = ApprovalSuspensionProbe()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "realtime-provider-approval"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            resolveProviderApproval: { _ in
+                probe.markResolverEntered()
+                try? await Task.sleep(for: .seconds(30))
+                return .allowOnce
+            }
+        )
+        let run = Task {
+            try await client.runUntilClosed(
+                identity: identity, credential: credential, timeout: .seconds(2)
+            )
+        }
+        try await waitUntil { probe.resolverEntered }
+
+        run.cancel()
+        await #expect(throws: (any Error).self) { try await run.value }
+        try await waitUntil { !process.isRunning }
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
     }
 
     @Test

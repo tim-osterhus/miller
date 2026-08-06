@@ -38,7 +38,7 @@ public enum CodexRealtimePrompt {
     }
 }
 
-public enum JSONRPCRequestID: Equatable, Sendable {
+public enum JSONRPCRequestID: Hashable, Sendable {
     case string(String)
     case integer(Int64)
 }
@@ -282,6 +282,7 @@ public struct CodexAppServerProtocol: Sendable {
             || method == "thread/realtime/itemAdded"
             || method == "item/commandExecution/requestApproval"
             || method == "item/fileChange/requestApproval"
+            || method == "item/tool/requestUserInput"
         {
             let frame = try JSONSerialization.data(
                 withJSONObject: root, options: [.sortedKeys]

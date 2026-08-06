@@ -60,6 +60,17 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var threadStartedID: String?
         var realtimeStarted = false
     }
+    private struct ProviderApprovalCallAuthority: Hashable {
+        let threadID: String
+        let turnID: String
+        let itemID: String
+
+        init(_ approval: CodexProviderApproval) {
+            threadID = approval.threadID
+            turnID = approval.turnID
+            itemID = approval.itemID
+        }
+    }
     private enum StopAction { case none, send(String, String), cancelStartup, retainUntilAdmission }
     private enum TypedStopAction {
         case none
@@ -826,6 +837,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     turnID: responseTurnID
                 ))
                 let capabilityCodec = CodexCapabilityProtocol()
+                var approvalResponseIDs = Set<JSONRPCRequestID>()
+                var approvalCalls = Set<ProviderApprovalCallAuthority>()
                 while let data = try await iterator.next() {
                     switch try capabilityCodec.decodeActivity(
                         data,
@@ -839,6 +852,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     case .approval(let approval):
                         guard approval.threadID == helperThreadID,
                               approval.turnID == responseTurnID
+                        else { throw CodexTypedProtocolError.invalidSequence }
+                        guard approvalResponseIDs.insert(approval.responseID).inserted,
+                              approvalCalls.insert(.init(approval)).inserted
                         else { throw CodexTypedProtocolError.invalidSequence }
                         let decision = await resolveProviderApproval(approval.request)
                         try Task.checkCancellation()
@@ -1214,6 +1230,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
             emit(startedEvent)
         }
         var terminal: LiveTerminalOutcome?
+        var approvalResponseIDs = Set<JSONRPCRequestID>()
+        var approvalCalls = Set<ProviderApprovalCallAuthority>()
         while let data = try await iterator.next() {
             try Task.checkCancellation()
             let message = try codec.decode(data)
@@ -1228,6 +1246,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 guard approval.threadID == helperThreadID else {
                     throw CodexAppServerClientError.unexpectedMessage
                 }
+                guard approvalResponseIDs.insert(approval.responseID).inserted,
+                      approvalCalls.insert(.init(approval)).inserted
+                else { throw CodexAppServerClientError.unexpectedMessage }
                 let decision = await resolveProviderApproval(approval.request)
                 try Task.checkCancellation()
                 try process.send(try CodexCapabilityProtocol().approvalResponse(

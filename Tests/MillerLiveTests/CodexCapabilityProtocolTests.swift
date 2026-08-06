@@ -526,6 +526,147 @@ struct CodexCapabilityProtocolTests {
             ]))
         }
     }
+
+    @Test
+    func connectorToolApprovalUsesRealBoundedAnswersShape() throws {
+        let codec = CodexCapabilityProtocol()
+        let questionID = "mcp_tool_call_approval_call-717"
+        let decoded = try codec.decodeActivity(frame([
+            "id": 110,
+            "method": "item/tool/requestUserInput",
+            "params": [
+                "itemId": "call-717",
+                "questions": [[
+                    "header": "Approve app tool call?",
+                    "id": questionID,
+                    "isOther": false,
+                    "isSecret": false,
+                    "options": [
+                        ["description": "Run the tool and continue.", "label": "Approve Once"],
+                        ["description": "Remember for this session.", "label": "Approve this Session"],
+                        ["description": "Decline and continue.", "label": "Deny"],
+                        ["description": "Cancel this tool call.", "label": "Cancel"],
+                    ],
+                    "question": "The connector wants to modify data. Allow this action?",
+                ] as [String: Any]],
+                "threadId": "thread-717",
+                "turnId": "turn-717",
+            ] as [String: Any],
+        ]))
+        guard case .approval(let approval) = decoded else {
+            Issue.record("Expected connector approval")
+            return
+        }
+        #expect(approval.kind == .toolUserInput)
+        #expect(approval.request.policy.requiresApproval)
+        #expect(approval.request.summary.text == "Codex connector requires approval")
+
+        for (decision, expected) in [
+            (CapabilityApprovalDecision.allowOnce, "Approve Once"),
+            (.decline, "Deny"),
+        ] {
+            let response = try object(codec.approvalResponse(
+                approval, decision: decision
+            ))
+            #expect(response["id"] as? Int == 110)
+            let answers = try #require(
+                (response["result"] as? [String: Any])?["answers"]
+                    as? [String: Any]
+            )
+            let answer = try #require(answers[questionID] as? [String: Any])
+            #expect(answer["answers"] as? [String] == [expected])
+        }
+        let cancelled = try object(codec.cancelApprovalResponse(approval))
+        let cancelAnswers = try #require(
+            (cancelled["result"] as? [String: Any])?["answers"]
+                as? [String: Any]
+        )
+        #expect(
+            (cancelAnswers[questionID] as? [String: Any])?["answers"]
+                as? [String] == ["Cancel"]
+        )
+    }
+
+    @Test
+    func connectorToolInputBoundsMalformedApprovalAndIgnoresNonApproval() throws {
+        let codec = CodexCapabilityProtocol(maximumTextBytes: 128)
+        let freeform = try codec.decodeActivity(frame([
+            "id": "freeform-1",
+            "method": "item/tool/requestUserInput",
+            "params": [
+                "itemId": "call-freeform",
+                "questions": [[
+                    "header": "Provide context", "id": "freeform-1",
+                    "isOther": false, "isSecret": false,
+                    "options": NSNull(), "question": "What should I post?",
+                ] as [String: Any]],
+                "threadId": "thread-1", "turnId": "turn-1",
+            ] as [String: Any],
+        ]))
+        #expect(freeform == .ignored)
+        let empty = try codec.decodeActivity(frame([
+            "id": "empty-1",
+            "method": "item/tool/requestUserInput",
+            "params": [
+                "itemId": "call-empty", "questions": [],
+                "threadId": "thread-1", "turnId": "turn-1",
+            ] as [String: Any],
+        ]))
+        #expect(empty == .ignored)
+
+        let baseParams: [String: Any] = [
+            "itemId": "call-1",
+            "questions": [[
+                "header": "Approve", "id": "mcp_tool_call_approval_call-1",
+                "isOther": false, "isSecret": false,
+                "options": [
+                    ["description": "Approve", "label": "Approve Once"],
+                    ["description": "Session", "label": "Approve this Session"],
+                    ["description": "Deny", "label": "Deny"],
+                    ["description": "Cancel", "label": "Cancel"],
+                ],
+                "question": "Allow this action?",
+            ] as [String: Any]],
+            "threadId": "thread-1", "turnId": "turn-1",
+        ]
+        for corrupt in [
+            { () -> [String: Any] in
+                var params = baseParams
+                params["turnId"] = NSNull()
+                return params
+            }(),
+            { () -> [String: Any] in
+                var params = baseParams
+                var questions = params["questions"] as! [[String: Any]]
+                questions[0]["id"] = "mcp_tool_call_approval_other-call"
+                params["questions"] = questions
+                return params
+            }(),
+            { () -> [String: Any] in
+                var params = baseParams
+                var questions = params["questions"] as! [[String: Any]]
+                questions[0]["options"] = [[
+                    "description": "Approve", "label": "Approve Once",
+                ]]
+                params["questions"] = questions
+                return params
+            }(),
+            { () -> [String: Any] in
+                var params = baseParams
+                var questions = params["questions"] as! [[String: Any]]
+                questions[0]["question"] = String(repeating: "x", count: 129)
+                params["questions"] = questions
+                return params
+            }(),
+        ] {
+            #expect(throws: CodexCapabilityProtocolError.invalidField) {
+                try codec.decodeActivity(frame([
+                    "id": "bad", "method": "item/tool/requestUserInput",
+                    "params": corrupt,
+                ]))
+            }
+        }
+    }
 }
 
 private func frame(_ value: [String: Any]) throws -> Data {

@@ -77,6 +77,7 @@ public struct CodexCapabilityActivity: Equatable, Sendable {
 public enum CodexProviderApprovalKind: Equatable, Sendable {
     case commandExecution
     case fileChange
+    case toolUserInput
 }
 
 public struct CodexProviderApproval: Equatable, Sendable {
@@ -87,6 +88,7 @@ public struct CodexProviderApproval: Equatable, Sendable {
     public let kind: CodexProviderApprovalKind
     public let request: CapabilityApprovalRequest
     public let availableDecisions: Set<String>
+    public let toolUserInputQuestionID: String?
 }
 
 public enum CodexCapabilityDecodedEvent: Equatable, Sendable {
@@ -417,6 +419,15 @@ public struct CodexCapabilityProtocol: Sendable {
             }
             return .approval(try providerApproval(method: method, root: root))
         }
+        if method == "item/tool/requestUserInput" {
+            guard data.count <= maximumRawItemBytes else {
+                throw CodexCapabilityProtocolError.payloadTooLarge
+            }
+            guard let approval = try toolUserInputApproval(root) else {
+                return .ignored
+            }
+            return .approval(approval)
+        }
         guard method == "item/started" || method == "item/completed"
                 || method == "thread/realtime/itemAdded"
         else { return .notCapability }
@@ -598,7 +609,94 @@ public struct CodexCapabilityProtocol: Sendable {
             turnID: turnID,
             kind: kind,
             request: request,
-            availableDecisions: availableDecisions
+            availableDecisions: availableDecisions,
+            toolUserInputQuestionID: nil
+        )
+    }
+
+    private func toolUserInputApproval(
+        _ root: [String: Any]
+    ) throws -> CodexProviderApproval? {
+        guard let params = root["params"] as? [String: Any] else {
+            throw CodexCapabilityProtocolError.invalidField
+        }
+        let responseID = try requestID(root)
+        let threadID = try identifier(params, "threadId")
+        let turnID = try identifier(params, "turnId")
+        let itemID = try identifier(params, "itemId")
+        if let value = params["autoResolutionMs"], !(value is NSNull) {
+            _ = try unsigned64(params, "autoResolutionMs")
+        }
+        let questions = try objectArray(params["questions"])
+        guard questions.count <= 3 else {
+            throw CodexCapabilityProtocolError.invalidField
+        }
+        guard !questions.isEmpty else { return nil }
+
+        var approvalQuestion: (id: String, labels: [String])?
+        for question in questions {
+            _ = try text(question, "header")
+            let questionID = try identifier(question, "id")
+            _ = try boolean(question, "isOther", default: false)
+            _ = try boolean(question, "isSecret", default: false)
+            _ = try text(question, "question")
+
+            var labels: [String] = []
+            if let rawOptions = question["options"], !(rawOptions is NSNull) {
+                let options = try objectArray(rawOptions)
+                guard options.count <= 16 else {
+                    throw CodexCapabilityProtocolError.tooManyItems
+                }
+                labels = try options.map { option in
+                    _ = try text(option, "description")
+                    return try text(option, "label")
+                }
+            }
+            if questionID.hasPrefix("mcp_tool_call_approval_") {
+                guard approvalQuestion == nil else {
+                    throw CodexCapabilityProtocolError.invalidField
+                }
+                approvalQuestion = (questionID, labels)
+            }
+        }
+
+        guard let approvalQuestion else { return nil }
+        let expectedQuestionID = "mcp_tool_call_approval_\(itemID)"
+        let expectedLabels: Set<String> = [
+            "Approve Once", "Approve this Session", "Deny", "Cancel",
+        ]
+        guard questions.count == 1,
+              approvalQuestion.id == expectedQuestionID,
+              approvalQuestion.labels.count == expectedLabels.count,
+              Set(approvalQuestion.labels) == expectedLabels,
+              try boolean(questions[0], "isOther", default: false) == false,
+              try boolean(questions[0], "isSecret", default: false) == false
+        else { throw CodexCapabilityProtocolError.invalidField }
+
+        let policy = CapabilityPolicyResolver().resolve(
+            serverPolicy: .askBeforeChanges,
+            readOnlyHint: false,
+            mandatoryProviderApproval: true
+        ).effectivePolicy
+        let request = try CapabilityApprovalRequest(
+            callID: CapabilityCallID(),
+            capabilityID: CapabilityID(
+                source: .providerNative,
+                serverID: "codex",
+                toolName: "tool-user-input"
+            ),
+            summary: CapabilitySummary(text: "Codex connector requires approval"),
+            policy: policy
+        )
+        return .init(
+            responseID: responseID,
+            itemID: itemID,
+            threadID: threadID,
+            turnID: turnID,
+            kind: .toolUserInput,
+            request: request,
+            availableDecisions: ["accept", "decline", "cancel"],
+            toolUserInputQuestionID: approvalQuestion.id
         )
     }
 
@@ -608,15 +706,37 @@ public struct CodexCapabilityProtocol: Sendable {
         guard ["accept", "decline", "cancel"].contains(decision) else {
             throw CodexCapabilityProtocolError.invalidField
         }
-        let id: Any
-        switch approval.responseID {
-        case .string(let value):
-            try validateIdentifier(value)
-            id = value
-        case .integer(let value):
-            id = value
+        let id = try encodedRequestID(approval.responseID)
+        if approval.kind == .toolUserInput {
+            guard let questionID = approval.toolUserInputQuestionID else {
+                throw CodexCapabilityProtocolError.invalidField
+            }
+            try validateIdentifier(questionID)
+            let answer: String
+            switch decision {
+            case "accept": answer = "Approve Once"
+            case "decline": answer = "Deny"
+            case "cancel": answer = "Cancel"
+            default: throw CodexCapabilityProtocolError.invalidField
+            }
+            return try encode([
+                "id": id,
+                "result": [
+                    "answers": [questionID: ["answers": [answer]]],
+                ] as [String: Any],
+            ])
         }
         return try encode(["id": id, "result": ["decision": decision]])
+    }
+
+    private func encodedRequestID(_ responseID: JSONRPCRequestID) throws -> Any {
+        switch responseID {
+        case .string(let value):
+            try validateIdentifier(value)
+            return value
+        case .integer(let value):
+            return value
+        }
     }
 
     private func descriptor(
@@ -921,6 +1041,15 @@ public struct CodexCapabilityProtocol: Sendable {
         else { throw CodexCapabilityProtocolError.invalidField }
         let value = number.int64Value
         guard number.compare(NSNumber(value: value)) == .orderedSame
+        else { throw CodexCapabilityProtocolError.invalidField }
+        return value
+    }
+
+    private func unsigned64(_ object: [String: Any], _ key: String) throws -> UInt64 {
+        guard let number = object[key] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let value = UInt64(number.stringValue),
+              number.compare(NSNumber(value: value)) == .orderedSame
         else { throw CodexCapabilityProtocolError.invalidField }
         return value
     }
