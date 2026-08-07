@@ -1,8 +1,10 @@
 import SwiftUI
 
+typealias TranscriptSelectionAction = @MainActor () -> Void
+
 struct SelectableTranscriptSurface<Content: View>: View {
     let accessibilityIdentifier: String
-    let selectionBegan: () -> Void
+    let selectionBegan: TranscriptSelectionAction
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -20,7 +22,7 @@ struct SelectableTranscriptSurface<Content: View>: View {
 
 struct LiveTranscriptTurnView: View {
     let turn: LiveTranscriptTurn
-    let selectionBegan: () -> Void
+    let selectionBegan: TranscriptSelectionAction
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {

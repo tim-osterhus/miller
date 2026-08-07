@@ -123,8 +123,9 @@ public enum WakeWordPhraseError: Error, Equatable, Sendable {
 }
 
 /// Deterministic bounded compiler for the token vocabulary consumed by the
-/// Sherpa keyword file. Task 17 supplies the bundled vocabulary and persists
-/// the resulting token sequence only after local calibration succeeds.
+/// Sherpa keyword file. This is source-only Task 16 groundwork; runtime
+/// vocabulary, persistence, and audio integration are deferred to Miller
+/// v0.1.2.
 public struct WakeWordPhraseCompiler: Sendable {
     public let maximumUTF8Bytes: Int
     public let maximumTokens: Int

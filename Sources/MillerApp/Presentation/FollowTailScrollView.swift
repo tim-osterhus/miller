@@ -10,7 +10,9 @@ struct FollowTailScrollView<
 
     let conversationIdentity: ConversationIdentity
     let contentChange: ContentChange
-    @ViewBuilder let content: (_ selectionBegan: @escaping () -> Void) -> Content
+    @ViewBuilder let content: (
+        _ selectionBegan: @escaping TranscriptSelectionAction
+    ) -> Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var followState = FollowTailState()

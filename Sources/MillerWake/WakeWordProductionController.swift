@@ -7,8 +7,9 @@ typealias WakeWordEventScheduler = @Sendable (
     @escaping @MainActor @Sendable () async -> Void
 ) -> Void
 
-/// Narrow capture boundary. Task 17 binds this to Miller's concrete audio
-/// owner, preserving the rule that wake listening never opens a second input.
+/// Narrow capture boundary retained as source-only Task 16 groundwork.
+/// Runtime vocabulary, persistence, and audio integration are deferred to
+/// Miller v0.1.2; no wake runtime integration is claimed here.
 @MainActor
 public protocol WakeWordCaptureOwning: AnyObject {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)? { get set }

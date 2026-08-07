@@ -1,9 +1,36 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import MillerApp
 
+@MainActor
+private protocol MainActorSelectionCallbackProviding {
+    var selectionBegan: @MainActor () -> Void { get }
+}
+
+extension SelectableTranscriptSurface: MainActorSelectionCallbackProviding {}
+
 @Suite
 struct TranscriptSelectionPresentationTests {
+    @Test
+    @MainActor
+    func selectableSurfaceForwardsMainActorSelectionCallback() {
+        var callbackCount = 0
+        let surface = SelectableTranscriptSurface(
+            accessibilityIdentifier: "miller.test.transcript",
+            selectionBegan: {
+                callbackCount += 1
+            }
+        ) {
+            Text("Transcript")
+        }
+
+        let contract: any MainActorSelectionCallbackProviding = surface
+        contract.selectionBegan()
+
+        #expect(callbackCount == 1)
+    }
+
     @Test
     func sharedSurfaceUsesNativeSelectionAndNonConsumingPointerObservation() {
         let surface = source(named: "SelectableTranscriptSurface.swift")

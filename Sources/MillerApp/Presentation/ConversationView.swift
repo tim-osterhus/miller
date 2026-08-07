@@ -93,7 +93,7 @@ enum AssistantMarkdown {
 
 struct AssistantMarkdownView: View {
     let source: String
-    let selectionBegan: () -> Void
+    let selectionBegan: TranscriptSelectionAction
     let accessibilityIDPrefix: String
 
     var body: some View {
@@ -338,7 +338,7 @@ struct ConversationView: View {
 
 struct TranscriptTurnView: View {
     let turn: Turn
-    let selectionBegan: () -> Void
+    let selectionBegan: TranscriptSelectionAction
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
