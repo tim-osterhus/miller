@@ -300,6 +300,33 @@ struct ReleasePackagingPolicyTests {
         #expect(violations.isEmpty, "\(violations.joined(separator: "\n"))")
     }
 
+    @Test
+    func productionInventoryRejectsClipboardAndPrivateTranscriptSelectionAuthority() throws {
+        let fixture = try makePolicyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try write(
+            """
+            let pasteboard = NSPasteboard.generalPasteboard
+            let monitor = ClipboardMonitor()
+            let fixture = "transcript fixture"
+            let export = private transcript export
+            """,
+            to: fixture.appendingPathComponent(
+                "Sources/MillerApp/Presentation/SelectableTranscriptSurface.swift"
+            )
+        )
+
+        let violations = try ReleasePackagingPolicy.inventoryViolations(
+            repositoryRoot: fixture
+        )
+
+        #expect(violations.contains { $0.contains("NSPasteboard") })
+        #expect(violations.contains { $0.contains("generalPasteboard") })
+        #expect(violations.contains { $0.contains("ClipboardMonitor") })
+        #expect(violations.contains { $0.contains("transcript fixture") })
+        #expect(violations.contains { $0.contains("private transcript export") })
+    }
+
     private var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -369,6 +396,14 @@ private enum ReleasePackagingPolicy {
     private static let forbiddenRuntimeTerms = ["codex-rs", "cargo", "rustc"]
     private static let experimentalAPITerms = ["dynamicTools", "item/tool/call"]
     private static let rustCommands = ["cargo", "rustc"]
+    private static let forbiddenSelectionTerms = [
+        ("nspasteboard", "NSPasteboard"),
+        ("generalpasteboard", "generalPasteboard"),
+        ("clipboardmonitor", "ClipboardMonitor"),
+        ("clipboard monitor", "clipboard monitor"),
+        ("transcript fixture", "transcript fixture"),
+        ("private transcript export", "private transcript export"),
+    ]
 
     static func hasApprovedSDKDeclaration(in manifest: String) -> Bool {
         let activeManifest = removingSwiftComments(from: manifest)
@@ -550,6 +585,12 @@ private enum ReleasePackagingPolicy {
                 && !isExplicitAssertion(of: term.lowercased(), in: lowercased) {
                 violations.append(
                     "Experimental API \(term) in \(relativePath):\(line.number)"
+                )
+            }
+            for (term, label) in forbiddenSelectionTerms
+            where lowercased.contains(term) {
+                violations.append(
+                    "Forbidden selection authority \(label) in \(relativePath):\(line.number)"
                 )
             }
             guard relativePath.hasPrefix("scripts/") else { continue }

@@ -7,6 +7,10 @@ struct FollowTailState: Equatable {
         isFollowing = distanceFromBottom <= Self.bottomTolerance
     }
 
+    mutating func transcriptSelectionBegan() {
+        isFollowing = false
+    }
+
     mutating func jumpToLatest() {
         isFollowing = true
     }

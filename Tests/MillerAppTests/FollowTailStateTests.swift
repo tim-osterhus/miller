@@ -33,6 +33,56 @@ struct FollowTailStateTests {
         #expect(!state.isFollowing)
     }
 
+    @Test
+    func transcriptSelectionSuspendsFollowingUntilExplicitRecovery() {
+        var state = FollowTailState()
+
+        state.transcriptSelectionBegan()
+
+        #expect(!state.isFollowing)
+        #expect(!state.shouldFollowContentChange())
+        state.jumpToLatest()
+        #expect(state.isFollowing)
+    }
+
+    @Test
+    func continuedStreamingDoesNotResumeAfterTranscriptSelection() {
+        var state = FollowTailState()
+        state.transcriptSelectionBegan()
+
+        #expect(!state.shouldFollowContentChange())
+        #expect(!state.isFollowing)
+    }
+
+    @Test
+    func jumpToLatestResumesFollowingAfterTranscriptSelection() {
+        var state = FollowTailState()
+        state.transcriptSelectionBegan()
+
+        state.jumpToLatest()
+
+        #expect(state.isFollowing)
+    }
+
+    @Test
+    func conversationReplacementResumesFollowingAfterTranscriptSelection() {
+        var state = FollowTailState()
+        state.transcriptSelectionBegan()
+
+        state.conversationReplaced()
+
+        #expect(state.isFollowing)
+    }
+
+    @Test
+    func transcriptSelectionPreservesReducedMotionBehavior() {
+        var state = FollowTailState()
+        state.transcriptSelectionBegan()
+
+        #expect(!state.shouldAnimateScroll(reduceMotion: false))
+        #expect(!state.shouldAnimateScroll(reduceMotion: true))
+    }
+
     @Test(arguments: [0.0, 23.999, 24.0])
     func returningWithinBottomToleranceResumesFollowing(
         distanceFromBottom: Double

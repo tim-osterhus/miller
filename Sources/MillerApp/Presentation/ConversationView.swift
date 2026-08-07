@@ -93,49 +93,79 @@ enum AssistantMarkdown {
 
 struct AssistantMarkdownView: View {
     let source: String
+    let selectionBegan: () -> Void
+    let accessibilityIDPrefix: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(
                 Array(AssistantMarkdown.blocks(source).enumerated()),
                 id: \.offset
-            ) { _, block in
-                blockView(block)
+            ) { index, block in
+                blockView(block, index: index)
             }
         }
     }
 
     @ViewBuilder
-    private func blockView(_ block: AssistantMarkdown.Block) -> some View {
+    private func blockView(
+        _ block: AssistantMarkdown.Block,
+        index: Int
+    ) -> some View {
         switch block {
         case let .heading(level, text):
-            Text(AssistantMarkdown.attributedString(text))
-                .font(level == 1 ? .title2 : level == 2 ? .headline : .body)
-                .fontWeight(.semibold)
-                .padding(.top, level == 1 ? 4 : 0)
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                selectionBegan: selectionBegan
+            ) {
+                Text(AssistantMarkdown.attributedString(text))
+                    .font(level == 1 ? .title2 : level == 2 ? .headline : .body)
+                    .fontWeight(.semibold)
+                    .padding(.top, level == 1 ? 4 : 0)
+            }
         case let .paragraph(text):
-            Text(AssistantMarkdown.attributedString(text))
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                selectionBegan: selectionBegan
+            ) {
+                Text(AssistantMarkdown.attributedString(text))
+            }
         case let .unorderedItem(text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•")
-                Text(AssistantMarkdown.attributedString(text))
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                selectionBegan: selectionBegan
+            ) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("•")
+                    Text(AssistantMarkdown.attributedString(text))
+                }
+                .padding(.leading, 8)
             }
-            .padding(.leading, 8)
         case let .orderedItem(marker, text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(marker)
-                Text(AssistantMarkdown.attributedString(text))
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                selectionBegan: selectionBegan
+            ) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(marker)
+                    Text(AssistantMarkdown.attributedString(text))
+                }
+                .padding(.leading, 8)
             }
-            .padding(.leading, 8)
         case let .quote(text):
-            HStack(alignment: .top, spacing: 8) {
-                Rectangle()
-                    .fill(.secondary)
-                    .frame(width: 3)
-                Text(AssistantMarkdown.attributedString(text))
-                    .foregroundStyle(.secondary)
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                selectionBegan: selectionBegan
+            ) {
+                HStack(alignment: .top, spacing: 8) {
+                    Rectangle()
+                        .fill(.secondary)
+                        .frame(width: 3)
+                    Text(AssistantMarkdown.attributedString(text))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 4)
             }
-            .padding(.leading, 4)
         case let .code(language, text):
             VStack(alignment: .leading, spacing: 4) {
                 if let language {
@@ -144,9 +174,13 @@ struct AssistantMarkdownView: View {
                         .foregroundStyle(.secondary)
                 }
                 ScrollView(.horizontal) {
-                    Text(text)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
+                    SelectableTranscriptSurface(
+                        accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                        selectionBegan: selectionBegan
+                    ) {
+                        Text(text)
+                            .font(.system(.body, design: .monospaced))
+                    }
                 }
             }
             .padding(8)
@@ -155,6 +189,12 @@ struct AssistantMarkdownView: View {
             Color.clear.frame(height: 2)
         }
     }
+}
+
+private struct ConversationTranscriptContentChange: Equatable {
+    let typedTurns: [Turn]
+    let liveTurns: [LiveTranscriptTurn]
+    let voiceStatus: String
 }
 
 struct ConversationView: View {
@@ -183,11 +223,30 @@ struct ConversationView: View {
 
                 FollowTailScrollView(
                     conversationIdentity: model.selectedConversationID,
-                    contentChange: model.visibleTurns
-                ) {
+                    contentChange: ConversationTranscriptContentChange(
+                        typedTurns: model.visibleTurns,
+                        liveTurns: model.liveTranscriptTurns,
+                        voiceStatus: model.voiceStatusText
+                    )
+                ) { selectionBegan in
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(model.visibleTurns, id: \.id) { turn in
-                            TranscriptTurnView(turn: turn)
+                            TranscriptTurnView(
+                                turn: turn,
+                                selectionBegan: selectionBegan
+                            )
+                        }
+                        if model.voiceState != .unavailable {
+                            Divider()
+                            LabeledContent("Live voice") {
+                                Text(model.voiceStatusText)
+                            }
+                            ForEach(model.liveTranscriptTurns, id: \.id) { turn in
+                                LiveTranscriptTurnView(
+                                    turn: turn,
+                                    selectionBegan: selectionBegan
+                                )
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -279,20 +338,29 @@ struct ConversationView: View {
 
 struct TranscriptTurnView: View {
     let turn: Turn
+    let selectionBegan: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("You")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(turn.userText)
-                .textSelection(.enabled)
+            SelectableTranscriptSurface(
+                accessibilityIdentifier: "miller.transcript.typed.user.\(turn.id)",
+                selectionBegan: selectionBegan
+            ) {
+                Text(turn.userText)
+            }
             if !turn.assistantText.isEmpty {
                 Text("Miller")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                AssistantMarkdownView(source: turn.assistantText)
-                    .textSelection(.enabled)
+                AssistantMarkdownView(
+                    source: turn.assistantText,
+                    selectionBegan: selectionBegan,
+                    accessibilityIDPrefix:
+                        "miller.transcript.typed.assistant.\(turn.id)"
+                )
             }
             if let error = turn.errorMessage {
                 Text(error)

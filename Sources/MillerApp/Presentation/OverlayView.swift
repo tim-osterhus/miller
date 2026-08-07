@@ -24,18 +24,24 @@ struct OverlayView: View {
                     liveTurns: model.liveTranscriptTurns,
                     voiceStatus: model.voiceStatusText
                 )
-            ) {
+            ) { selectionBegan in
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.visibleTurns, id: \.id) { turn in
-                        TranscriptTurnView(turn: turn)
+                        TranscriptTurnView(
+                            turn: turn,
+                            selectionBegan: selectionBegan
+                        )
                     }
                     if model.voiceState != .unavailable {
                         Divider()
                         LabeledContent("Live voice") {
                             Text(model.voiceStatusText)
                         }
-                        ForEach(model.liveTranscriptTurns) { turn in
-                            LiveTranscriptTurnView(turn: turn)
+                        ForEach(model.liveTranscriptTurns, id: \.id) { turn in
+                            LiveTranscriptTurnView(
+                                turn: turn,
+                                selectionBegan: selectionBegan
+                            )
                         }
                     }
                 }
@@ -154,25 +160,6 @@ private struct OverlayTranscriptContentChange: Equatable {
     let typedTurns: [Turn]
     let liveTurns: [LiveTranscriptTurn]
     let voiceStatus: String
-}
-
-private struct LiveTranscriptTurnView: View {
-    let turn: LiveTranscriptTurn
-
-    var body: some View {
-        Text("\(speaker): \(turn.text)")
-            .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var speaker: String {
-        turn.role == .user ? "You" : "Miller"
-    }
-
-    private var accessibilityLabel: String {
-        turn.role == .user
-            ? "Live voice user transcript"
-            : "Live voice assistant transcript"
-    }
 }
 
 extension Notification.Name {

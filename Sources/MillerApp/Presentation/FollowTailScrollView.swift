@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct FollowTailScrollView<
     ConversationIdentity: Equatable,
     ContentChange: Equatable,
@@ -9,7 +10,7 @@ struct FollowTailScrollView<
 
     let conversationIdentity: ConversationIdentity
     let contentChange: ContentChange
-    @ViewBuilder let content: () -> Content
+    @ViewBuilder let content: (_ selectionBegan: @escaping () -> Void) -> Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var followState = FollowTailState()
@@ -20,7 +21,9 @@ struct FollowTailScrollView<
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
                 ScrollView {
-                    content()
+                    content {
+                        followState.transcriptSelectionBegan()
+                    }
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
