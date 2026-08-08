@@ -1765,21 +1765,27 @@ final class AppPresentationModel: ObservableObject {
     }
 
     private func publishVisibleTurns(_ turns: [Turn]) {
-        guard TranscriptDisplayedContent.typedChanged(
+        guard visibleTurns != turns else { return }
+        let displayedContentChanged = TranscriptDisplayedContent.typedChanged(
             from: visibleTurns,
             to: turns
-        ) else { return }
+        )
         visibleTurns = turns
-        transcriptContentRevision.advance(typedContentChanged: true)
+        if displayedContentChanged {
+            transcriptContentRevision.advance(typedContentChanged: true)
+        }
     }
 
     private func publishLiveTranscriptTurns(_ turns: [LiveTranscriptTurn]) {
-        guard TranscriptDisplayedContent.liveChanged(
+        guard liveTranscriptTurns != turns else { return }
+        let displayedContentChanged = TranscriptDisplayedContent.liveChanged(
             from: liveTranscriptTurns,
             to: turns
-        ) else { return }
+        )
         liveTranscriptTurns = turns
-        transcriptContentRevision.advance(liveContentChanged: true)
+        if displayedContentChanged {
+            transcriptContentRevision.advance(liveContentChanged: true)
+        }
     }
 
     private static func liveFailureCode(_ error: Error) -> String {

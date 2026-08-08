@@ -6,6 +6,70 @@ import Testing
 @Suite
 struct TranscriptPresentationMetadataTests {
     @Test
+    @MainActor
+    func liveCompletionStoresFullRowWithoutAdvancingDisplayRevision() async {
+        let model = AppPresentationModel(
+            dependencies: transcriptTestDependencies()
+        )
+
+        await model.applyLiveEvent(
+            .transcriptDelta(role: .assistant, text: "same response")
+        )
+        let beforeCompletion = model.transcriptContentChange.liveRevision
+
+        await model.applyLiveEvent(
+            .transcriptDone(role: .assistant, text: "same response")
+        )
+
+        #expect(model.liveTranscriptTurns.count == 1)
+        #expect(model.liveTranscriptTurns[0].isComplete)
+        #expect(
+            model.transcriptContentChange.liveRevision == beforeCompletion
+        )
+    }
+
+    @Test
+    @MainActor
+    func typedTerminalStateStoresFullRowWithoutAdvancingDisplayRevision() async throws {
+        let startedAt = Date(timeIntervalSince1970: 0)
+        let accepted = Turn(
+            id: TurnID(
+                rawValue: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+            ),
+            conversationID: ConversationID(
+                rawValue: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+            ),
+            sequence: 1,
+            inputMode: .text,
+            userText: "same question",
+            assistantText: "same response",
+            state: .accepted,
+            generation: 1,
+            errorCode: nil,
+            errorMessage: nil,
+            startedAt: startedAt,
+            terminalAt: nil
+        )
+        var completed = accepted
+        try completed.apply(.completed(at: startedAt))
+        let loads = TurnLoadSequence(values: [[accepted], [completed]])
+        let model = AppPresentationModel(
+            dependencies: transcriptTestDependencies(loads: loads)
+        )
+
+        await model.refresh()
+        let beforeCompletion = model.transcriptContentChange.typedRevision
+
+        await model.refresh()
+
+        #expect(model.visibleTurns == [completed])
+        #expect(model.visibleTurns[0].state == .completed)
+        #expect(
+            model.transcriptContentChange.typedRevision == beforeCompletion
+        )
+    }
+
+    @Test
     func displayedContentComparisonIgnoresNonDisplayedTurnState() throws {
         let startedAt = Date(timeIntervalSince1970: 0)
         let current = Turn(
@@ -232,5 +296,33 @@ struct TranscriptPresentationMetadataTests {
             assistant.transcriptElementIdentifier
                 != user.transcriptElementIdentifier
         )
+    }
+
+    private func transcriptTestDependencies(
+        loads: TurnLoadSequence? = nil
+    ) -> HostDependencies {
+        let loads = loads ?? TurnLoadSequence(values: [[]])
+        return HostDependencies(
+            submit: { _, _ in TurnID() },
+            stop: {},
+            loadTurn: { _ in nil },
+            loadConversations: { [] },
+            loadTurns: { _ in await loads.next() },
+            archive: { _ in },
+            unarchive: { _ in },
+            delete: { _ in }
+        )
+    }
+}
+
+private actor TurnLoadSequence {
+    private var values: [[Turn]]
+
+    init(values: [[Turn]]) {
+        self.values = values
+    }
+
+    func next() -> [Turn] {
+        values.removeFirst()
     }
 }
