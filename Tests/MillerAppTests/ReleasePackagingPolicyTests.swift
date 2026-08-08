@@ -412,7 +412,7 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func qualificationDocumentsAreSanitizedAndKeepHumanRowsUnrun() throws {
+    func qualificationDocumentsAreSanitizedAndRecordHumanApproval() throws {
         let reportURL = repositoryRoot.appendingPathComponent(
             "docs/qualification/v0.1.1-headless-report.md"
         )
@@ -423,10 +423,11 @@ struct ReleasePackagingPolicyTests {
             "docs/qualification/v0.1.1-human-protocol.md"
         ), encoding: .utf8)
         if let report {
-            #expect(report.contains("MILLER_V0_1_1_READY_HUMAN_NOT_RUN"))
-            #expect(report.contains("MILLER_V0_1_1_RELEASE_APPROVED") == false)
+            #expect(report.contains("MILLER_V0_1_1_RELEASE_APPROVED"))
+            #expect(report.contains("MILLER_V0_1_1_READY_HUMAN_NOT_RUN") == false)
         }
-        #expect(protocolDocument.contains("NOT_RUN"))
+        #expect(protocolDocument.contains("MILLER_V0_1_1_RELEASE_APPROVED"))
+        #expect(protocolDocument.contains("NOT_RUN") == false)
         #expect(protocolDocument.contains("transcript body") == false)
         #expect(protocolDocument.contains("credential") == false)
         #expect(protocolDocument.contains("private path") == false)
