@@ -45,11 +45,22 @@ if (mode === "record-stdin" || mode.startsWith("portable-skill-live")) {
 let threadId = "thread-1";
 let helperThreadCreated = false;
 let typedTurnId = "typed-turn-1";
+let realtimePrompt = null;
 let connectorApprovalResponses = 0;
 let nativeApprovalResponses = 0;
 let inventoryRefreshFloodCount = 0;
 const pendingInventoryRefreshes = new Map();
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
+const task18ToolMarker = "miller_mcp/task18/read_only_lookup";
+
+function task18RouteResult(value) {
+  if (typeof value !== "string"
+      || !value.includes(task18ToolMarker)
+      || !value.includes("lookup_note:ok")) {
+    process.exit(59);
+  }
+  return "lookup_note:ok";
+}
 
 function featureConfigurationIsAdmitted() {
   try {
@@ -218,6 +229,26 @@ function emitLifecycle() {
   const emittedThread = emitRealtimeStarted();
   if (mode === "crash-after-start") process.exit(23);
   emitRealtimeAnswer(emittedThread);
+  if (mode === "realtime-task18-three-route") {
+    const result = task18RouteResult(realtimePrompt);
+    const item = {
+      type: "mcpToolCall", id: "task18-read-only-sideband",
+      server: "miller_mcp", tool: "task18/read_only_lookup",
+      arguments: {}, status: "inProgress",
+    };
+    notify("thread/realtime/itemAdded", {
+      threadId: emittedThread, turnId: "task18-live-turn-1", item,
+    });
+    notify("thread/realtime/itemAdded", {
+      threadId: emittedThread, turnId: "task18-live-turn-1",
+      item: {
+        ...item, status: "completed",
+        result: { content: [{ type: "text", text: result }], isError: false },
+      },
+    });
+    notify("thread/realtime/closed", { threadId: emittedThread, reason: "synthetic-complete" });
+    return;
+  }
   if (mode === "realtime-error") {
     notify("thread/realtime/error", { threadId: emittedThread, message: "synthetic realtime error" });
     return;
@@ -770,6 +801,21 @@ lines.on("line", (line) => {
             },
           });
         }
+      } else if (mode === "typed-task18-three-route") {
+        const result = task18RouteResult(input[0].text);
+        const item = {
+          type: "mcpToolCall", id: "task18-read-only-typed",
+          server: "miller_mcp", tool: "task18/read_only_lookup",
+          arguments: {}, status: "inProgress",
+        };
+        notify("item/started", { threadId, turnId: typedTurnId, startedAtMs: 1, item });
+        notify("item/completed", {
+          threadId, turnId: typedTurnId, completedAtMs: 2,
+          item: {
+            ...item, status: "completed",
+            result: { content: [{ type: "text", text: result }], isError: false },
+          },
+        });
       } else if (mode === "typed-failure") {
         notify("turn/completed", {
           threadId,
@@ -1073,6 +1119,7 @@ lines.on("line", (line) => {
       return;
     }
     threadId = request.params.threadId;
+    if (mode === "realtime-task18-three-route") realtimePrompt = params.prompt;
     if (mode === "realtime-start-rejected") {
       send({ id: request.id, error: { code: -32602, message: "synthetic provider diagnostic" } });
       return;

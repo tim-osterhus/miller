@@ -84,6 +84,9 @@ enumerate those components exactly.
 Codex is an external prerequisite for Live Voice and is not bundled. Optional
 speech, wake, model, donor, and test inputs are source-only and are excluded
 from the v0.1.1 application SBOM, runtime inventory, and legal payload.
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
+the v0.1.1 minimum tested/support boundary. The `0.145.0` material below is
+protocol reference/evidence only and is not a runtime support claim.
 
 ### Cortana wakeword donor
 
@@ -261,6 +264,15 @@ Miller retains one reviewed Pi-derived distribution:
 - A1 manifest SHA-256:
   `902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b`
 
+The sanitized, immutable A1 equivalent is tracked at
+`Gateway/vendor/a1-manifest.json` (SHA-256
+`7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e`, 2,404
+bytes). It retains the pinned commit, approved 53-file inventory/source-map
+hashes, license facts, bounded transformations, and explicit exclusions,
+including VoiceInk. It contains no host name, private path, owner data, or
+external checkout dependency. `scripts/verify-provenance.sh` binds both the
+sanitized manifest hash and the A3 vendor manifest hash.
+
 The A1 manifest binds each retained module to the exact npm tarball and pinned
 Git source-map content. The A3 generator refuses any A1 manifest or retained
 file whose hash, byte count, or mode differs.
@@ -298,7 +310,8 @@ The exact generated vendor artifacts are:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `Gateway/vendor/manifest.json` | `c082fcb3fbfa6cbe81b9fcc07ec463654551fa0ee7a1768f88306adf3ca4ba0a` |
+| `Gateway/vendor/manifest.json` | `6bf546c476d229d347948b95e801c07879a9e379f78f5b45260108158bebd1f5` |
+| `Gateway/vendor/a1-manifest.json` | `7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e` |
 | `Gateway/vendor/pi-mvp-overlay-0.82.0-a3.tgz` | `e2f9275e5fc32d8db0530d40347961525d785d0229d723fbe29a9438b6316ab9` |
 | `Gateway/vendor/development-bundle-inventory.json` | `556718fafe736ee3efa0ab6cb61f593c7316f8c5b38521b29167239333af80a9` |
 | `Gateway/vendor/overlay-files.json` | `29e5fd59d8864844665cb63ab51b06479c810e61f2f5f0e6d21c0c63511647cd` |

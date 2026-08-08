@@ -123,6 +123,29 @@ the Codex-only account surface.
 Wake-word inputs remain source-only for v0.1.2. v0.1.1 packaging does not
 bootstrap, download, compile, or ship wake dependencies or models.
 
+## v0.1.1 qualification and prerequisites
+
+Task 18 tested the official Codex CLI/App Server `0.146.0` on Apple Silicon;
+`0.146.0` is the minimum tested/support boundary for this v0.1.1 route. The
+protocol evidence is from the `0.145.0` App Server wire shape and fixture
+metadata; `0.145.0` is not a runtime support claim. An owner-installed external
+Codex runtime is required for GPT-Live. Miller never bundles, downloads, or
+publishes that runtime.
+Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+
+For a clean package prerequisite, run the explicit online dependency bootstrap
+with the pinned `Gateway/package-lock.json` integrity check:
+
+```bash
+./scripts/bootstrap-gateway-dependencies.sh
+./scripts/package-release-app.sh
+```
+
+The bootstrap uses bounded npm timeouts and an isolated cache. Packaging and
+headless qualification never invoke it implicitly. Signing, notarization, and
+publication remain deferred; this repository contains only an unsigned release
+candidate with ad-hoc structural verification.
+
 ## License
 
 Miller is licensed under the Apache License 2.0. See `LICENSE` and `NOTICE`.

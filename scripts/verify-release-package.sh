@@ -21,6 +21,7 @@ test -f "$gateway/app/node_modules/@miller/pi-mvp-overlay/package.json"
 test -f "$gateway/app/node_modules/openai/package.json"
 test -f "$gateway/app/node_modules/partial-json/package.json"
 test -f "$inventory"
+test ! -L "$inventory"
 for document in LICENSE NOTICE PROVENANCE.md THIRD_PARTY_NOTICES.md Miller.spdx.json; do
   test -f "$legal/$document"
 done
@@ -36,6 +37,7 @@ if /usr/libexec/PlistBuddy -c 'Print :MillerGPTLiveHarnessCapability' "$plist" \
 fi
 
 test ! -e "$gateway/fake-helper.mjs"
+test -f "$gateway/app/codex-models.mjs"
 test ! -e "$gateway/codex-models.mjs"
 test -z "$(find -P "$bundle_root" -type l -print -quit)"
 test -z "$(find "$bundle_root" \( \
@@ -60,6 +62,8 @@ test -z "$(strings "$bundle_root/Contents/MacOS/Miller" \
   | head -n 1 || true)"
 
 test "$("$gateway/runtime/node" --version)" = "v22.22.0"
+"$gateway/runtime/node" "$repo_root/scripts/release-inventory.mjs" \
+  --verify "$bundle_root" "$inventory"
 codesign --verify --deep --strict "$bundle_root"
 codesign --verify --strict "$bridge"
 test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
@@ -79,6 +83,7 @@ assert.deepEqual(
     "MCP Swift SDK@0.12.1",
     "Miller@0.1.1",
     "MillerCapabilityBridge@0.1.1",
+    "MillerCapabilities@0.1.1",
     "Node.js@22.22.0",
     "openai@6.26.0",
     "partial-json@0.1.7",
@@ -105,6 +110,27 @@ assert.equal(
     entry.spdxElementId === "SPDXRef-Package-Miller"
       && entry.relationshipType === "CONTAINS"
       && entry.relatedSpdxElement === "SPDXRef-Package-MillerCapabilityBridge"),
+  true
+);
+assert.equal(
+  sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-Miller"
+      && entry.relationshipType === "DEPENDS_ON"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MillerCapabilities"),
+  true
+);
+assert.equal(
+  sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-MillerCapabilities"
+      && entry.relationshipType === "DEPENDS_ON"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MCPSwiftSDK"),
+  true
+);
+assert.equal(
+  sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-MillerCapabilityBridge"
+      && entry.relationshipType === "DEPENDS_ON"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MCPSwiftSDK"),
   true
 );
 EOF

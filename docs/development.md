@@ -5,19 +5,23 @@
 Miller targets Apple Silicon macOS 15 with Swift 6.1 and exact Node
 `v22.22.0` at `/opt/homebrew/opt/node@22/bin/`. The capability bridge uses
 the lockfile-pinned MCP Swift SDK. Gateway dependencies are lockfile-pinned and
-installed with scripts disabled:
+must be prepared by the explicit online bootstrap:
 
 ```bash
-cd Gateway
-/opt/homebrew/opt/node@22/bin/npm ci --ignore-scripts
-cd ..
+./scripts/bootstrap-gateway-dependencies.sh
 ```
 
-Gateway dependencies must already be available locally. Development packaging
-runs `npm ci --ignore-scripts --offline` with the fixed local Node installation,
-then obtains and hash-verifies the reviewed pinned Node runtime for the
-self-contained development app. The tests use local fixtures and loopback
-servers. They do not call a live provider.
+The bootstrap verifies the lockfile SHA-256, uses an isolated cache with bounded
+network timeouts, and removes partial roots on failure. Packaging consumes the
+verified closure already present in `Gateway/node_modules`; it does not install
+from a private npm cache or invoke the bootstrap implicitly. The tests use local
+fixtures and loopback servers. They do not call a live provider.
+
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon. That is
+the minimum tested/support boundary for v0.1.1. The protocol reference/evidence
+is the `0.145.0` wire shape and fixture metadata, not a claim that `0.145.0`
+is supported at runtime.
+Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
 
 ## Commands
 

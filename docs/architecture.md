@@ -5,6 +5,10 @@ including its external official Codex App Server WebRTC boundary. The completed
 owner-visible Gate 4B result is recorded separately in
 `docs/qualification/gate-4b-external-codex-human-report.md`.
 
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon. This
+is the v0.1.1 minimum tested/support boundary; `0.145.0` is protocol
+reference/evidence only and is not a runtime support claim.
+
 ## Authority and process boundary
 
 The native Swift application owns conversations, turns, context selection,

@@ -1,5 +1,9 @@
 # Remove Miller
 
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon;
+`0.145.0` is protocol reference/evidence only, not a runtime support claim.
+Reset and removal never modify the external Codex installation.
+
 Dragging `Miller.app` to Trash does not remove Miller-managed data or
 OS-managed effects. If complete local removal is desired, reset first.
 

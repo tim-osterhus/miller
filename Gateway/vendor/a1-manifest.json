@@ -1,0 +1,54 @@
+{
+  "schema": "miller-pi-a1-sanitized-provenance",
+  "version": 1,
+  "package": {
+    "name": "@miller/pi-a1-overlay",
+    "version": "0.82.0-a1"
+  },
+  "source": {
+    "repository": "https://github.com/earendil-works/pi.git",
+    "subdirectory": "packages/ai",
+    "commit": "083e61621276bff9f6faefab87ce07fcd98734e2",
+    "package": "@earendil-works/pi-ai@0.82.0",
+    "license": "MIT",
+    "integrity": "sha512-8MvW9+zno13sXDuT2kFMnWeTNUufUhPeZDRVO+igGoBRCDWgn7Xh2FkRQI1mRuet6QhF4ENQuLYdIAOyG6BhNw==",
+    "reviewed_manifest_sha256": "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b",
+    "upstream": {
+      "repository": "https://github.com/earendil-works/pi.git",
+      "subdirectory": "packages/ai",
+      "commit": "083e61621276bff9f6faefab87ce07fcd98734e2",
+      "package": "@earendil-works/pi-ai@0.82.0",
+      "license": "MIT",
+      "integrity": "sha512-8MvW9+zno13sXDuT2kFMnWeTNUufUhPeZDRVO+igGoBRCDWgn7Xh2FkRQI1mRuet6QhF4ENQuLYdIAOyG6BhNw=="
+    }
+  },
+  "approved_file_inventory": {
+    "path": "overlay-files.json",
+    "sha256": "29e5fd59d8864844665cb63ab51b06479c810e61f2f5f0e6d21c0c63511647cd",
+    "file_count": 53,
+    "meaning": "The exact approved A1-derived file list and hashes are retained in this repository."
+  },
+  "source_map": {
+    "path": "source-map.json",
+    "sha256": "317ec2c88880404b6765cf27054c7f3a845ff7de784885ca2c5007d9e03bdbbc",
+    "meaning": "Every retained file is copied exactly or transformed by the three listed review changes."
+  },
+  "license_facts": [
+    "The upstream Pi package is MIT licensed.",
+    "The derived distribution license and notice are retained.",
+    "openai is Apache-2.0; partial-json and pi-ai are MIT.",
+    "All license text is retained under Gateway/vendor/LICENSES."
+  ],
+  "approved_transformations": [
+    "bounded OpenAI-compatible tool-call assembly and result replay",
+    "loopback-only single-state OAuth callback with no-store and no-referrer headers",
+    "derived package name and version only"
+  ],
+  "exclusions": [
+    "VoiceInk and unrelated donor sources",
+    "Codex, Cortana, Rust, Cargo, and provider-specific coding-agent packages",
+    "wakeword libraries, models, ONNX Runtime, audio, and test fixtures",
+    "credentials, OAuth payloads, tokens, transcripts, provider payloads, and runtime logs",
+    "unreviewed files, symlinks, generated build products, and private host paths"
+  ]
+}

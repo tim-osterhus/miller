@@ -18,13 +18,9 @@ import { fileURLToPath } from "node:url";
 
 const gatewayRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const millerRoot = resolve(gatewayRoot, "..");
-const a1Root = resolve(
-  millerRoot,
-  "../../../lab/assist/research/spikes/pi-gateway-comparison/a1-overlay",
-);
 const vendorRoot = join(gatewayRoot, "vendor");
-const expectedA1ManifestSHA256 =
-  "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b";
+const expectedSanitizedA1ManifestSHA256 =
+  "7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -47,9 +43,12 @@ async function regularFiles(root) {
 }
 
 test("vendor manifest binds the reviewed A1 baseline and exact A3 output", async () => {
+  const sanitizedA1 = JSON.parse(
+    await readFile(join(vendorRoot, "a1-manifest.json"), "utf8"),
+  );
   assert.equal(
-    sha256(await readFile(join(a1Root, "manifest.json"))),
-    expectedA1ManifestSHA256,
+    sha256(await readFile(join(vendorRoot, "a1-manifest.json"))),
+    expectedSanitizedA1ManifestSHA256,
   );
 
   const manifest = JSON.parse(await readFile(join(vendorRoot, "manifest.json"), "utf8"));
@@ -59,7 +58,19 @@ test("vendor manifest binds the reviewed A1 baseline and exact A3 output", async
     name: "@miller/pi-mvp-overlay",
     version: "0.82.0-a3",
   });
-  assert.equal(manifest.source.a1_manifest_sha256, expectedA1ManifestSHA256);
+  assert.equal(
+    manifest.source.sanitized_a1_manifest_sha256,
+    expectedSanitizedA1ManifestSHA256,
+  );
+  assert.equal(sanitizedA1.source.commit, manifest.source.upstream.commit);
+  assert.equal(
+    sanitizedA1.approved_file_inventory.path,
+    "overlay-files.json",
+  );
+  assert.equal(
+    sanitizedA1.exclusions.includes("VoiceInk and unrelated donor sources"),
+    true,
+  );
   assert.equal(
     manifest.source.upstream.commit,
     "083e61621276bff9f6faefab87ce07fcd98734e2",
@@ -242,24 +253,12 @@ test("generated SPDX SBOM has complete deterministic SPDX 2.3 package metadata",
 test("provenance verifier rejects an incomplete SPDX document", async () => {
   const root = await mkdtemp(join(tmpdir(), "miller-provenance-test-"));
   const replica = join(root, "work", "repo", "miller");
-  const replicaA1 = join(
-    root,
-    "lab",
-    "assist",
-    "research",
-    "spikes",
-    "pi-gateway-comparison",
-    "a1-overlay",
-  );
   try {
     await mkdir(dirname(replica), { recursive: true });
     await cp(millerRoot, replica, {
       recursive: true,
       filter: (source) => !source.endsWith("/.git"),
     });
-    await mkdir(dirname(replicaA1), { recursive: true });
-    await cp(a1Root, replicaA1, { recursive: true });
-
     let result = spawnSync("./scripts/verify-provenance.sh", [], {
       cwd: replica,
       encoding: "utf8",

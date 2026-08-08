@@ -14,7 +14,9 @@
       "integrity": "sha512-8MvW9+zno13sXDuT2kFMnWeTNUufUhPeZDRVO+igGoBRCDWgn7Xh2FkRQI1mRuet6QhF4ENQuLYdIAOyG6BhNw=="
     },
     "a1_package": "@miller/pi-a1-overlay@0.82.0-a1",
-    "a1_manifest_sha256": "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b"
+    "a1_manifest_sha256": "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b",
+    "sanitized_a1_manifest": "a1-manifest.json",
+    "sanitized_a1_manifest_sha256": "7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e"
   },
   "transformation": {
     "script": "Gateway/scripts/build-overlay.mjs",
@@ -54,6 +56,12 @@
     "package_lock_sha256": "4696145d899809e8de806b742a96f14fb6c81c67d7a09f2ce7486ca55eb89e1f"
   },
   "files": [
+    {
+      "path": "a1-manifest.json",
+      "role": "sanitized_a1_manifest",
+      "sha256": "7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e",
+      "bytes": 2404
+    },
     {
       "path": "development-bundle-inventory.json",
       "role": "development_bundle_inventory",

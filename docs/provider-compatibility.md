@@ -10,6 +10,13 @@ is confirmed by the provider on first use.
 Miller owns conversation history, context selection, cancellation, and visible
 terminal outcomes. Providers do not own Miller's durable conversation state.
 
+The v0.1.1 tested external Codex minimum is official Codex CLI/App Server
+`0.146.0` on Apple Silicon. The fixtures preserve `0.145.0` as protocol
+reference/evidence only; it is not a supported runtime boundary. The Pi gateway
+and OpenAI-compatible path are provider-portable for typed reasoning, while the
+account-backed app surface remains Codex-only.
+Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+
 ## GPT-Live voice
 
 GPT-Live is available only through a selected Codex OAuth profile and a

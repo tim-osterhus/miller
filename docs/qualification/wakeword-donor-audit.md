@@ -2,8 +2,8 @@
 
 ## Approved source boundary
 
-- Canonical repository: `/Users/alex/Desktop/bonzo-dashboard/cortana` on
-  `kindly-macmini`
+- Canonical repository: reviewed external donor checkout (host and local path
+  intentionally omitted from this public audit)
 - Approved immutable commit: `8f4af867c575c089f45a8df4768663a521f88203`
 - Owner-authorized scope: the nine files below, read only from that commit with
   `git show <commit>:<path>`

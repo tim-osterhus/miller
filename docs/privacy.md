@@ -1,5 +1,9 @@
 # Miller privacy boundary
 
+The v0.1.1 external Codex boundary tested by Task 18 is official Codex CLI/App
+Server `0.146.0` on Apple Silicon. `0.145.0` is protocol reference/evidence
+only, not a runtime support claim. Codex remains an external prerequisite.
+
 Miller keeps durable conversation content and provider-profile metadata in
 local SQLite:
 

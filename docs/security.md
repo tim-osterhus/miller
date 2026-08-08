@@ -16,6 +16,12 @@ broker and policy boundary. Account-backed apps are Codex-only. Provider
 portability covers the typed reasoning adapters and Pi route, not the
 installation or management of a Codex account app.
 
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
+the v0.1.1 minimum tested/support boundary. The `0.145.0` material is protocol
+reference/evidence only, not a runtime support claim. Packaging requires the
+explicit lockfile-integrity dependency bootstrap and never calls it implicitly.
+Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+
 ## v0.1.1 package refusal boundary
 
 The release verifier fails closed on wake bridges, wake/model assets, Sherpa or

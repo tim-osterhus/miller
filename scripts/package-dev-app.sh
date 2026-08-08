@@ -28,6 +28,9 @@ gateway_root="$repo_root/Gateway"
 node_path="/opt/homebrew/opt/node@22/bin/node"
 npm_path="/opt/homebrew/opt/node@22/bin/npm"
 node_archive_name="node-v22.22.0-darwin-arm64.tar.gz"
+# The Node release header is 49,923,798 bytes. Keep the exact bound in the
+# command as well as the hash so an oversized response is rejected in flight.
+node_archive_bytes="49923798"
 node_archive_sha256="5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
 node_binary_sha256="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
 node_license_sha256="e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
@@ -39,6 +42,18 @@ gateway_dependencies="$gateway_root/node_modules"
 resource_bundle_matches=()
 resource_bundle=""
 bin_path=""
+
+[[ ! -L "$artifacts_root" && ( ! -e "$artifacts_root" || -d "$artifacts_root" ) ]] || {
+  print -u2 "refusing unsafe artifacts root"
+  exit 1
+}
+if [[ "$package_mode" == "release" ]]; then
+  release_root="$artifacts_root/release"
+  [[ ! -L "$release_root" && ( ! -e "$release_root" || -d "$release_root" ) ]] || {
+    print -u2 "refusing unsafe release root"
+    exit 1
+  }
+fi
 
 require_storage_headroom() {
   local label="$1"
@@ -53,6 +68,10 @@ require_storage_headroom() {
 }
 
 cleanup_staging() {
+  if [[ -n "$node_stage" && -L "$node_stage" ]]; then
+    print -u2 "refusing symbolic-link Node staging root"
+    exit 1
+  fi
   if [[ -n "$node_stage" && -e "$node_stage" ]]; then
     case "$node_stage" in
       "$artifacts_root"/node-stage.*)
@@ -63,17 +82,19 @@ cleanup_staging() {
         ;;
     esac
   fi
+  if [[ -L "$staging_root" ]]; then
+    print -u2 "refusing symbolic-link package staging root"
+    exit 1
+  fi
   if [[ -e "$staging_root" ]]; then
-    find "$staging_root" -depth -delete
+    find -P "$staging_root" -depth -delete
   fi
 }
 trap cleanup_staging EXIT INT TERM
 
 require_storage_headroom "gateway-dependencies" 524288
-(
-  cd "$gateway_root"
-  "$npm_path" ci --ignore-scripts --offline
-)
+test -d "$gateway_dependencies"
+test ! -L "$gateway_dependencies"
 "$repo_root/scripts/verify-provenance.sh" --development-bundle-inventory
 test "$("$node_path" --version)" = "v22.22.0"
 test -x "$node_path"
@@ -124,7 +145,11 @@ test -z "$(find -P "$resource_bundle" -type l -print -quit)"
 
 case "$bundle_root" in
   "$repo_root"/.artifacts/Miller.app|"$repo_root"/.artifacts/release/Miller.app)
-    [[ ! -e "$bundle_root" ]] || find "$bundle_root" -depth -delete
+    [[ ! -L "$bundle_root" ]] || {
+      print -u2 "refusing symbolic-link package output root"
+      exit 1
+    }
+    [[ ! -e "$bundle_root" ]] || find -P "$bundle_root" -depth -delete
     ;;
   *)
     exit 1
@@ -149,6 +174,26 @@ cp "$binary_path" "$staging_root/Miller.app/Contents/MacOS/Miller"
 cp "$bridge_binary_path" \
   "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 cp -R "$resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
+
+scrub_private_build_paths() {
+  local binary="$1"
+  # Swift embeds absolute compilation paths in native string tables. Replace
+  # each private build path with an equal-length, non-private string before the
+  # final ad-hoc signature is created.
+  /usr/bin/perl -0pi -e '
+    s{\/Users\/[^\0]{1,4096}}{
+      my $replacement = "miller-private-build";
+      $replacement .= "\0" x (length($&) - length($replacement));
+      $replacement;
+    }ge;
+  ' "$binary"
+  test -z "$(strings "$binary" | grep -E '/Users/|\.build|Desktop/Millrace-Dev' | head -n 1 || true)"
+}
+
+scrub_private_build_paths \
+  "$staging_root/Miller.app/Contents/MacOS/Miller"
+scrub_private_build_paths \
+  "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 if [[ "$package_mode" == "release" ]]; then
   legal_root="$staging_root/Miller.app/Contents/Resources/Legal"
   mkdir -p "$legal_root"
@@ -193,9 +238,10 @@ do
   cp "$gateway_source/$source" "$gateway_app/$source"
 done
 
-# Packaging reconstructs this exact, lockfile-verified closure with
-# `npm ci --ignore-scripts --offline`, then checks its complete reviewed
-# inventory before copying any dependency bytes into the development bundle.
+# Packaging consumes the exact, lockfile-verified closure prepared by the
+# explicit bootstrap script, then checks its complete reviewed inventory before
+# copying any dependency bytes into the development bundle. It never installs
+# dependencies implicitly or relies on a private npm cache.
 test -d "$gateway_dependencies/@miller/pi-mvp-overlay"
 test -d "$gateway_dependencies/openai"
 test -d "$gateway_dependencies/partial-json"
@@ -230,13 +276,18 @@ cp -R "$gateway_dependencies/partial-json" "$gateway_app/node_modules/"
 # The archive, extraction root, and download bytes are removed by the trap.
 require_storage_headroom "node-runtime-download" 1048576
 node_stage="$(mktemp -d "$artifacts_root/node-stage.XXXXXX")"
+# curl's --max-filesize 49923798 bound is the pinned archive size.
 curl \
   --fail \
   --location \
   --proto '=https' \
   --tlsv1.2 \
+  --max-filesize "$node_archive_bytes" \
+  --connect-timeout 15 \
+  --max-time 300 \
   --output "$node_stage/$node_archive_name" \
   "https://nodejs.org/dist/v22.22.0/$node_archive_name"
+test "$(stat -f %z "$node_stage/$node_archive_name")" = "$node_archive_bytes"
 test "$(
   shasum -a 256 "$node_stage/$node_archive_name" | awk '{print $1}'
 )" = "$node_archive_sha256"
@@ -274,6 +325,7 @@ test -z "$(
     -type l -print -quit
 )"
 test -f "$gateway_app/server.mjs"
+test -f "$gateway_app/codex-models.mjs"
 test ! -e "$gateway_bundle/codex-models.mjs"
 test -z "$(find "$gateway_bundle" -mindepth 1 -maxdepth 1 -type f -print -quit)"
 test -f "$gateway_app/node_modules/@miller/pi-mvp-overlay/package.json"

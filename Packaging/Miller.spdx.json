@@ -31,6 +31,17 @@
       "packageFileName": "Contents/Helpers/MillerCapabilityBridge"
     },
     {
+      "name": "MillerCapabilities",
+      "SPDXID": "SPDXRef-Package-MillerCapabilities",
+      "versionInfo": "0.1.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/Helpers/MillerCapabilityBridge (statically linked)"
+    },
+    {
       "name": "MCP Swift SDK",
       "SPDXID": "SPDXRef-Package-MCPSwiftSDK",
       "versionInfo": "0.12.1",
@@ -98,6 +109,26 @@
       "spdxElementId": "SPDXRef-Package-Miller",
       "relationshipType": "CONTAINS",
       "relatedSpdxElement": "SPDXRef-Package-MillerCapabilityBridge"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MillerCapabilities"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-Package-MillerCapabilities"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerCapabilities",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
     },
     {
       "spdxElementId": "SPDXRef-Package-Miller",

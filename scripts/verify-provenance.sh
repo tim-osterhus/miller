@@ -70,12 +70,11 @@ const inventoryRoot = process.argv[3];
 const gatewayRoot = join(repoRoot, "Gateway");
 const vendorRoot = join(gatewayRoot, "vendor");
 const manifestPath = join(vendorRoot, "manifest.json");
-const a1ManifestPath = resolve(
-  repoRoot,
-  "../../../lab/assist/research/spikes/pi-gateway-comparison/a1-overlay/manifest.json",
-);
 const expectedA1ManifestSHA256 =
   "902e14ffaa2548173f644c5935b8b0afe6673db9f3f8a8d3a5e5f832830e7f2b";
+const sanitizedA1ManifestPath = join(vendorRoot, "a1-manifest.json");
+const expectedSanitizedA1ManifestSHA256 =
+  "7a91e3cf445e500bc93d015b91356bf6ee9dad5db48e06648a6164b5ddcbea8e";
 const expectedDependencies = {
   "@miller/pi-mvp-overlay": "file:vendor/pi-mvp-overlay-0.82.0-a3.tgz",
   openai: "6.26.0",
@@ -158,6 +157,8 @@ async function bundleInventoryUnder(root) {
 
 const manifestBytes = await readFile(manifestPath);
 const manifest = JSON.parse(manifestBytes);
+const sanitizedA1ManifestBytes = await readFile(sanitizedA1ManifestPath);
+const sanitizedA1Manifest = JSON.parse(sanitizedA1ManifestBytes);
 assert.equal(manifest.schema, "miller-pi-a3-vendor-manifest");
 assert.equal(manifest.version, 1);
 assert.deepEqual(manifest.package, {
@@ -166,9 +167,38 @@ assert.deepEqual(manifest.package, {
 });
 assert.equal(manifest.source.a1_manifest_sha256, expectedA1ManifestSHA256);
 assert.equal(
-  sha256(await readFile(a1ManifestPath)),
-  expectedA1ManifestSHA256,
-  "reviewed A1 manifest changed",
+  manifest.source.sanitized_a1_manifest,
+  "a1-manifest.json",
+);
+assert.equal(
+  manifest.source.sanitized_a1_manifest_sha256,
+  expectedSanitizedA1ManifestSHA256,
+);
+assert.equal(
+  sha256(sanitizedA1ManifestBytes),
+  expectedSanitizedA1ManifestSHA256,
+  "tracked sanitized A1 manifest changed",
+);
+assert.equal(sanitizedA1Manifest.schema, "miller-pi-a1-sanitized-provenance");
+assert.equal(sanitizedA1Manifest.source.commit, manifest.source.upstream.commit);
+assert.equal(sanitizedA1Manifest.source.reviewed_manifest_sha256, expectedA1ManifestSHA256);
+assert.deepEqual(sanitizedA1Manifest.approved_file_inventory, {
+  path: "overlay-files.json",
+  sha256: "29e5fd59d8864844665cb63ab51b06479c810e61f2f5f0e6d21c0c63511647cd",
+  file_count: 53,
+  meaning: "The exact approved A1-derived file list and hashes are retained in this repository.",
+});
+assert.equal(
+  sanitizedA1Manifest.exclusions.includes(
+    ["Voice", "Ink"].join("") + " and unrelated donor sources",
+  ),
+  true,
+);
+assert.equal(/(?:\/Users\/|private\/tmp|Desktop\/)/i.test(JSON.stringify(sanitizedA1Manifest)), false);
+assert.equal(
+  sha256(await readFile(join(vendorRoot, sanitizedA1Manifest.approved_file_inventory.path))),
+  sanitizedA1Manifest.approved_file_inventory.sha256,
+  "approved file inventory changed",
 );
 assert.equal(
   manifest.source.upstream.commit,

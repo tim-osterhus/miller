@@ -19,6 +19,16 @@ Swift SDK and capability bridge, Node.js 22.22.0, the Pi overlay
 `partial-json@0.1.7`. The SPDX document and generated runtime inventory are
 the authoritative v0.1.1 list.
 
+Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; that
+is the v0.1.1 minimum tested/support boundary. `0.145.0` is protocol
+reference/evidence only and is not a runtime support claim. Codex remains an
+external prerequisite and is not included in this inventory.
+
+From a clean checkout, packaging requires the explicit online
+`./scripts/bootstrap-gateway-dependencies.sh` lockfile-integrity bootstrap.
+It uses bounded npm timeouts and an isolated cache; packaging and headless
+qualification do not invoke it implicitly.
+
 ## Optional wakeword build inputs (v0.1.2 source-only)
 
 Miller's optional wakeword bootstrap fetches and verifies Sherpa-ONNX 1.13.2
