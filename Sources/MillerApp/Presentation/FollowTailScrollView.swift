@@ -6,8 +6,7 @@ struct FollowTailScrollView<
     ContentChange: Equatable,
     Content: View
 >: View {
-    static var bottomAnchorID: String { "miller.transcript.bottom" }
-
+    let surface: TranscriptSurfaceNamespace
     let conversationIdentity: ConversationIdentity
     let contentChange: ContentChange
     @ViewBuilder let content: (
@@ -19,6 +18,10 @@ struct FollowTailScrollView<
     @State private var distanceFromBottom = 0.0
     @State private var isUserScrolling = false
 
+    private var bottomAnchorID: String {
+        TranscriptAccessibilityIdentifier.bottomAnchor(surface: surface)
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
@@ -28,7 +31,7 @@ struct FollowTailScrollView<
                     }
                     Color.clear
                         .frame(height: 1)
-                        .id(Self.bottomAnchorID)
+                        .id(bottomAnchorID)
                 }
                 .onScrollGeometryChange(for: Double.self) { geometry in
                     max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
@@ -64,7 +67,11 @@ struct FollowTailScrollView<
                         scrollToLatest(proxy)
                     }
                     .accessibilityLabel("Jump to latest")
-                    .accessibilityIdentifier("miller.transcript.jump-to-latest")
+                    .accessibilityIdentifier(
+                        TranscriptAccessibilityIdentifier.jumpToLatest(
+                            surface: surface
+                        )
+                    )
                     .padding(12)
                 }
             }
@@ -78,10 +85,10 @@ struct FollowTailScrollView<
     private func scrollToLatest(_ proxy: ScrollViewProxy) {
         if followState.shouldAnimateScroll(reduceMotion: reduceMotion) {
             withAnimation {
-                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
         }
     }
 }

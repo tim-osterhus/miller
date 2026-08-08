@@ -11,7 +11,7 @@ struct FollowTailPresentationTests {
         #expect(source.contains("ScrollViewReader"))
         #expect(source.contains("onScrollGeometryChange"))
         #expect(source.contains("onScrollPhaseChange"))
-        #expect(source.contains(".id(Self.bottomAnchorID)"))
+        #expect(source.contains(".id(bottomAnchorID)"))
         #expect(source.contains("accessibilityReduceMotion"))
     }
 
@@ -29,9 +29,7 @@ struct FollowTailPresentationTests {
         let source = try source(named: "FollowTailScrollView.swift")
 
         #expect(source.contains(".accessibilityLabel(\"Jump to latest\")"))
-        #expect(source.contains(
-            ".accessibilityIdentifier(\"miller.transcript.jump-to-latest\")"
-        ))
+        #expect(source.contains("TranscriptAccessibilityIdentifier.jumpToLatest"))
     }
 
     @Test
@@ -54,13 +52,16 @@ struct FollowTailPresentationTests {
     }
 
     @Test
-    func fullConversationFollowTailChangesWithTypedLiveAndVoiceContent() throws {
+    func bothFollowTailSurfacesUseCompactTranscriptContentChange() throws {
         let conversation = try source(named: "ConversationView.swift")
+        let overlay = try source(named: "OverlayView.swift")
 
-        #expect(conversation.contains("ConversationTranscriptContentChange"))
-        #expect(conversation.contains("typedTurns: model.visibleTurns"))
-        #expect(conversation.contains("liveTurns: model.liveTranscriptTurns"))
-        #expect(conversation.contains("voiceStatus: model.voiceStatusText"))
+        #expect(conversation.contains("contentChange: model.transcriptContentChange"))
+        #expect(overlay.contains("contentChange: model.transcriptContentChange"))
+        #expect(!conversation.contains("typedTurns: model.visibleTurns"))
+        #expect(!conversation.contains("liveTurns: model.liveTranscriptTurns"))
+        #expect(!overlay.contains("typedTurns: model.visibleTurns"))
+        #expect(!overlay.contains("liveTurns: model.liveTranscriptTurns"))
     }
 
     private func source(named name: String) throws -> String {

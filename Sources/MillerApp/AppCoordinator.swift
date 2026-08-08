@@ -298,6 +298,8 @@ final class AppPresentationModel: ObservableObject {
     @Published var draft = ""
     @Published private(set) var presentationState: PresentationState = .ready
     @Published private(set) var visibleTurns: [Turn] = []
+    @Published private(set) var transcriptContentRevision =
+        TranscriptContentRevision()
     @Published private(set) var conversations: [ConversationListItem] = []
     @Published private(set) var selectedConversationID = ConversationID()
     @Published private(set) var activeTurnID: TurnID?
@@ -463,6 +465,19 @@ final class AppPresentationModel: ObservableObject {
             return "\(state) — some enabled skills were omitted to stay within limits"
         }
         return state
+    }
+
+    var transcriptContentChange: TranscriptContentChange {
+        TranscriptContentChange(
+            typedRevision: transcriptContentRevision.typed,
+            liveRevision: transcriptContentRevision.live,
+            voiceStatus: TranscriptVoiceStatusToken(
+                state: voiceState,
+                failureCode: liveVoiceFailureCode,
+                persistenceFailure: liveTranscriptPersistenceMessage != nil,
+                reasoningStatus: liveVoiceReasoningStatus
+            )
+        )
     }
 
     var menuState: MenuState {
@@ -1443,7 +1458,7 @@ final class AppPresentationModel: ObservableObject {
             guard generation == liveVoiceEventGeneration else { return }
             if persistenceFailed { presentTranscriptPersistenceFailure() }
             liveTranscriptProjection.record(event)
-            liveTranscriptTurns = liveTranscriptProjection.turns
+            publishLiveTranscriptTurns(liveTranscriptProjection.turns)
         case let .status(status):
             liveVoiceReasoningStatus = status
         case let .failed(code):
@@ -1501,7 +1516,7 @@ final class AppPresentationModel: ObservableObject {
         capabilityController?.declinePendingApprovals(for: .close)
         nextConversationProjectionGeneration()
         selectedConversationID = ConversationID()
-        visibleTurns = []
+        publishVisibleTurns([])
         draft = ""
         presentationState = .ready
         errorCode = nil
@@ -1573,7 +1588,7 @@ final class AppPresentationModel: ObservableObject {
             let loaded = try await dependencies.loadTurns(conversationID)
             guard generation == conversationProjectionGeneration,
                   conversationID == selectedConversationID else { return }
-            visibleTurns = loaded
+            publishVisibleTurns(loaded)
         } catch {
             guard generation == conversationProjectionGeneration,
                   conversationID == selectedConversationID else { return }
@@ -1652,10 +1667,10 @@ final class AppPresentationModel: ObservableObject {
                 selectedConversationID
             )
             guard generation == conversationProjectionGeneration else { return }
-            visibleTurns = loaded
+            publishVisibleTurns(loaded)
         } catch {
             guard generation == conversationProjectionGeneration else { return }
-            visibleTurns = []
+            publishVisibleTurns([])
         }
     }
 
@@ -1678,7 +1693,7 @@ final class AppPresentationModel: ObservableObject {
         errorCode = nil
         reasoningStatus = nil
         conversations = []
-        visibleTurns = []
+        publishVisibleTurns([])
         voiceHistorySessions = []
         pendingVoiceHistoryAttachment = nil
         voiceHistoryStatus = nil
@@ -1745,8 +1760,26 @@ final class AppPresentationModel: ObservableObject {
 
     private func resetLiveTranscripts() {
         liveTranscriptProjection.reset()
-        liveTranscriptTurns = liveTranscriptProjection.turns
+        publishLiveTranscriptTurns(liveTranscriptProjection.turns)
         liveTranscriptSessionID = nil
+    }
+
+    private func publishVisibleTurns(_ turns: [Turn]) {
+        guard TranscriptDisplayedContent.typedChanged(
+            from: visibleTurns,
+            to: turns
+        ) else { return }
+        visibleTurns = turns
+        transcriptContentRevision.advance(typedContentChanged: true)
+    }
+
+    private func publishLiveTranscriptTurns(_ turns: [LiveTranscriptTurn]) {
+        guard TranscriptDisplayedContent.liveChanged(
+            from: liveTranscriptTurns,
+            to: turns
+        ) else { return }
+        liveTranscriptTurns = turns
+        transcriptContentRevision.advance(liveContentChanged: true)
     }
 
     private static func liveFailureCode(_ error: Error) -> String {

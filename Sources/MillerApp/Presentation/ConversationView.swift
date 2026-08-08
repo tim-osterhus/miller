@@ -94,7 +94,8 @@ enum AssistantMarkdown {
 struct AssistantMarkdownView: View {
     let source: String
     let selectionBegan: TranscriptSelectionAction
-    let accessibilityIDPrefix: String
+    let surface: TranscriptSurfaceNamespace
+    let turnID: TurnID
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -115,7 +116,12 @@ struct AssistantMarkdownView: View {
         switch block {
         case let .heading(level, text):
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                    .typedAssistantBlock(
+                        surface: surface,
+                        turnID: turnID,
+                        blockIndex: index
+                    ),
                 selectionBegan: selectionBegan
             ) {
                 Text(AssistantMarkdown.attributedString(text))
@@ -125,14 +131,24 @@ struct AssistantMarkdownView: View {
             }
         case let .paragraph(text):
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                    .typedAssistantBlock(
+                        surface: surface,
+                        turnID: turnID,
+                        blockIndex: index
+                    ),
                 selectionBegan: selectionBegan
             ) {
                 Text(AssistantMarkdown.attributedString(text))
             }
         case let .unorderedItem(text):
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                    .typedAssistantBlock(
+                        surface: surface,
+                        turnID: turnID,
+                        blockIndex: index
+                    ),
                 selectionBegan: selectionBegan
             ) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -143,7 +159,12 @@ struct AssistantMarkdownView: View {
             }
         case let .orderedItem(marker, text):
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                    .typedAssistantBlock(
+                        surface: surface,
+                        turnID: turnID,
+                        blockIndex: index
+                    ),
                 selectionBegan: selectionBegan
             ) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -154,7 +175,12 @@ struct AssistantMarkdownView: View {
             }
         case let .quote(text):
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                    .typedAssistantBlock(
+                        surface: surface,
+                        turnID: turnID,
+                        blockIndex: index
+                    ),
                 selectionBegan: selectionBegan
             ) {
                 HStack(alignment: .top, spacing: 8) {
@@ -175,7 +201,12 @@ struct AssistantMarkdownView: View {
                 }
                 ScrollView(.horizontal) {
                     SelectableTranscriptSurface(
-                        accessibilityIdentifier: "\(accessibilityIDPrefix).block.\(index)",
+                        accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                            .typedAssistantBlock(
+                                surface: surface,
+                                turnID: turnID,
+                                blockIndex: index
+                            ),
                         selectionBegan: selectionBegan
                     ) {
                         Text(text)
@@ -189,12 +220,6 @@ struct AssistantMarkdownView: View {
             Color.clear.frame(height: 2)
         }
     }
-}
-
-private struct ConversationTranscriptContentChange: Equatable {
-    let typedTurns: [Turn]
-    let liveTurns: [LiveTranscriptTurn]
-    let voiceStatus: String
 }
 
 struct ConversationView: View {
@@ -222,17 +247,15 @@ struct ConversationView: View {
                 }
 
                 FollowTailScrollView(
+                    surface: .conversation,
                     conversationIdentity: model.selectedConversationID,
-                    contentChange: ConversationTranscriptContentChange(
-                        typedTurns: model.visibleTurns,
-                        liveTurns: model.liveTranscriptTurns,
-                        voiceStatus: model.voiceStatusText
-                    )
+                    contentChange: model.transcriptContentChange
                 ) { selectionBegan in
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(model.visibleTurns, id: \.id) { turn in
                             TranscriptTurnView(
                                 turn: turn,
+                                surface: .conversation,
                                 selectionBegan: selectionBegan
                             )
                         }
@@ -244,6 +267,7 @@ struct ConversationView: View {
                             ForEach(model.liveTranscriptTurns, id: \.id) { turn in
                                 LiveTranscriptTurnView(
                                     turn: turn,
+                                    surface: .conversation,
                                     selectionBegan: selectionBegan
                                 )
                             }
@@ -338,6 +362,7 @@ struct ConversationView: View {
 
 struct TranscriptTurnView: View {
     let turn: Turn
+    let surface: TranscriptSurfaceNamespace
     let selectionBegan: TranscriptSelectionAction
 
     var body: some View {
@@ -346,7 +371,10 @@ struct TranscriptTurnView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "miller.transcript.typed.user.\(turn.id)",
+                accessibilityIdentifier: TranscriptAccessibilityIdentifier.typedUser(
+                    surface: surface,
+                    turnID: turn.id
+                ),
                 selectionBegan: selectionBegan
             ) {
                 Text(turn.userText)
@@ -358,8 +386,8 @@ struct TranscriptTurnView: View {
                 AssistantMarkdownView(
                     source: turn.assistantText,
                     selectionBegan: selectionBegan,
-                    accessibilityIDPrefix:
-                        "miller.transcript.typed.assistant.\(turn.id)"
+                    surface: surface,
+                    turnID: turn.id
                 )
             }
             if let error = turn.errorMessage {
@@ -367,6 +395,5 @@ struct TranscriptTurnView: View {
                     .foregroundStyle(.red)
             }
         }
-        .accessibilityElement(children: .combine)
     }
 }

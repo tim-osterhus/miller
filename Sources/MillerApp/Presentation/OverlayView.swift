@@ -18,17 +18,15 @@ struct OverlayView: View {
             }
 
             FollowTailScrollView(
+                surface: .overlay,
                 conversationIdentity: model.selectedConversationID,
-                contentChange: OverlayTranscriptContentChange(
-                    typedTurns: model.visibleTurns,
-                    liveTurns: model.liveTranscriptTurns,
-                    voiceStatus: model.voiceStatusText
-                )
+                contentChange: model.transcriptContentChange
             ) { selectionBegan in
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.visibleTurns, id: \.id) { turn in
                         TranscriptTurnView(
                             turn: turn,
+                            surface: .overlay,
                             selectionBegan: selectionBegan
                         )
                     }
@@ -40,6 +38,7 @@ struct OverlayView: View {
                         ForEach(model.liveTranscriptTurns, id: \.id) { turn in
                             LiveTranscriptTurnView(
                                 turn: turn,
+                                surface: .overlay,
                                 selectionBegan: selectionBegan
                             )
                         }
@@ -154,12 +153,6 @@ struct OverlayView: View {
         model.declineCapabilityApprovalForDismissal()
         dismiss()
     }
-}
-
-private struct OverlayTranscriptContentChange: Equatable {
-    let typedTurns: [Turn]
-    let liveTurns: [LiveTranscriptTurn]
-    let voiceStatus: String
 }
 
 extension Notification.Name {

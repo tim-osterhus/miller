@@ -22,30 +22,31 @@ struct SelectableTranscriptSurface<Content: View>: View {
 
 struct LiveTranscriptTurnView: View {
     let turn: LiveTranscriptTurn
+    let surface: TranscriptSurfaceNamespace
     let selectionBegan: TranscriptSelectionAction
 
     var body: some View {
+        let metadata = TranscriptAccessibilityMetadata.live(
+            surface: surface,
+            turnID: turn.id,
+            role: turn.role
+        )
         VStack(alignment: .leading, spacing: 5) {
             Text(speaker)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel(metadata.roleLabel)
             SelectableTranscriptSurface(
-                accessibilityIdentifier: "miller.transcript.live.\(turn.id)",
+                accessibilityIdentifier: metadata.transcriptElementIdentifier,
                 selectionBegan: selectionBegan
             ) {
                 Text(turn.text)
             }
         }
-        .accessibilityLabel(accessibilityLabel)
     }
 
     private var speaker: String {
         turn.role == .user ? "You" : "Miller"
     }
 
-    private var accessibilityLabel: String {
-        turn.role == .user
-            ? "Live voice user transcript"
-            : "Live voice assistant transcript"
-    }
 }

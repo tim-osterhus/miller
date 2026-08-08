@@ -62,11 +62,21 @@ struct TranscriptSelectionPresentationTests {
         #expect(overlay.contains("ForEach(model.visibleTurns, id: \\.id)"))
         #expect(conversation.contains("ForEach(model.liveTranscriptTurns, id: \\.id)"))
         #expect(overlay.contains("ForEach(model.liveTranscriptTurns, id: \\.id)"))
-        #expect(conversation.contains("miller.transcript.typed.user.\\(turn.id)"))
-        #expect(conversation.contains("miller.transcript.typed.assistant.\\(turn.id)"))
-        #expect(shared.contains("miller.transcript.live.\\(turn.id)"))
-        #expect(shared.contains("Live voice user transcript"))
-        #expect(shared.contains("Live voice assistant transcript"))
+        #expect(conversation.contains("TranscriptAccessibilityIdentifier.typedUser"))
+        #expect(conversation.contains("typedAssistantBlock("))
+        #expect(shared.contains("TranscriptAccessibilityMetadata.live"))
+    }
+
+    @Test
+    func liveTranscriptKeepsRoleAndTextAsSeparateAccessibilityElements() {
+        let conversation = source(named: "ConversationView.swift")
+        let shared = source(named: "SelectableTranscriptSurface.swift")
+
+        #expect(shared.contains("Text(speaker)"))
+        #expect(shared.contains(".accessibilityLabel(metadata.roleLabel)"))
+        #expect(shared.contains("Text(turn.text)"))
+        #expect(!shared.contains(".accessibilityLabel(accessibilityLabel)"))
+        #expect(!conversation.contains(".accessibilityElement(children: .combine)"))
     }
 
     @Test
