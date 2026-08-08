@@ -77,17 +77,37 @@ public enum CapabilityRPCRuntime {
     }
 
     private static func currentProcessStartDescription() throws -> String {
+        guard let identity = liveProcessIdentity(getpid()),
+              identity.uid == geteuid()
+        else { throw CapabilityRPCError.socketFailure }
+        return identity.start
+    }
+
+    private struct LiveProcessIdentity {
+        let uid: uid_t
+        let start: String
+    }
+
+    private static func liveProcessIdentity(_ pid: Int32) -> LiveProcessIdentity? {
+        guard let uidText = processField("uid", pid: pid),
+              let uid = uid_t(uidText),
+              let startText = processField("lstart", pid: pid)
+        else { return nil }
+        return LiveProcessIdentity(uid: uid, start: startText)
+    }
+
+    private static func processField(_ field: String, pid: Int32) -> String? {
         let output = Pipe()
         let process = Process()
         process.executableURL = URL(filePath: "/bin/ps")
-        process.arguments = ["-p", "\(getpid())", "-o", "lstart="]
+        process.arguments = ["-p", "\(pid)", "-o", "\(field)="]
         process.standardOutput = output
         process.standardError = Pipe()
         do {
             try process.run()
             process.waitUntilExit()
         } catch {
-            throw CapabilityRPCError.socketFailure
+            return nil
         }
         guard process.terminationStatus == 0,
               let value = String(
@@ -96,7 +116,7 @@ public enum CapabilityRPCRuntime {
               )?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty,
               !value.contains("\n")
-        else { throw CapabilityRPCError.socketFailure }
+        else { return nil }
         return value
     }
 
@@ -144,6 +164,200 @@ public enum CapabilityRPCRuntime {
             unlink(url.path)
             throw error
         }
+    }
+
+    fileprivate static func reclaimDeadBridgeLeaseIfPresent(
+        trustedParent: URL
+    ) throws {
+        let root = managedRoot(in: trustedParent)
+        let socketName = "capability.sock"
+        let knownNames: Set<String> = [
+            socketName,
+            processLeaseName,
+            processLeaseMetadataName,
+        ]
+        let children: [URL]
+        do {
+            children = try FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil
+            )
+        } catch {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        guard children.allSatisfy({ knownNames.contains($0.lastPathComponent) })
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+
+        let pidURL = root.appending(path: processLeaseName)
+        let metadataURL = root.appending(path: processLeaseMetadataName)
+        var pidValue = stat()
+        var metadataValue = stat()
+        let pidResult = lstat(pidURL.path, &pidValue)
+        let pidError = errno
+        let metadataResult = lstat(metadataURL.path, &metadataValue)
+        let metadataError = errno
+        let hasPID = pidResult == 0
+        let hasMetadata = metadataResult == 0
+        guard (hasPID || pidError == ENOENT),
+              (hasMetadata || metadataError == ENOENT)
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        guard hasPID == hasMetadata else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        guard hasPID else { return }
+
+        let pidDescriptor = try openLeaseDescriptor(at: pidURL)
+        defer { Darwin.close(pidDescriptor) }
+        let metadataDescriptor = try openLeaseDescriptor(at: metadataURL)
+        defer { Darwin.close(metadataDescriptor) }
+
+        let pidPayload = try readLeasePayload(from: pidDescriptor)
+        let metadataPayload = try readLeasePayload(from: metadataDescriptor)
+        guard let pidText = String(data: pidPayload, encoding: .utf8),
+              pidText.hasSuffix("\n")
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        let pidTextWithoutNewline = String(pidText.dropLast())
+        let pid = try parseLeaseNumber(pidTextWithoutNewline)
+        guard pid > 1 else { throw CapabilityRPCError.unsafeRuntimeRoot }
+
+        guard let metadata = String(data: metadataPayload, encoding: .utf8)
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        let lines = metadata.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count == 6, lines[5].isEmpty else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        func value(_ line: Substring, key: String) -> String? {
+            guard line.hasPrefix(key) else { return nil }
+            return String(line.dropFirst(key.count))
+        }
+        guard let metadataPID = value(lines[0], key: "pid="),
+              let metadataUID = value(lines[1], key: "uid="),
+              let metadataPPID = value(lines[2], key: "ppid="),
+              let metadataStart = value(lines[3], key: "start="),
+              let metadataExecutable = value(lines[4], key: "exec=")
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        let leasedUID = try parseLeaseNumber(metadataUID)
+        guard try parseLeaseNumber(metadataPID) == pid,
+              leasedUID == Int32(geteuid()),
+              try parseLeaseNumber(metadataPPID) > 0,
+              !metadataStart.isEmpty,
+              metadataStart.unicodeScalars.allSatisfy({
+                  $0.value >= 0x20 && $0.value != 0x7f
+              })
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        try validateBridgeExecutable(metadataExecutable)
+
+        errno = 0
+        let liveness = kill(pid, 0)
+        if liveness == 0 || errno == EPERM {
+            guard let live = liveProcessIdentity(pid) else {
+                throw CapabilityRPCError.unsafeRuntimeRoot
+            }
+            if live.uid == uid_t(leasedUID),
+               normalizedProcessStart(live.start)
+                    == normalizedProcessStart(metadataStart)
+            {
+                throw CapabilityRPCError.unsafeRuntimeRoot
+            }
+        } else if errno != ESRCH {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        try unlinkLeaseFileIfHeld(pidURL, descriptor: pidDescriptor)
+        try unlinkLeaseFileIfHeld(metadataURL, descriptor: metadataDescriptor)
+    }
+
+    private static func normalizedProcessStart(_ value: String) -> String {
+        value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private static func openLeaseDescriptor(at url: URL) throws -> Int32 {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        var pathValue = stat()
+        var descriptorValue = stat()
+        guard lstat(url.path, &pathValue) == 0,
+              fstat(descriptor, &descriptorValue) == 0,
+              (pathValue.st_mode & S_IFMT) == S_IFREG,
+              (descriptorValue.st_mode & S_IFMT) == S_IFREG,
+              pathValue.st_dev == descriptorValue.st_dev,
+              pathValue.st_ino == descriptorValue.st_ino,
+              descriptorValue.st_uid == geteuid(),
+              pathValue.st_nlink == 1,
+              descriptorValue.st_nlink == 1,
+              (descriptorValue.st_mode & 0o777) == 0o600,
+              descriptorValue.st_size >= 0,
+              descriptorValue.st_size <= 4096
+        else {
+            Darwin.close(descriptor)
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        return descriptor
+    }
+
+    private static func readLeasePayload(from descriptor: Int32) throws -> Data {
+        var payload = Data()
+        var buffer = [UInt8](repeating: 0, count: 512)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            if count > 0 {
+                guard payload.count + count <= 4096 else {
+                    throw CapabilityRPCError.unsafeRuntimeRoot
+                }
+                payload.append(contentsOf: buffer[..<count])
+            } else if count == 0 {
+                return payload
+            } else if errno != EINTR {
+                throw CapabilityRPCError.unsafeRuntimeRoot
+            }
+        }
+    }
+
+    private static func parseLeaseNumber(_ value: String) throws -> Int32 {
+        guard !value.isEmpty,
+              value.unicodeScalars.allSatisfy({
+                  $0.value >= 48 && $0.value <= 57
+              }),
+              let number = Int64(value),
+              number <= Int64(Int32.max)
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        return Int32(number)
+    }
+
+    private static func validateBridgeExecutable(_ path: String) throws {
+        let executable = URL(filePath: path)
+        guard path.hasPrefix("/"),
+              executable.path == executable.standardizedFileURL.path,
+              executable.lastPathComponent == "MillerCapabilityBridge"
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        var value = stat()
+        guard lstat(path, &value) == 0,
+              (value.st_mode & S_IFMT) == S_IFREG,
+              value.st_uid == geteuid(),
+              access(path, X_OK) == 0
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+    }
+
+    private static func unlinkLeaseFileIfHeld(
+        _ url: URL,
+        descriptor: Int32
+    ) throws {
+        var heldValue = stat()
+        var pathValue = stat()
+        guard fstat(descriptor, &heldValue) == 0,
+              lstat(url.path, &pathValue) == 0,
+              (pathValue.st_mode & S_IFMT) == S_IFREG,
+              pathValue.st_uid == geteuid(),
+              (pathValue.st_mode & 0o777) == 0o600,
+              heldValue.st_nlink == 1,
+              pathValue.st_nlink == 1,
+              heldValue.st_dev == pathValue.st_dev,
+              heldValue.st_ino == pathValue.st_ino,
+              unlink(url.path) == 0
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
     }
 
     public static func prepareManagedRoot(
@@ -292,6 +506,9 @@ public final class CapabilityRPCBridgeProcessLease: @unchecked Sendable {
         let socket = root.appending(path: "capability.sock")
         try CapabilityRPCRuntime.validateEndpoint(
             socketURL: socket,
+            trustedParent: trustedParent
+        )
+        try CapabilityRPCRuntime.reclaimDeadBridgeLeaseIfPresent(
             trustedParent: trustedParent
         )
         let url = root.appending(path: CapabilityRPCRuntime.processLeaseName)

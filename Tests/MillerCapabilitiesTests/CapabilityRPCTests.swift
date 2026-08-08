@@ -71,6 +71,221 @@ struct CapabilityRPCTests {
     }
 
     @Test
+    func reclaimsDeadStaleBridgeLeaseBeforeNewBridgeAcquires() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(trustedParent: parent) {
+            _ in .catalog([])
+        }
+        let endpoint = try await server.start()
+
+        let exited = Process()
+        exited.executableURL = URL(filePath: "/usr/bin/true")
+        try exited.run()
+        exited.waitUntilExit()
+        let stalePID = exited.processIdentifier
+        #expect(exited.terminationStatus == 0)
+        #expect(processDoesNotExist(stalePID))
+
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
+        let pidURL = root.appending(path: CapabilityRPCRuntime.processLeaseName)
+        let metadataURL = root.appending(
+            path: CapabilityRPCRuntime.processLeaseMetadataName
+        )
+        let executable = try capabilityBridgeExecutableURL()
+        try Data("\(stalePID)\n".utf8).write(to: pidURL)
+        try Data([
+            "pid=\(stalePID)",
+            "uid=\(geteuid())",
+            "ppid=1",
+            "start=Sat Jan 1 00:00:00 2000",
+            "exec=\(executable.path)",
+            "",
+        ].joined(separator: "\n").utf8).write(to: metadataURL)
+        _ = chmod(pidURL.path, 0o600)
+        _ = chmod(metadataURL.path, 0o600)
+
+        let input = Pipe()
+        let output = Pipe()
+        let error = Pipe()
+        let bridge = Process()
+        bridge.executableURL = executable
+        bridge.environment = [
+            "HOME": "/nonexistent",
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": root.path,
+            CapabilityRPCEnvironment.socketPath: endpoint.socketURL.path,
+            CapabilityRPCEnvironment.sessionToken: endpoint.token.environmentValue,
+            CapabilityRPCEnvironment.providerProfileID: UUID().uuidString,
+            CapabilityRPCEnvironment.trustedParent: endpoint.trustedParentURL.path,
+        ]
+        bridge.standardInput = input
+        bridge.standardOutput = output
+        bridge.standardError = error
+        try bridge.run()
+        defer {
+            try? input.fileHandleForWriting.close()
+            if bridge.isRunning {
+                bridge.terminate()
+                bridge.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: pidURL)
+            try? FileManager.default.removeItem(at: metadataURL)
+        }
+
+        var reclaimed = false
+        for _ in 0..<80 {
+            if (try? String(contentsOf: pidURL, encoding: .utf8))
+                == "\(bridge.processIdentifier)\n"
+            {
+                reclaimed = true
+                break
+            }
+            if !bridge.isRunning { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(reclaimed)
+        try? input.fileHandleForWriting.close()
+        for _ in 0..<80 where bridge.isRunning {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        if bridge.isRunning {
+            bridge.terminate()
+            bridge.waitUntilExit()
+        }
+        await server.stop()
+    }
+
+    @Test
+    func reclaimsAReusedPIDButPreservesTheLiveOriginalLease() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(trustedParent: parent) { _ in .catalog([]) }
+        let endpoint = try await server.start()
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
+        let executable = try capabilityBridgeExecutableURL()
+        let liveStart = try processStartDescription(getpid())
+
+        try writeLeasePair(
+            in: root, pid: getpid(), start: liveStart,
+            executable: executable
+        )
+        let liveAttempt = try launchLeaseBridge(
+            executable: executable,
+            endpoint: endpoint
+        )
+        #expect(await waitForExit(liveAttempt.process))
+        try? liveAttempt.input.fileHandleForWriting.close()
+        #expect(try String(
+            contentsOf: root.appending(path: CapabilityRPCRuntime.processLeaseName),
+            encoding: .utf8
+        ) == "\(getpid())\n")
+
+        try removeLeasePair(in: root)
+        try writeLeasePair(
+            in: root, pid: getpid(),
+            start: "Sat Jan 1 00:00:00 2000", executable: executable
+        )
+        let reusedAttempt = try launchLeaseBridge(
+            executable: executable,
+            endpoint: endpoint
+        )
+        var reclaimed = false
+        for _ in 0..<80 {
+            if (try? String(contentsOf: root.appending(
+                path: CapabilityRPCRuntime.processLeaseName
+            ), encoding: .utf8)) == "\(reusedAttempt.process.processIdentifier)\n" {
+                reclaimed = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(reclaimed)
+        try? reusedAttempt.input.fileHandleForWriting.close()
+        #expect(await waitForExit(reusedAttempt.process))
+        await server.stop()
+    }
+
+    @Test
+    func unsafeStaleLeaseShapesFailClosedWithoutBlockingOrDeletion() async throws {
+        let parent = try trustedRuntimeParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(trustedParent: parent) { _ in .catalog([]) }
+        _ = try await server.start()
+        defer { Task { await server.stop() } }
+        let root = CapabilityRPCRuntime.managedRoot(in: parent)
+        let pidURL = root.appending(path: CapabilityRPCRuntime.processLeaseName)
+        let metadataURL = root.appending(
+            path: CapabilityRPCRuntime.processLeaseMetadataName
+        )
+        let executable = try capabilityBridgeExecutableURL()
+        let deadPID = try exitedProcessID()
+
+        try Data("\(deadPID)\n".utf8).write(to: pidURL)
+        _ = chmod(pidURL.path, 0o600)
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try CapabilityRPCBridgeProcessLease.acquire(trustedParent: parent)
+        }
+        #expect(FileManager.default.fileExists(atPath: pidURL.path))
+        try FileManager.default.removeItem(at: pidURL)
+
+        try writeLeasePair(
+            in: root, pid: deadPID,
+            start: "Sat Jan 1 00:00:00 2000", executable: executable
+        )
+        let unknown = root.appending(path: "unexpected")
+        try Data().write(to: unknown)
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try CapabilityRPCBridgeProcessLease.acquire(trustedParent: parent)
+        }
+        #expect(FileManager.default.fileExists(atPath: pidURL.path))
+        try FileManager.default.removeItem(at: unknown)
+        try removeLeasePair(in: root)
+
+        let outside = parent.appending(path: "outside-lease")
+        try Data("\(deadPID)\n".utf8).write(to: outside)
+        _ = chmod(outside.path, 0o600)
+        guard link(outside.path, pidURL.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try writeLeaseMetadata(
+            at: metadataURL, pid: deadPID,
+            start: "Sat Jan 1 00:00:00 2000", executable: executable
+        )
+        #expect(throws: CapabilityRPCError.unsafeRuntimeRoot) {
+            _ = try CapabilityRPCBridgeProcessLease.acquire(trustedParent: parent)
+        }
+        #expect(FileManager.default.fileExists(atPath: pidURL.path))
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+        try removeLeasePair(in: root)
+        try FileManager.default.removeItem(at: outside)
+
+        guard mkfifo(pidURL.path, 0o600) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try writeLeaseMetadata(
+            at: metadataURL, pid: deadPID,
+            start: "Sat Jan 1 00:00:00 2000", executable: executable
+        )
+        let completed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = try? CapabilityRPCBridgeProcessLease.acquire(trustedParent: parent)
+            completed.signal()
+        }
+        let promptResult = waitSynchronously(
+            completed,
+            timeout: .now() + .milliseconds(250)
+        )
+        if promptResult == .timedOut {
+            let writer = open(pidURL.path, O_WRONLY | O_NONBLOCK)
+            if writer >= 0 { Darwin.close(writer) }
+            _ = waitSynchronously(completed, timeout: .now() + .seconds(1))
+        }
+        #expect(promptResult == .success)
+        #expect(mode(pidURL) == 0o600)
+    }
+
+    @Test
     func rejectsShortTokensOversizeFramesAndMalformedJSON() throws {
         #expect(throws: CapabilityRPCError.invalidToken) {
             _ = try CapabilityRPCSessionToken(bytes: Data(repeating: 1, count: 31))
@@ -804,6 +1019,144 @@ private func trustedRuntimeParent() throws -> URL {
         attributes: [.posixPermissions: 0o700]
     )
     return url
+}
+
+private func exitedProcessID() throws -> Int32 {
+    let process = Process()
+    process.executableURL = URL(filePath: "/usr/bin/true")
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0,
+          processDoesNotExist(process.processIdentifier)
+    else { throw CapabilityRPCError.unsafeRuntimeRoot }
+    return process.processIdentifier
+}
+
+private func processStartDescription(_ processID: Int32) throws -> String {
+    let output = Pipe()
+    let process = Process()
+    process.executableURL = URL(filePath: "/bin/ps")
+    process.arguments = ["-p", "\(processID)", "-o", "lstart="]
+    process.standardOutput = output
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0,
+          let value = String(
+            data: output.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+          )?.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "),
+          !value.isEmpty
+    else { throw CapabilityRPCError.unsafeRuntimeRoot }
+    return value
+}
+
+private func writeLeasePair(
+    in root: URL,
+    pid: Int32,
+    start: String,
+    executable: URL
+) throws {
+    let pidURL = root.appending(path: CapabilityRPCRuntime.processLeaseName)
+    try Data("\(pid)\n".utf8).write(to: pidURL)
+    _ = chmod(pidURL.path, 0o600)
+    try writeLeaseMetadata(
+        at: root.appending(path: CapabilityRPCRuntime.processLeaseMetadataName),
+        pid: pid,
+        start: start,
+        executable: executable
+    )
+}
+
+private func writeLeaseMetadata(
+    at url: URL,
+    pid: Int32,
+    start: String,
+    executable: URL
+) throws {
+    try Data([
+        "pid=\(pid)",
+        "uid=\(geteuid())",
+        "ppid=1",
+        "start=\(start)",
+        "exec=\(executable.path)",
+        "",
+    ].joined(separator: "\n").utf8).write(to: url)
+    _ = chmod(url.path, 0o600)
+}
+
+private func removeLeasePair(in root: URL) throws {
+    for name in [
+        CapabilityRPCRuntime.processLeaseName,
+        CapabilityRPCRuntime.processLeaseMetadataName,
+    ] {
+        let url = root.appending(path: name)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
+private func processDoesNotExist(_ processID: Int32) -> Bool {
+    errno = 0
+    return kill(processID, 0) == -1 && errno == ESRCH
+}
+
+private func capabilityBridgeExecutableURL() throws -> URL {
+    let resourceSibling = Bundle.module.bundleURL
+        .deletingLastPathComponent()
+        .appending(path: "MillerCapabilityBridge")
+    if FileManager.default.isExecutableFile(atPath: resourceSibling.path) {
+        return resourceSibling.resolvingSymlinksInPath()
+    }
+    var directory = URL(filePath: CommandLine.arguments[0])
+        .resolvingSymlinksInPath()
+        .deletingLastPathComponent()
+    for _ in 0..<8 {
+        let candidate = directory.appending(path: "MillerCapabilityBridge")
+        if FileManager.default.isExecutableFile(atPath: candidate.path),
+           !candidate.hasDirectoryPath
+        {
+            return candidate.resolvingSymlinksInPath()
+        }
+        directory.deleteLastPathComponent()
+    }
+    throw CapabilityRPCError.unsafeRuntimeRoot
+}
+
+private func launchLeaseBridge(
+    executable: URL,
+    endpoint: CapabilityRPCEndpoint
+) throws -> (process: Process, input: Pipe) {
+    let process = Process()
+    let input = Pipe()
+    process.executableURL = executable
+    process.environment = [
+        "HOME": "/nonexistent",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": CapabilityRPCRuntime.managedRoot(
+            in: endpoint.trustedParentURL
+        ).path,
+        CapabilityRPCEnvironment.socketPath: endpoint.socketURL.path,
+        CapabilityRPCEnvironment.sessionToken: endpoint.token.environmentValue,
+        CapabilityRPCEnvironment.providerProfileID: UUID().uuidString,
+        CapabilityRPCEnvironment.trustedParent: endpoint.trustedParentURL.path,
+    ]
+    process.standardInput = input
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    return (process, input)
+}
+
+private func waitForExit(_ process: Process) async -> Bool {
+    for _ in 0..<80 {
+        if !process.isRunning { return true }
+        try? await Task.sleep(for: .milliseconds(25))
+    }
+    if process.isRunning { process.terminate() }
+    process.waitUntilExit()
+    return false
 }
 
 private func mode(_ url: URL) -> mode_t {
