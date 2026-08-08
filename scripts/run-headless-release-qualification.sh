@@ -494,9 +494,7 @@ assert_measurements() {
 }
 
 assert_cleanup_boundary() {
-  local system_temporary_parent="${TMPDIR:-/private/tmp}"
-  system_temporary_parent="${system_temporary_parent%/}"
-  local bridge_root="$system_temporary_parent/ai.millrace.miller-$EUID/capability-bridge"
+  local bridge_root="/private/tmp/ai.millrace.miller-$EUID/capability-bridge"
   local pid
   test -d "$bundle_root" && test ! -L "$bundle_root"
   test -f "$inventory_path" && test ! -L "$inventory_path"

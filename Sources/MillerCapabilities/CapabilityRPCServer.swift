@@ -25,7 +25,7 @@ public enum CapabilityRPCRuntime {
     public static let processLeaseMetadataName = "bridge.lease"
 
     public static var defaultTrustedParent: URL {
-        FileManager.default.temporaryDirectory.appending(
+        URL(filePath: "/private/tmp", directoryHint: .isDirectory).appending(
             path: "ai.millrace.miller-\(getuid())",
             directoryHint: .isDirectory
         )

@@ -9,9 +9,7 @@ if [[ -n "${MILLER_CLEAN_ROOT:-}" ]]; then
   }
   repo_root="$MILLER_CLEAN_ROOT"
 fi
-system_temporary_parent="${TMPDIR:-/private/tmp}"
-system_temporary_parent="${system_temporary_parent%/}"
-bridge_runtime_parent="$system_temporary_parent/ai.millrace.miller-${EUID}"
+bridge_runtime_parent="/private/tmp/ai.millrace.miller-${EUID}"
 if [[ "${MILLER_CLEAN_TESTING:-0}" == "1" && \
       -n "${MILLER_CLEAN_BRIDGE_PARENT:-}" ]]; then
   [[ "${MILLER_CLEAN_BRIDGE_PARENT:h}" == "/private/tmp" && \

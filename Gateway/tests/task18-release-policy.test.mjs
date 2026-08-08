@@ -566,13 +566,21 @@ test("headless readiness requires parent-shell resource measurements", async () 
   assert.match(script, /cold_app_rss_kib/);
 });
 
-test("source runtime path is computed from the system temporary directory", async () => {
+test("source runtime path uses the short canonical private temporary directory", async () => {
   const source = await readFile(
     join(repoRoot, "Sources", "MillerCapabilities", "CapabilityRPCServer.swift"),
     "utf8",
   );
-  assert.doesNotMatch(source, /\/private\/tmp\/ai\.millrace\.miller/);
-  assert.match(source, /temporaryDirectory/);
+  const clean = await readFile(join(repoRoot, "scripts", "clean.sh"), "utf8");
+  const qualification = await readFile(
+    join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
+    "utf8",
+  );
+  assert.match(source, /URL\(filePath: "\/private\/tmp"/);
+  assert.match(source, /ai\.millrace\.miller-\\\(getuid\(\)\)/);
+  assert.doesNotMatch(source, /FileManager\.default\.temporaryDirectory/);
+  assert.match(clean, /\/private\/tmp\/ai\.millrace\.miller-\$\{EUID\}/);
+  assert.match(qualification, /\/private\/tmp\/ai\.millrace\.miller-\$EUID/);
 });
 
 test("bridge lease metadata binds PID reuse to process identity", async () => {

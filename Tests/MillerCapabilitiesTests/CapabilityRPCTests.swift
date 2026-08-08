@@ -7,13 +7,46 @@ import Testing
 @Suite(.serialized)
 struct CapabilityRPCTests {
     @Test
-    func defaultTrustedParentUsesSystemTemporaryDirectory() {
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-            .standardizedFileURL
+    func defaultTrustedParentUsesShortCanonicalTemporaryDirectory() {
         let defaultParent = CapabilityRPCRuntime.defaultTrustedParent
-            .standardizedFileURL
-        #expect(defaultParent.path.hasPrefix(temporaryDirectory.path))
-        #expect(!defaultParent.path.contains("/private/tmp/ai.millrace.miller"))
+        let address = sockaddr_un()
+        #expect(defaultParent.path == "/private/tmp/ai.millrace.miller-\(getuid())")
+        #expect(
+            CapabilityRPCRuntime.defaultManagedRoot
+                .appending(path: "capability.sock").path.utf8.count + 1
+                <= MemoryLayout.size(ofValue: address.sun_path)
+        )
+    }
+
+    @Test
+    func defaultTrustedParentSupportsRealServerLifecycle() async throws {
+        let parent = CapabilityRPCRuntime.defaultTrustedParent
+        let root = CapabilityRPCRuntime.defaultManagedRoot
+        let parentExisted = FileManager.default.fileExists(atPath: parent.path)
+        guard !FileManager.default.fileExists(atPath: root.path) else {
+            Issue.record("Default capability runtime is already active")
+            return
+        }
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            if !parentExisted { try? FileManager.default.removeItem(at: parent) }
+        }
+        if !parentExisted {
+            try FileManager.default.createDirectory(
+                at: parent,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        let server = CapabilityRPCServer(
+            trustedParent: parent,
+            handler: { _ in .catalog([]) }
+        )
+
+        let endpoint = try await server.start()
+        #expect(FileManager.default.fileExists(atPath: endpoint.socketURL.path))
+        await server.stop()
+        #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
     @Test
