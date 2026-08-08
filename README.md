@@ -1,150 +1,184 @@
 # Miller
 
-Miller is a standalone-capable personal assistant for real-time messaging,
-voice, and governed delegation.
+Miller is a macOS menu-bar assistant for typed conversations, GPT-Live voice,
+local history, and permissioned tools.
 
-Miller v0.1.1 is the source-first capability and voice-history candidate. It is a
-local Apple Silicon macOS 15 menu-bar assistant with durable typed
-conversations, Codex OAuth, an OpenAI-compatible provider path, and GPT-Live
-voice through a separately installed official Codex CLI.
+Miller is for people who want a personal assistant without surrendering control
+of local data or tool permissions. It keeps conversation state on your Mac and
+shows tool activity while it runs.
 
-## Where Miller sits
+**Current release:** [v0.1.1](https://github.com/tim-osterhus/miller/releases/tag/v0.1.1)
+for Apple Silicon Macs running macOS 15 or newer. Build it locally from the
+tagged source.
 
-Miller will own the human-facing interaction loop: conversations, voice and
-messaging sessions, streaming responses, interruption, identity, permission
-presentation, notifications, and delegation.
+## Build and open Miller
 
-It will be useful on its own, without requiring another Millrace product. It
-will also provide first-class integrations with:
+You need:
 
-- **Millrace**, for governed, durable, multi-stage work with recovery and
-  auditable completion;
-- **Millrace OS**, for coherent discovery, control, and presentation alongside
-  the rest of the local ecosystem.
+- An Apple Silicon Mac running macOS 15 or newer.
+- Swift 6.1.
+- Node.js `v22.22.0` at `/opt/homebrew/opt/node@22/bin/`.
+- Network access for dependency bootstrap and hosted providers.
+- The official Codex CLI/App Server `0.146.0` or newer for Live Voice.
 
-Miller will not become a second workflow runtime or treat model, client,
-process, or interface state as Millrace runtime truth.
+Clone the repository and build the release app:
 
-## Miller Protocol
+```bash
+git clone https://github.com/tim-osterhus/miller.git
+cd miller
+git checkout v0.1.1
+./scripts/bootstrap-gateway-dependencies.sh
+./scripts/package-release-app.sh
+open .artifacts/release/Miller.app
+```
 
-Miller Protocol is the planned versioned contract between clients, Miller
-Core, model and media providers, and delegated systems. It will describe
-conversation identity, turn and stream events, interruption, capability
-proposals, approvals, tool results, delegation receipts, progress, and final
-outcomes without binding Miller to one transport, model, UI, or borrowed
-framework.
+The bootstrap verifies the pinned npm dependency closure. Packaging does not
+install dependencies implicitly.
 
-The protocol is a target, not an implemented API.
+The resulting app is ad-hoc signed for structural verification. It is not
+Developer ID signed or notarized.
 
-## Dependency posture
+## The conversation loop
 
-The v0.1.1 application uses a native Swift 6.1 application with AppKit and
-SwiftUI, system SQLite for durable conversation state, and a supervised Node
-helper behind a Miller-owned JSONL gateway. The capability bridge, MCP Swift
-SDK, reviewed Node 22.22.0 macOS arm64 runtime, Pi overlay, and existing
-JavaScript dependencies are the complete shipped runtime inventory. The
-source-release package is ad-hoc signed for structural checks only and does
-not establish Developer ID or notarization status. GPT-Live uses
-the App Server in a separately installed official Codex CLI. Miller discovers
-common installation locations or uses an owner-selected path, admits only an
-OpenAI-signed arm64 `codex` executable, and launches that native binary
-directly. Miller does not bundle, build, download, update, or remove Codex.
-macOS system WebKit owns the WebRTC media plane. The direct OpenAI `/v1/live`
-adapter remains experimental comparator evidence and is not selected in
-production. The provider path is limited to Codex OAuth and one configurable
-OpenAI-compatible endpoint.
+Miller provides:
 
-Hosted reasoning and GPT-Live require network access. Typed conversation and
-local history remain usable when Live Voice is unavailable, but the v0.1 voice
-path is not an offline feature.
+- Streaming typed responses with cancellation.
+- GPT-Live voice with mute, interruption, and visible transcripts.
+- Local conversation history with explicit review, export, and deletion.
+- Codex OAuth and configurable OpenAI-compatible provider profiles.
+- Markdown rendering and external browser links.
+- Follow-tail scrolling that pauses when you select text or scroll upward.
+- A bounded capability-activity panel for recent tool actions.
 
-The GPT-Live path supplies its own WebRTC speech input and output for the MVP.
-Live Voice captures microphone audio only after the explicit Start Live Voice
-action and plays remote WebRTC audio through the system media peer. Audio is
-not saved. The visible transcript is selectable text; saving a text turn never
-implies that audio was saved. History is reviewed explicitly from Miller's
-history surface.
-Replaceable standalone STT and TTS adapters and local neural speech remain
-deferred to the first post-MVP update. Miller Avatar is a separate follow-on
-product. Miller v0.1 contains no avatar renderer or VRM asset and does not
-require Miller Avatar to be installed.
+Miller owns conversation identity, context selection, cancellation, and final
+turn status. Providers do not own Miller's durable history.
 
-Miller will source code and assets only from Apache-2.0, MIT, BSD, or
-equivalently permissive projects. Repository licenses alone are not sufficient:
-native binaries, transitive dependencies, model weights, tokenizers,
-phonemizers, voices, wake-word models, fonts, audio, and artwork must each pass
-provenance and redistribution review.
+## Live Voice
 
-See `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`.
+Live Voice uses GPT-Live through an owner-installed official Codex CLI/App
+Server.
 
-## Documentation
+Miller requests microphone access only after you select **Start Live Voice**.
+WebKit carries microphone and remote audio through WebRTC. Miller does not save
+audio.
 
-- `docs/architecture.md`: implemented ownership and process boundaries.
-- `docs/development.md`: build, test, package, CI, and cleanup commands.
-- `docs/privacy.md`: local storage and provider-context disclosure.
-- `docs/security.md`: credential, helper, endpoint, and Gate 4B boundaries.
-- `docs/removal.md`: reset-before-removal procedure and residual effects.
-- `docs/installation.md`: requirements, installation, and first-run setup.
-- `docs/provider-compatibility.md`: supported reasoning and voice paths.
-- `docs/troubleshooting.md`: bounded recovery for common failures.
-- `docs/release-checklist.md`: source, human, signing, and publication gates.
-- `docs/qualification/source-first-headless-report.md`: sanitized source-release
-  package, reliability, M1 baseline, and cleanup evidence.
-- `docs/qualification/gate-4b-external-codex-human-report.md`: sanitized
-  owner-visible external-Codex and GPT-Live qualification evidence.
-- `docs/qualification/offline-gate-4a-report.md`: sanitized headless
-  qualification evidence and remaining human gates.
-- `docs/qualification/v0.1.1-headless-report.md`: deterministic sanitized
-  release-candidate evidence.
-- `docs/qualification/v0.1.1-human-protocol.md`: owner-visible rows that remain
-  not run in this bounded qualification.
+Live transcripts are presentation text. You can save selected text to local
+history, but saved text never implies saved audio.
 
-The deterministic source and package checks do not claim Developer ID signing,
-notarization, clean-machine installation, microphone/audio behavior, or beta
-qualification. Human rows in the v0.1.1 protocol remain not run.
+If Live Voice is unavailable, typed conversations and local history remain
+available.
 
-## v0.1.1 operating boundaries
+## Tools with an authority boundary
 
-MCP setup is explicit: add a local or remote server, review its displayed
-identity and declared tools, and choose a trust policy before enabling it.
-Read-only calls may run automatically under the read-only policy; changing or
-unknown calls require approval under ask-before-changes; fully trusted mode is
-an explicit owner choice. Policy decisions and tool outcomes are recorded as
-bounded audit events.
+Miller supports local and remote MCP servers. It also imports reviewed portable
+skills and plugin bundles from Settings.
 
-Account-backed apps are Codex-only in v0.1.1. Other providers are reachable
-through the provider adapter boundary and do not receive Codex account
-installation or management. Codex Live Voice therefore requires an
-owner-installed official Codex App Server; missing, incompatible, unavailable,
-or failed external Codex leaves typed operation and local history available.
-Provider portability applies to typed reasoning and the Pi gateway, not to
-the Codex-only account surface.
+Before enabling an MCP server, Miller shows its identity, endpoint class, and
+declared tools. Each server and tool can use a separate trust policy.
 
-Wake-word inputs remain source-only for v0.1.2. v0.1.1 packaging does not
-bootstrap, download, compile, or ship wake dependencies or models.
+| Trust policy | Behavior |
+| --- | --- |
+| Read-only | Declared read-only calls can run automatically. Changes require approval. |
+| Ask before changes | Changing or unknown calls require approval. |
+| Fully trusted | Miller can run admitted calls without per-call approval. |
 
-## v0.1.1 qualification and prerequisites
+One native capability broker applies these policies across Codex typed chat,
+Codex Live Voice sideband calls, and the Pi gateway. Miller records bounded
+audit events for classification, approval, denial, and result status.
 
-Task 18 tested the official Codex CLI/App Server `0.146.0` on Apple Silicon;
-`0.146.0` is the minimum tested/support boundary for this v0.1.1 route. The
-protocol evidence is from the `0.145.0` App Server wire shape and fixture
-metadata; `0.145.0` is not a runtime support claim. An owner-installed external
-Codex runtime is required for GPT-Live. Miller never bundles, downloads, or
-publishes that runtime.
-Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+Codex account apps remain Codex-only in v0.1.1. OpenAI-compatible providers do
+not inherit account apps installed through Codex.
 
-For a clean package prerequisite, run the explicit online dependency bootstrap
-with the pinned `Gateway/package-lock.json` integrity check:
+## Provider support
+
+| Provider path | Typed chat | Live Voice | Codex account apps |
+| --- | --- | --- | --- |
+| Codex OAuth | Yes | Yes | Yes |
+| OpenAI-compatible HTTPS endpoint | Yes | No | No |
+
+DeepSeek is the qualified OpenAI-compatible reference. Model identifiers remain
+configurable, and each provider confirms model availability on first use.
+
+Miller tested official Codex CLI/App Server `0.146.0` on Apple Silicon. The
+`0.145.0` fixtures document the protocol shape but do not establish runtime
+support.
+
+## Local data and privacy
+
+Miller stores conversations and non-secret provider metadata in local SQLite:
+
+```text
+~/Library/Application Support/ai.millrace.miller/miller.sqlite3
+```
+
+Provider secrets use the macOS Keychain service
+`ai.millrace.miller.credentials`. SQLite does not store those secrets.
+
+Before a remote request, Miller selects bounded context from local history and
+sends that text to the chosen provider. See `docs/privacy.md` for the exact
+context limits and deletion boundaries.
+
+Miller does not claim secure erasure. FileVault, backups, snapshots, and storage
+hardware may retain earlier bytes.
+
+## Known limits
+
+- v0.1.1 is a source-only release without Developer ID signing or notarization.
+- Hosted reasoning and Live Voice require network access.
+- Command-C does not copy selected transcript text. Use the context-menu Copy
+  action.
+- Transcript selection cannot span rendered line breaks.
+
+## Runtime boundaries
+
+Miller is standalone. It does not require Millrace or Millrace OS.
+
+The native app owns interaction, conversation state, settings, and visible
+outcomes. The capability broker owns tool policy. A supervised Node gateway
+adapts provider traffic behind a bounded JSONL protocol.
+
+Miller can later delegate governed, multi-stage work to Millrace. Miller does
+not treat model, client, process, or interface state as Millrace runtime truth.
+
+See `docs/architecture.md` for process and ownership boundaries.
+
+## Development and verification
+
+Run the complete local checks from the repository root:
 
 ```bash
 ./scripts/bootstrap-gateway-dependencies.sh
+./scripts/test.sh
 ./scripts/package-release-app.sh
+./scripts/verify-release-package.sh .artifacts/release/Miller.app
 ```
 
-The bootstrap uses bounded npm timeouts and an isolated cache. Packaging and
-headless qualification never invoke it implicitly. Signing, notarization, and
-publication remain deferred; this repository contains only an unsigned release
-candidate with ad-hoc structural verification.
+Remove generated build and dependency roots after qualification:
+
+```bash
+./scripts/clean.sh --build-caches
+./scripts/clean.sh --dependencies
+```
+
+The v0.1.1 qualification reports record deterministic and owner-visible
+evidence without retaining credentials, audio, transcript content, or provider
+payloads:
+
+- `docs/qualification/v0.1.1-headless-report.md`
+- `docs/qualification/v0.1.1-human-protocol.md`
+
+## Documentation
+
+- `docs/installation.md`: requirements and first-run setup.
+- `docs/provider-compatibility.md`: typed and voice provider boundaries.
+- `docs/privacy.md`: local storage and remote context disclosure.
+- `docs/security.md`: credentials, tools, helpers, and endpoint validation.
+- `docs/removal.md`: local reset and removal procedure.
+- `docs/troubleshooting.md`: bounded recovery for common failures.
+- `docs/development.md`: build, test, package, and cleanup commands.
+- `CHANGELOG.md`: release history and known limitations.
+- `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`: dependency provenance and
+  licensing.
 
 ## License
 
