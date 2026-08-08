@@ -87,10 +87,16 @@
       "bytes": 1069
     },
     {
+      "path": "LICENSES/mcp-swift-sdk-LICENSE.txt",
+      "role": "license",
+      "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
+      "bytes": 12227
+    },
+    {
       "path": "NOTICE",
       "role": "notice",
-      "sha256": "2bc2ba5104a40328328acb364ddb74106d425d94e6908c3044d9387cfb950071",
-      "bytes": 357
+      "sha256": "7940591ec58349cb6a7bb16782b2b15ec75dc12e609a29d1db7354ff7a648ace",
+      "bytes": 445
     },
     {
       "path": "overlay-files.json",

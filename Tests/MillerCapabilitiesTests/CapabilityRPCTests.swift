@@ -7,6 +7,16 @@ import Testing
 @Suite(.serialized)
 struct CapabilityRPCTests {
     @Test
+    func defaultTrustedParentUsesSystemTemporaryDirectory() {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .standardizedFileURL
+        let defaultParent = CapabilityRPCRuntime.defaultTrustedParent
+            .standardizedFileURL
+        #expect(defaultParent.path.hasPrefix(temporaryDirectory.path))
+        #expect(!defaultParent.path.contains("/private/tmp/ai.millrace.miller"))
+    }
+
+    @Test
     func createsPrivateRuntimeAndSocketWithEphemeralToken() async throws {
         let parent = try trustedRuntimeParent()
         defer { try? FileManager.default.removeItem(at: parent) }

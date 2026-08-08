@@ -212,6 +212,8 @@ if [[ "$package_mode" == "release" ]]; then
     printf -- '- @miller/pi-mvp-overlay 0.82.0-a3, openai 6.26.0, and partial-json 0.1.7: notices reviewed in this repository.\n'
     printf -- '- Optional speech and wake build inputs are source-only for a later release and are not shipped here.\n'
   } > "$legal_root/THIRD_PARTY_NOTICES.md"
+  cp "$repo_root/Gateway/vendor/LICENSES/mcp-swift-sdk-LICENSE.txt" \
+    "$legal_root/mcp-swift-sdk-LICENSE.txt"
   cp "$repo_root/Packaging/Miller.spdx.json" "$legal_root/Miller.spdx.json"
 fi
 
@@ -249,8 +251,7 @@ test "$(
   find "$gateway_dependencies" -mindepth 1 -maxdepth 1 -type d -print \
     | sed "s|$gateway_dependencies/||" \
     | LC_ALL=C sort
-)" = ".bin
-@miller
+)" = "@miller
 openai
 partial-json"
 test "$(

@@ -50,7 +50,8 @@
       "licenseConcluded": "Apache-2.0 AND MIT",
       "licenseDeclared": "Apache-2.0 AND MIT",
       "copyrightText": "NOASSERTION",
-      "packageFileName": "Contents/Helpers/MillerCapabilityBridge (statically linked)"
+      "licenseInfoFromFiles": ["Apache-2.0", "MIT"],
+      "packageFileName": "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt"
     },
     {
       "name": "@miller/pi-mvp-overlay",
@@ -116,6 +117,11 @@
       "relatedSpdxElement": "SPDXRef-Package-MillerCapabilities"
     },
     {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
+    },
+    {
       "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",
       "relationshipType": "CONTAINS",
       "relatedSpdxElement": "SPDXRef-Package-MillerCapabilities"
@@ -139,11 +145,6 @@
       "spdxElementId": "SPDXRef-Package-Miller",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-Node"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",
-      "relationshipType": "DEPENDS_ON",
-      "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
     },
     {
       "spdxElementId": "SPDXRef-Package-PiOverlay",

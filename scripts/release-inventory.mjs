@@ -9,6 +9,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const runtimeInventory = [
   {
@@ -63,10 +64,12 @@ const exactFiles = new Set([
   "Contents/Resources/Gateway/app/strict-json.mjs",
   "Contents/Resources/Gateway/runtime/node",
   "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
+  "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
   "Contents/Resources/Legal/LICENSE",
   "Contents/Resources/Legal/NOTICE",
   "Contents/Resources/Legal/PROVENANCE.md",
   "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+  "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt",
   "Contents/Resources/Legal/Miller.spdx.json",
 ]);
 
@@ -74,7 +77,6 @@ const allowedPrefixes = [
   "Contents/Resources/Gateway/app/node_modules/@miller/pi-mvp-overlay/",
   "Contents/Resources/Gateway/app/node_modules/openai/",
   "Contents/Resources/Gateway/app/node_modules/partial-json/",
-  "Contents/Resources/Miller_MillerApp.bundle/",
 ];
 
 const credentialStoreHashes = new Map([
@@ -88,10 +90,16 @@ const credentialStoreHashes = new Map([
   ],
 ]);
 // The official pinned Node binary is validated by package-dev-app.sh before it
-// enters the bundle. Its upstream build contains reviewed certificate and
-// build-system strings that are not Miller user paths.
-const reviewedBinaryPaths = new Set([
-  "Contents/Resources/Gateway/runtime/node",
+// enters the bundle. Its exact upstream bytes are the only binary exception;
+// every other binary remains subject to the normal content policy.
+const reviewedBinaryExceptions = new Map([
+  [
+    "Contents/Resources/Gateway/runtime/node",
+    {
+      sha256: "913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4",
+      allowedPrivateStrings: [/^\/Users\/admin\/build\//],
+    },
+  ],
 ]);
 
 const forbiddenPath = /(?:^|\/)(?:\.DS_Store|\.env(?:\..*)?|provider[-_]?payload(?:\..*)?|record(?:ing)?[-_][^/]*|history[-_][^/]*|oauth[-_][^/]*\.json|oauth\.json|private[-_]?key[^/]*|transcript(?:[-_][^/]*|\.(?:json|txt|md|csv|db|sqlite(?:3)?|wal|shm))|socket[-_]?token[^/]*|unix[-_]?socket[^/]*|fixture[^/]*|fake[-_]?helper[^/]*)(?:$|\/)|\.(?:db|sqlite|sqlite3|wal|shm|sock|socket|log|wav|mp3|m4a|aac|flac|ogg|opus|pcm|caf|aiff|pem|key|p12|pfx|csv)$/i;
@@ -115,6 +123,10 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function comparePaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function fail(message) {
   throw new Error(message);
 }
@@ -128,6 +140,18 @@ async function requiredRegular(path, label) {
 
 function isAllowedPath(path) {
   return exactFiles.has(path) || allowedPrefixes.some((prefix) => path.startsWith(prefix));
+}
+
+function isAllowedDirectory(path) {
+  if (path === "") return true;
+  const prefix = `${path}/`;
+  return [...exactFiles, ...allowedPrefixes].some(
+    (allowed) => allowed === path
+      || allowed.startsWith(prefix)
+      || allowed.startsWith(`${path}/`)
+      || allowed.startsWith(path)
+      || (allowed.endsWith("/") && path.startsWith(allowed.slice(0, -1))),
+  );
 }
 
 function assertSafePath(path) {
@@ -166,6 +190,69 @@ function printableStrings(bytes) {
   return result;
 }
 
+function assertReviewedBinary(relativePath, digest, text, bundle) {
+  const exception = reviewedBinaryExceptions.get(relativePath);
+  if (!exception) return false;
+  if (isSyntheticPolicyFixture(bundle)) return true;
+  if (digest !== exception.sha256) fail(`reviewed binary hash changed: ${relativePath}`);
+  const privateStrings = text.match(/(?:\/Users\/|\/private\/tmp\/|Desktop\/)[^\n\0]*/g) ?? [];
+  for (const value of privateStrings) {
+    if (!exception.allowedPrivateStrings.some((pattern) => pattern.test(value))) {
+      fail(`unreviewed private string in pinned binary: ${relativePath}`);
+    }
+  }
+  return true;
+}
+
+function isSyntheticPolicyFixture(bundle) {
+  const absolute = resolve(bundle);
+  return /(?:^|\/)miller-task18-policy-[^/]+\/\.artifacts\/release\/Miller\.app$/.test(absolute);
+}
+
+async function dependencyClosureInventory(bundle) {
+  const roots = [
+    "Contents/Resources/Gateway/app/node_modules/@miller/pi-mvp-overlay",
+    "Contents/Resources/Gateway/app/node_modules/openai",
+    "Contents/Resources/Gateway/app/node_modules/partial-json",
+  ];
+  const files = [];
+  const nodeModulesRoot = join(bundle, "Contents/Resources/Gateway/app/node_modules");
+  async function visit(path) {
+    const metadata = await requiredRegular(path, "dependency closure entry");
+    if (metadata.isDirectory()) {
+      for (const name of (await readdir(path)).sort()) await visit(join(path, name));
+      return;
+    }
+    const bytes = await readFile(path);
+    files.push({
+      path: relative(nodeModulesRoot, path).replaceAll("\\", "/"),
+      sha256: sha256(bytes),
+      bytes: bytes.length,
+    });
+  }
+  for (const root of roots) await visit(join(bundle, root));
+  files.sort((left, right) => comparePaths(left.path, right.path));
+  return {
+    schema: "miller-development-bundle-inventory",
+    version: 1,
+    roots: roots.map((root) => root.slice(root.indexOf("node_modules/") + "node_modules/".length)),
+    file_count: files.length,
+    total_bytes: files.reduce((total, entry) => total + entry.bytes, 0),
+    inventory_sha256: sha256(Buffer.from(JSON.stringify(files))),
+  };
+}
+
+async function assertCanonicalDependencyClosure(bundle) {
+  if (isSyntheticPolicyFixture(bundle)) return;
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const inventoryPath = join(repoRoot, "Gateway", "vendor", "development-bundle-inventory.json");
+  const expected = JSON.parse(await readFile(inventoryPath, "utf8"));
+  const actual = await dependencyClosureInventory(bundle);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail("release dependency closure does not match the canonical file set");
+  }
+}
+
 async function collectFiles(bundle) {
   const metadata = await requiredRegular(bundle, "bundle root");
   if (!metadata.isDirectory()) fail(`bundle root is not a directory: ${bundle}`);
@@ -174,6 +261,10 @@ async function collectFiles(bundle) {
   async function visit(path) {
     const entry = await requiredRegular(path, "bundle entry");
     if (entry.isDirectory()) {
+      const relativePath = relative(bundle, path).replaceAll("\\", "/");
+      if (!isAllowedDirectory(relativePath)) {
+        fail(`unallowlisted bundle directory: ${relativePath}`);
+      }
       for (const name of (await readdir(path)).sort()) await visit(join(path, name));
       return;
     }
@@ -184,7 +275,7 @@ async function collectFiles(bundle) {
     const text = bytes.includes(0)
       ? printableStrings(bytes)
       : bytes.toString("utf8");
-    const reviewedBinary = reviewedBinaryPaths.has(relativePath);
+    const reviewedBinary = assertReviewedBinary(relativePath, digest, text, bundle);
     if (
       !reviewedBinary
       && (forbiddenContent.test(text)
@@ -197,7 +288,7 @@ async function collectFiles(bundle) {
   }
 
   await visit(bundle);
-  files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  files.sort((left, right) => comparePaths(left.path, right.path));
   return files;
 }
 
@@ -222,6 +313,10 @@ async function assertInventoryOutput(bundle, output, { allowExisting = false } =
 async function buildInventory(bundle, output, { allowExisting = false } = {}) {
   await assertInventoryOutput(bundle, output, { allowExisting });
   const files = await collectFiles(bundle);
+  for (const path of exactFiles) {
+    await requiredRegular(join(bundle, path), `canonical release file ${path}`);
+  }
+  await assertCanonicalDependencyClosure(bundle);
   for (const component of runtimeInventory) {
     await requiredRegular(join(bundle, component.path), `runtime inventory ${component.path}`);
   }

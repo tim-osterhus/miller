@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  cp,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readlink,
+  readdir,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,13 +29,33 @@ async function makeBundle() {
   const output = join(root, ".artifacts", "release", "inventory.json");
   const files = [
     "Contents/Helpers/MillerCapabilityBridge",
+    "Contents/MacOS/Miller",
+    "Contents/Info.plist",
+    "Contents/_CodeSignature/CodeResources",
+    "Contents/Resources/Gateway/app/codex-models.mjs",
+    "Contents/Resources/Gateway/app/credential-store.mjs",
+    "Contents/Resources/Gateway/app/protocol.mjs",
+    "Contents/Resources/Gateway/app/providers.mjs",
+    "Contents/Resources/Gateway/app/reasoning.mjs",
     "Contents/Resources/Gateway/app/server.mjs",
+    "Contents/Resources/Gateway/app/strict-json.mjs",
     "Contents/Resources/Gateway/runtime/node",
+    "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
+    "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
+    "Contents/Resources/Legal/LICENSE",
+    "Contents/Resources/Legal/NOTICE",
+    "Contents/Resources/Legal/PROVENANCE.md",
+    "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+    "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt",
+    "Contents/Resources/Legal/Miller.spdx.json",
   ];
   for (const relativePath of files) {
     const path = join(bundle, relativePath);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `fixture:${relativePath}\n`);
+    const contents = relativePath.endsWith("credential-store.mjs")
+      ? await readFile(join(repoRoot, "Gateway", "src", "credential-store.mjs"))
+      : `fixture:${relativePath}\n`;
+    await writeFile(path, contents);
   }
   for (const dependency of [
     "@miller/pi-mvp-overlay",
@@ -74,6 +97,36 @@ test("release inventory has an explicit external self-exclusion", async () => {
       scope: "release-root",
       reason: "inventory is outside Miller.app and is never part of its file set",
     });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("release inventory generation rejects an incomplete canonical bundle", async () => {
+  const fixture = await makeBundle();
+  try {
+    await rm(
+      join(fixture.bundle, "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png"),
+    );
+    const result = runInventory([fixture.bundle, fixture.output]);
+    assert.notEqual(result.status, 0, "incomplete canonical bundle was accepted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("release inventory generation rejects a neutral extra under an allowed root", async () => {
+  const fixture = await makeBundle();
+  try {
+    await writeFile(
+      join(
+        fixture.bundle,
+        "Contents/Resources/Miller_MillerApp.bundle/neutral.bin",
+      ),
+      "synthetic neutral artifact\n",
+    );
+    const result = runInventory([fixture.bundle, fixture.output]);
+    assert.notEqual(result.status, 0, "neutral allowed-root extra was accepted");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -206,6 +259,19 @@ test("qualification preflight clears stale readiness and requires measurements",
   assert.match(script, /deterministic_route_codex_typed/);
   assert.match(script, /deterministic_route_codex_live_sideband/);
   assert.match(script, /deterministic_route_pi_gateway/);
+  assert.match(script, /report_committed/);
+  assert.match(script, /assert_cleanup_boundary[\s\S]*report_committed/);
+});
+
+test("qualification discovers baseline identities without literal owner PIDs", async () => {
+  const script = await readFile(
+    join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
+    "utf8",
+  );
+  assert.doesNotMatch(script, /99733|99795/);
+  assert.match(script, /discover_baseline/);
+  assert.match(script, /baseline_executable_hash/);
+  assert.match(script, /owned_process_tree/);
 });
 
 test("qualification captures baseline identity, owned process trees, and SQLite sidecars", async () => {
@@ -302,6 +368,11 @@ test("Node runtime acquisition is bounded and removes partial downloads", async 
     await readFile(join(repoRoot, "scripts", "run-headless-release-qualification.sh"), "utf8"),
     /bootstrap-gateway-dependencies/,
   );
+  const inventory = await readFile(join(repoRoot, "scripts", "release-inventory.mjs"), "utf8");
+  assert.match(inventory, /913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4/);
+  assert.match(inventory, /reviewed upstream Node exception|reviewedBinaryExceptions/i);
+  const provenance = await readFile(join(repoRoot, "PROVENANCE.md"), "utf8");
+  assert.match(provenance, /exact-hash.*Node|Node.*exact-hash/i);
 });
 
 test("dependency bootstrap has a deterministic zero-network dry run", async () => {
@@ -313,6 +384,103 @@ test("dependency bootstrap has a deterministic zero-network dry run", async () =
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MILLER_GATEWAY_DEPENDENCY_BOOTSTRAP_DRY_RUN=1/);
   assert.doesNotMatch(result.stdout + result.stderr, /npm|https?:\/\//i);
+});
+
+test("dependency bootstrap stages safely and preserves pre-existing roots on failure", async () => {
+  const script = await readFile(
+    join(repoRoot, "scripts", "bootstrap-gateway-dependencies.sh"),
+    "utf8",
+  );
+  assert.match(script, /MILLER_GATEWAY_BOOTSTRAP_TEST_ROOT/);
+  assert.match(script, /stage.*sibling|sibling.*stage/i);
+  assert.match(script, /O_NOFOLLOW|symbolic-link ancestry|symlinked/i);
+  assert.match(
+    script,
+    /overlay_archive=.*pi-mvp-overlay-0\.82\.0-a3\.tgz[\s\S]*test ! -L "\$overlay_archive"/,
+  );
+  assert.match(script, /atomic|rename|mv -n|mv -f/s);
+  assert.match(script, /preserv.*pre-existing|pre-existing.*preserv/i);
+  assert.match(script, /cleanup_partial/);
+});
+
+test("dependency bootstrap failure is offline, cleans staging, and preserves cache", async () => {
+  const root = await mkdtemp("/private/tmp/miller-task18-bootstrap-");
+  const gateway = join(root, "Gateway");
+  const cache = join(root, ".cache", "npm-bootstrap");
+  try {
+    await mkdir(gateway, { recursive: true });
+    await mkdir(cache, { recursive: true });
+    await mkdir(join(gateway, "vendor"), { recursive: true });
+    await cp(join(repoRoot, "Gateway", "package.json"), join(gateway, "package.json"));
+    await cp(join(repoRoot, "Gateway", "package-lock.json"), join(gateway, "package-lock.json"));
+    await cp(
+      join(repoRoot, "Gateway", "vendor", "pi-mvp-overlay-0.82.0-a3.tgz"),
+      join(gateway, "vendor", "pi-mvp-overlay-0.82.0-a3.tgz"),
+    );
+    await writeFile(join(cache, "sentinel"), "preserve\n");
+    const result = spawnSync(
+      "/bin/zsh",
+      [join(repoRoot, "scripts", "bootstrap-gateway-dependencies.sh")],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MILLER_GATEWAY_BOOTSTRAP_TEST_ROOT: root,
+          MILLER_GATEWAY_BOOTSTRAP_TEST_FAIL_AFTER_STAGE: "1",
+          HOME: "/nonexistent",
+        },
+      },
+    );
+    assert.equal(result.status, 42, result.stderr);
+    await assert.rejects(lstat(join(gateway, "node_modules")));
+    assert.equal(await readFile(join(cache, "sentinel"), "utf8"), "preserve\n");
+    assert.deepEqual(
+      (await readdir(gateway)).sort(),
+      ["package-lock.json", "package.json", "vendor"],
+    );
+    assert.deepEqual(await readdir(join(root, ".cache")), ["npm-bootstrap"]);
+    assert.doesNotMatch(result.stdout + result.stderr, /npm ci|https?:\/\//i);
+
+    const overlay = join(gateway, "vendor", "pi-mvp-overlay-0.82.0-a3.tgz");
+    await unlink(overlay);
+    await symlink(
+      join(repoRoot, "Gateway", "vendor", "pi-mvp-overlay-0.82.0-a3.tgz"),
+      overlay,
+    );
+    const linkedTarget = spawnSync(
+      "/bin/zsh",
+      [join(repoRoot, "scripts", "bootstrap-gateway-dependencies.sh")],
+      {
+        encoding: "utf8",
+        env: { ...process.env, MILLER_GATEWAY_BOOTSTRAP_TEST_ROOT: root },
+      },
+    );
+    assert.notEqual(linkedTarget.status, 0);
+    assert.equal((await lstat(overlay)).isSymbolicLink(), true);
+
+    await rm(gateway, { recursive: true, force: true });
+    const target = join(root, "gateway-target");
+    await mkdir(target, { recursive: true });
+    await symlink(target, gateway);
+    const linked = spawnSync(
+      "/bin/zsh",
+      [join(repoRoot, "scripts", "bootstrap-gateway-dependencies.sh")],
+      {
+        encoding: "utf8",
+        env: { ...process.env, MILLER_GATEWAY_BOOTSTRAP_TEST_ROOT: root },
+      },
+    );
+    assert.notEqual(linked.status, 0);
+    assert.equal((await lstat(gateway)).isSymbolicLink(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("standalone provenance rejects unexpected dependency roots", async () => {
+  const script = await readFile(join(repoRoot, "scripts", "verify-provenance.sh"), "utf8");
+  assert.match(script, /unexpected.*dependency root|top-level.*dependency root/i);
+  assert.match(script, /expected.*@miller|@miller.*openai.*partial-json/s);
 });
 
 test("application SBOM attributes MCP through MillerApp and MillerCapabilities", async () => {
@@ -328,6 +496,79 @@ test("application SBOM attributes MCP through MillerApp and MillerCapabilities",
     entry.spdxElementId === "SPDXRef-Package-MillerCapabilities"
       && entry.relatedSpdxElement === "SPDXRef-Package-MCPSwiftSDK",
   ));
+  assert.ok(sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-Miller"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MCPSwiftSDK",
+  ));
+  assert.match(
+    JSON.stringify(sbom.packages.find(({ name }) => name === "MCP Swift SDK")),
+    /MCP.*(Apache|MIT)/i,
+  );
+  assert.match(
+    await readFile(join(repoRoot, "Gateway", "vendor", "LICENSES", "mcp-swift-sdk-LICENSE.txt"), "utf8"),
+    /Apache License/i,
+  );
+  assert.match(
+    await readFile(join(repoRoot, "scripts", "package-dev-app.sh"), "utf8"),
+    /mcp-swift-sdk-LICENSE\.txt/,
+  );
+});
+
+test("qualification names idle native Miller RSS without broker attribution", async () => {
+  const script = await readFile(
+    join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
+    "utf8",
+  );
+  assert.match(script, /Idle native Miller app RSS/);
+  assert.doesNotMatch(script, /Idle native Miller broker\/adapter RSS/);
+});
+
+test("headless readiness requires parent-shell resource measurements", async () => {
+  const script = await readFile(
+    join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
+    "utf8",
+  );
+  assert.match(script, /run_measurement_check/);
+  assert.doesNotMatch(script, /run_check idle_cold measure_launch/);
+  assert.match(script, /assert_measurements/);
+  assert.match(script, /cold_app_rss_kib/);
+});
+
+test("source runtime path is computed from the system temporary directory", async () => {
+  const source = await readFile(
+    join(repoRoot, "Sources", "MillerCapabilities", "CapabilityRPCServer.swift"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /\/private\/tmp\/ai\.millrace\.miller/);
+  assert.match(source, /temporaryDirectory/);
+});
+
+test("bridge lease metadata binds PID reuse to process identity", async () => {
+  const source = await readFile(
+    join(repoRoot, "Sources", "MillerCapabilities", "CapabilityRPCServer.swift"),
+    "utf8",
+  );
+  const clean = await readFile(join(repoRoot, "scripts", "clean.sh"), "utf8");
+  assert.match(source, /processLeaseMetadataName|bridge\.lease/);
+  assert.match(source, /start/);
+  assert.match(source, /executable/);
+  assert.match(clean, /bridge\.lease/);
+  assert.match(clean, /lease_start|metadata_start/);
+});
+
+test("public Task 18 plan contains no private donor paths", async () => {
+  const plan = await readFile(
+    join(repoRoot, "docs", "superpowers", "plans", "2026-08-05-miller-v0.1.1-capabilities-voice-history.md"),
+    "utf8",
+  );
+  assert.doesNotMatch(plan, /\/Users\/|kindly-macmini|Desktop\/bonzo-dashboard/);
+});
+
+test("package-release enforces a closed release-root whitelist", async () => {
+  const script = await readFile(join(repoRoot, "scripts", "package-release-app.sh"), "utf8");
+  assert.match(script, /release.*whitelist|closed.*release|allowed.*release/i);
+  assert.match(script, /unexpected.*release|release.*unexpected/i);
+  assert.match(script, /package-measurement\.env/);
 });
 
 test("provenance is bound to the tracked sanitized A1 manifest", async () => {
@@ -352,6 +593,14 @@ test("the named three-route E2E is bounded and uses one local read-only tool", a
   assert.match(script, /local MCP fixture|read-only MCP fixture/i);
   assert.match(script, /miller_mcp\/task18\/read_only_lookup/);
   assert.match(script, /typed.*sideband.*Pi|Pi.*typed.*sideband/s);
+});
+
+test("the Codex fixture keeps its MCP client beside bundled fixture resources", async () => {
+  const fixturePath = join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "fake-codex-app-server.mjs");
+  const fixture = await readFile(fixturePath, "utf8");
+  assert.match(fixture, /from ["']\.\/task18-mcp-client\.mjs["']/);
+  await readFile(join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "task18-mcp-client.mjs"), "utf8");
+  await readFile(join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "read-only-mcp-server.mjs"), "utf8");
 });
 
 test("Codex prerequisite docs distinguish protocol evidence from tested runtime", async () => {

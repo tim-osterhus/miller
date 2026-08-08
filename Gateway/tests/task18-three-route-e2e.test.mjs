@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +23,10 @@ const codexFixture = join(
   "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs",
 );
 const gatewayFixture = join(gatewayRoot, "src/server.mjs");
+const { callTask18ReadOnlyMCP } = await import(pathToFileURL(mcpFixture.replace(
+  "read-only-mcp-server.mjs",
+  "task18-mcp-client.mjs",
+)).href);
 
 function lineClient(command, args, options = {}) {
   const child = spawn(command, args, {
@@ -65,40 +70,14 @@ function lineClient(command, args, options = {}) {
   };
 }
 
-async function exerciseLocalMCP(root) {
-  const client = lineClient(node, [mcpFixture], {
-    env: { MILLER_MCP_FIXTURE_ROOT: root },
-  });
-  try {
-    client.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: { protocolVersion: "2025-06-18" },
-    });
-    await client.waitFor((value) => value.id === 1);
-    client.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-    client.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-    const listed = await client.waitFor((value) => value.id === 2);
-    assert.ok(listed.result.tools.some((tool) => tool.name === "lookup_note"));
-    client.send({
-      jsonrpc: "2.0",
-      id: 3,
-      method: "tools/call",
-      params: { name: "lookup_note", arguments: {} },
-    });
-    const called = await client.waitFor((value) => value.id === 3);
-    assert.equal(called.result.isError, false);
-    assert.match(called.result.content[0].text, /^lookup_note:ok$/);
-    return called.result.content[0].text;
-  } finally {
-    await client.close();
-  }
-}
-
-async function runCodexTyped(root, localResult) {
+async function runCodexTyped(root, auditPath) {
   const client = lineClient(node, [codexFixture, "typed-task18-three-route"], {
-    env: { HOME: root },
+    env: {
+      HOME: root,
+      MILLER_MCP_FIXTURE_ROOT: root,
+      MILLER_MCP_FIXTURE_AUDIT_PATH: auditPath,
+      MILLER_TASK18_ROUTE: "typed",
+    },
   });
   try {
     client.send({
@@ -124,7 +103,7 @@ async function runCodexTyped(root, localResult) {
       method: "turn/start",
       params: {
         threadId: "typed-thread-1",
-        input: [{ type: "text", text: `${toolID}:${localResult}` }],
+        input: [{ type: "text", text: toolID }],
         approvalPolicy: "never",
       },
     });
@@ -140,7 +119,7 @@ async function runCodexTyped(root, localResult) {
     );
     assert.equal(completedTool.params.item.server, "miller_mcp");
     assert.equal(completedTool.params.item.tool, "task18/read_only_lookup");
-    assert.equal(completedTool.params.item.result?.content?.[0]?.text, localResult);
+    assert.equal(completedTool.params.item.result?.content?.[0]?.text, "lookup_note:ok");
     const completed = await client.waitFor(
       (value) => value.method === "turn/completed",
     );
@@ -150,7 +129,7 @@ async function runCodexTyped(root, localResult) {
   }
 }
 
-async function runCodexLiveSideband(root, localResult) {
+async function runCodexLiveSideband(root, auditPath) {
   const codexHome = join(root, "codex-home");
   await mkdir(codexHome, { recursive: true });
   await writeFile(
@@ -159,7 +138,13 @@ async function runCodexLiveSideband(root, localResult) {
     { mode: 0o600 },
   );
   const client = lineClient(node, [codexFixture, "realtime-task18-three-route"], {
-    env: { HOME: root, CODEX_HOME: codexHome },
+    env: {
+      HOME: root,
+      CODEX_HOME: codexHome,
+      MILLER_MCP_FIXTURE_ROOT: root,
+      MILLER_MCP_FIXTURE_AUDIT_PATH: auditPath,
+      MILLER_TASK18_ROUTE: "sideband",
+    },
   });
   try {
     client.send({ id: "live-init", method: "initialize", params: {} });
@@ -190,7 +175,7 @@ async function runCodexLiveSideband(root, localResult) {
         version: "v3",
         voice: null,
         outputModality: "audio",
-        prompt: "Use " + toolID + " with local result " + localResult + ".",
+        prompt: toolID,
         transport: {
           type: "webrtc",
           sdp: "v=0\r\nm=audio 9\r\nm=application 9\r\n",
@@ -212,7 +197,7 @@ async function runCodexLiveSideband(root, localResult) {
     );
     assert.equal(completedTool.params.item.server, "miller_mcp");
     assert.equal(completedTool.params.item.tool, "task18/read_only_lookup");
-    assert.equal(completedTool.params.item.result?.content?.[0]?.text, localResult);
+    assert.equal(completedTool.params.item.result?.content?.[0]?.text, "lookup_note:ok");
     const closed = await client.waitFor(
       (value) => value.method === "thread/realtime/closed",
     );
@@ -234,16 +219,21 @@ function sse(response, chunks) {
   response.end("data: [DONE]\n\n");
 }
 
-async function runPiGateway(root, localResult) {
+async function runPiGateway(root, auditPath) {
   let requests = 0;
   const provider = createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
-    request.on("end", () => {
+    request.on("end", async () => {
       JSON.parse(body);
       requests += 1;
       if (requests === 1) {
+        const fixtureResult = await callTask18ReadOnlyMCP({
+          root,
+          auditPath,
+          route: "pi",
+        });
         sse(response, [
           {
             choices: [{
@@ -251,7 +241,10 @@ async function runPiGateway(root, localResult) {
                 tool_calls: [{
                   index: 0,
                   id: "task18-provider-call",
-                  function: { name: "miller_tool_0", arguments: "{}" },
+                  function: {
+                    name: "miller_tool_0",
+                    arguments: JSON.stringify({ fixture_result: fixtureResult }),
+                  },
                 }],
               },
               finish_reason: null,
@@ -305,7 +298,7 @@ async function runPiGateway(root, localResult) {
         credential_ref: credentialRef,
       },
       context: [],
-      user_text: toolID + ":" + localResult,
+      user_text: toolID,
       tools: [{
         capability_id: toolID,
         name: "miller_tool_0",
@@ -317,6 +310,7 @@ async function runPiGateway(root, localResult) {
       (value) => value.type === "reasoning.tool_call",
     );
     assert.equal(toolCall.capability_id, toolID);
+    assert.equal(toolCall.arguments.fixture_result, "lookup_note:ok");
     client.send({
       ...base,
       type: "reasoning.tool_result",
@@ -325,7 +319,7 @@ async function runPiGateway(root, localResult) {
       generation: 1,
       call_id: toolCall.call_id,
       outcome: "succeeded",
-      result: { value: "synthetic_lookup_result" },
+      result: { value: toolCall.arguments.fixture_result },
     });
     await client.waitFor((value) => value.type === "reasoning.completed");
     assert.equal(requests, 2);
@@ -340,11 +334,24 @@ async function runPiGateway(root, localResult) {
 test("Task 18 one-tool three-route E2E", async () => {
   const root = await mkdtemp(join(tmpdir(), "miller-task18-e2e-"));
   try {
-    const localResult = await exerciseLocalMCP(root);
     const route = process.env.MILLER_TASK18_ROUTE ?? "all";
-    if (route === "typed" || route === "all") await runCodexTyped(root, localResult);
-    if (route === "sideband" || route === "all") await runCodexLiveSideband(root, localResult);
-    if (route === "pi" || route === "all") await runPiGateway(root, localResult);
+    const selectedRoutes = route === "all" ? ["typed", "sideband", "pi"] : [route];
+    for (const selectedRoute of selectedRoutes) {
+      const auditPath = join(root, `${selectedRoute}-mcp-audit.jsonl`);
+      if (selectedRoute === "typed") await runCodexTyped(root, auditPath);
+      if (selectedRoute === "sideband") await runCodexLiveSideband(root, auditPath);
+      if (selectedRoute === "pi") await runPiGateway(root, auditPath);
+      const records = (await readFile(auditPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(records, [{
+        route: selectedRoute,
+        tool: "lookup_note",
+        result: "lookup_note:ok",
+      }]);
+    }
     assert.ok(["typed", "sideband", "pi", "all"].includes(route));
   } finally {
     await rm(root, { recursive: true, force: true });

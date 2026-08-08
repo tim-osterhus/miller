@@ -22,10 +22,11 @@ public struct CapabilityRPCEndpoint: Sendable {
 public enum CapabilityRPCRuntime {
     public static let managedChildName = "capability-bridge"
     public static let processLeaseName = "bridge.pid"
+    public static let processLeaseMetadataName = "bridge.lease"
 
     public static var defaultTrustedParent: URL {
-        URL(
-            filePath: "/private/tmp/ai.millrace.miller-\(getuid())",
+        FileManager.default.temporaryDirectory.appending(
+            path: "ai.millrace.miller-\(getuid())",
             directoryHint: .isDirectory
         )
     }
@@ -39,6 +40,110 @@ public enum CapabilityRPCRuntime {
             path: managedChildName,
             directoryHint: .isDirectory
         )
+    }
+
+    public static func currentProcessLeaseMetadata() throws -> String {
+        let executable = try currentExecutablePath()
+        let start = try currentProcessStartDescription()
+        return [
+            "pid=\(getpid())",
+            "uid=\(geteuid())",
+            "ppid=\(getppid())",
+            "start=\(start)",
+            "exec=\(executable)",
+            "",
+        ].joined(separator: "\n")
+    }
+
+    private static func currentExecutablePath() throws -> String {
+        guard let raw = CommandLine.arguments.first, !raw.isEmpty else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        let currentDirectory = URL(
+            filePath: FileManager.default.currentDirectoryPath,
+            directoryHint: .isDirectory
+        )
+        let candidate = raw.hasPrefix("/")
+            ? URL(filePath: raw).standardizedFileURL
+            : URL(filePath: raw, relativeTo: currentDirectory).standardizedFileURL
+        var value = stat()
+        guard candidate.path.hasPrefix("/"),
+              lstat(candidate.path, &value) == 0,
+              (value.st_mode & S_IFMT) == S_IFREG,
+              value.st_uid == geteuid(),
+              access(candidate.path, X_OK) == 0
+        else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        return candidate.path
+    }
+
+    private static func currentProcessStartDescription() throws -> String {
+        let output = Pipe()
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/ps")
+        process.arguments = ["-p", "\(getpid())", "-o", "lstart="]
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw CapabilityRPCError.socketFailure
+        }
+        guard process.terminationStatus == 0,
+              let value = String(
+                  data: output.fileHandleForReading.readDataToEndOfFile(),
+                  encoding: .utf8
+              )?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              !value.contains("\n")
+        else { throw CapabilityRPCError.socketFailure }
+        return value
+    }
+
+    fileprivate static func createExclusiveLeaseFile(
+        at url: URL,
+        payload: Data
+    ) throws -> Int32 {
+        let descriptor = open(
+            url.path,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+            mode_t(0o600)
+        )
+        guard descriptor >= 0 else {
+            throw CapabilityRPCError.unsafeRuntimeRoot
+        }
+        do {
+            var value = stat()
+            guard fstat(descriptor, &value) == 0,
+                  (value.st_mode & S_IFMT) == S_IFREG,
+                  value.st_uid == geteuid(),
+                  (value.st_mode & 0o777) == 0o600
+            else { throw CapabilityRPCError.unsafeRuntimeRoot }
+            var offset = 0
+            while offset < payload.count {
+                let written = payload.withUnsafeBytes { bytes in
+                    guard let base = bytes.baseAddress else { return 0 }
+                    return Darwin.write(
+                        descriptor,
+                        base.advanced(by: offset),
+                        payload.count - offset
+                    )
+                }
+                if written > 0 {
+                    offset += written
+                } else if errno != EINTR {
+                    throw CapabilityRPCError.socketFailure
+                }
+            }
+            guard fsync(descriptor) == 0 else {
+                throw CapabilityRPCError.socketFailure
+            }
+            return descriptor
+        } catch {
+            Darwin.close(descriptor)
+            unlink(url.path)
+            throw error
+        }
     }
 
     public static func prepareManagedRoot(
@@ -161,19 +266,25 @@ public final class CapabilityRPCBridgeProcessLease: @unchecked Sendable {
     public let url: URL
     private let runtimeRoot: URL
     private let trustedParent: URL
+    private let metadataURL: URL
     private let lock = NSLock()
     private var descriptor: Int32
+    private var metadataDescriptor: Int32
 
     private init(
         url: URL,
         runtimeRoot: URL,
         trustedParent: URL,
-        descriptor: Int32
+        descriptor: Int32,
+        metadataURL: URL,
+        metadataDescriptor: Int32
     ) {
         self.url = url
         self.runtimeRoot = runtimeRoot
         self.trustedParent = trustedParent
+        self.metadataURL = metadataURL
         self.descriptor = descriptor
+        self.metadataDescriptor = metadataDescriptor
     }
 
     public static func acquire(trustedParent: URL) throws -> Self {
@@ -184,35 +295,32 @@ public final class CapabilityRPCBridgeProcessLease: @unchecked Sendable {
             trustedParent: trustedParent
         )
         let url = root.appending(path: CapabilityRPCRuntime.processLeaseName)
-        let descriptor = open(
-            url.path,
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
-            mode_t(0o600)
+        let metadataURL = root.appending(
+            path: CapabilityRPCRuntime.processLeaseMetadataName
         )
-        guard descriptor >= 0 else { throw CapabilityRPCError.unsafeRuntimeRoot }
+        let metadataDescriptor = try CapabilityRPCRuntime
+            .createExclusiveLeaseFile(
+                at: metadataURL,
+                payload: Data(
+                    try CapabilityRPCRuntime.currentProcessLeaseMetadata().utf8
+                )
+            )
         do {
-            var value = stat()
-            guard fstat(descriptor, &value) == 0,
-                  (value.st_mode & S_IFMT) == S_IFREG,
-                  value.st_uid == geteuid(),
-                  (value.st_mode & 0o777) == 0o600
-            else { throw CapabilityRPCError.unsafeRuntimeRoot }
-            let payload = Data("\(getpid())\n".utf8)
-            let written = payload.withUnsafeBytes { bytes in
-                Darwin.write(descriptor, bytes.baseAddress, bytes.count)
-            }
-            guard written == payload.count, fsync(descriptor) == 0 else {
-                throw CapabilityRPCError.socketFailure
-            }
+            let descriptor = try CapabilityRPCRuntime.createExclusiveLeaseFile(
+                at: url,
+                payload: Data("\(getpid())\n".utf8)
+            )
             return Self(
                 url: url,
                 runtimeRoot: root,
                 trustedParent: trustedParent,
-                descriptor: descriptor
+                descriptor: descriptor,
+                metadataURL: metadataURL,
+                metadataDescriptor: metadataDescriptor
             )
         } catch {
-            Darwin.close(descriptor)
-            unlink(url.path)
+            Darwin.close(metadataDescriptor)
+            unlink(metadataURL.path)
             throw error
         }
     }
@@ -220,25 +328,36 @@ public final class CapabilityRPCBridgeProcessLease: @unchecked Sendable {
     public func release() {
         lock.lock()
         let held = descriptor
+        let heldMetadata = metadataDescriptor
         descriptor = -1
+        metadataDescriptor = -1
         lock.unlock()
-        guard held >= 0 else { return }
 
-        var heldValue = stat()
-        var pathValue = stat()
-        if fstat(held, &heldValue) == 0,
-           lstat(url.path, &pathValue) == 0,
-           (pathValue.st_mode & S_IFMT) == S_IFREG,
-           heldValue.st_dev == pathValue.st_dev,
-           heldValue.st_ino == pathValue.st_ino
-        {
-            unlink(url.path)
+        if heldMetadata >= 0 {
+            unlinkIfHeld(metadataURL, descriptor: heldMetadata)
+            Darwin.close(heldMetadata)
         }
-        Darwin.close(held)
+        if held >= 0 {
+            unlinkIfHeld(url, descriptor: held)
+            Darwin.close(held)
+        }
         try? CapabilityRPCRuntime.removeManagedRoot(
             runtimeRoot,
             trustedParent: trustedParent
         )
+    }
+
+    private func unlinkIfHeld(_ file: URL, descriptor: Int32) {
+        var heldValue = stat()
+        var pathValue = stat()
+        if fstat(descriptor, &heldValue) == 0,
+           lstat(file.path, &pathValue) == 0,
+           (pathValue.st_mode & S_IFMT) == S_IFREG,
+           heldValue.st_dev == pathValue.st_dev,
+           heldValue.st_ino == pathValue.st_ino
+        {
+            unlink(file.path)
+        }
     }
 
     deinit { release() }

@@ -4,4 +4,5 @@ Miller-authored packaging and the bounded A3 transformation are Apache-2.0.
 Retained Pi AI 0.82.0 source is MIT-licensed and derives from commit 083e61621276bff9f6faefab87ce07fcd98734e2.
 OpenAI 6.26.0 is Apache-2.0.
 partial-json 0.1.7 is MIT.
+MCP Swift SDK 0.12.1 retains its upstream mixed Apache-2.0/MIT transition license text.
 The exact license texts and hashes are retained with this distribution.

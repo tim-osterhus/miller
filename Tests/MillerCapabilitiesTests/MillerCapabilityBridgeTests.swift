@@ -309,6 +309,43 @@ struct MillerCapabilityBridgeTests {
         #expect(symlink.status != 0)
         #expect(FileManager.default.fileExists(atPath: destination.path))
     }
+
+    @Test
+    func cleanupRefusesAReusedPIDWithAStaleLeaseIdentity() async throws {
+        let parent = try cleanTrustedParent()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let server = CapabilityRPCServer(trustedParent: parent) { _ in
+            .catalog([])
+        }
+        let endpoint = try await server.start()
+        let bridge = try launchBridgeSubprocess(
+            executable: try bridgeExecutableURL(),
+            endpoint: endpoint,
+            providerProfileID: UUID()
+        )
+        defer { bridge.forceCleanup() }
+
+        #expect(await waitForLease(in: parent))
+        let leaseURL = CapabilityRPCRuntime.managedRoot(in: parent)
+            .appending(path: CapabilityRPCRuntime.processLeaseMetadataName)
+        #expect(FileManager.default.fileExists(atPath: leaseURL.path))
+        var metadata = try String(contentsOf: leaseURL, encoding: .utf8)
+        metadata = metadata.replacingOccurrences(
+            of: #"(?m)^start=.*$"#,
+            with: "start=stale",
+            options: String.CompareOptions.regularExpression
+        )
+        try Data(metadata.utf8).write(to: leaseURL)
+        _ = chmod(leaseURL.path, 0o600)
+
+        let clean = try runBridgeRuntimeClean(parent: parent)
+        #expect(clean.status != 0)
+        #expect(bridge.process.isRunning)
+
+        bridge.closeInput()
+        #expect(await waitForExit(bridge.process))
+        await server.stop()
+    }
 }
 
 private actor BridgeListProbe {

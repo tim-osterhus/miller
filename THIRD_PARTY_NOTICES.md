@@ -9,7 +9,9 @@ revision `a0ae212ebf6eab5f754c3129608bc5557637e605`.
 The upstream project is transitioning from MIT to Apache-2.0. Contributions
 are licensed under the applicable Apache-2.0 or MIT terms identified by the
 upstream `LICENSE` file. In v0.1.1 the SDK is statically linked through the
-Miller capability bridge; no SDK source tree is bundled.
+Miller capability bridge; no SDK source tree is bundled. The exact reviewed
+license text is packaged at
+`Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
 ## v0.1.1 application inventory
 

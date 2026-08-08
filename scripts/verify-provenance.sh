@@ -23,6 +23,7 @@ esac
 if [[ -n "$inventory_root" ]]; then
   case "$inventory_root" in
     "$repo_root/Gateway/node_modules"|\
+    "$repo_root/Gateway"/.miller-gateway-bootstrap-stage-*/node_modules|\
     "$repo_root/.artifacts/package-staging/Miller.app/Contents/Resources/Gateway/app/node_modules"|\
     "$repo_root/.artifacts/release-staging/Miller.app/Contents/Resources/Gateway/app/node_modules")
       ;;
@@ -87,6 +88,8 @@ const expectedLicenseHashes = {
     "cd519ad3d7e012427f978dfb2e3b92ee403d189d7b859ba6bf68fd7e12ca456f",
   "LICENSES/pi-ai-0.82.0-MIT.txt":
     "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
+  "LICENSES/mcp-swift-sdk-LICENSE.txt":
+    "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
 };
 const expectedBundleRoots = [
   "@miller/pi-mvp-overlay",
@@ -275,6 +278,12 @@ for (const name of ["openai", "partial-json"]) {
 }
 
 if (inventoryRoot) {
+  const expectedTopLevelRoots = ["@miller", "openai", "partial-json"];
+  assert.deepEqual(
+    (await readdir(inventoryRoot)).sort(comparePaths),
+    expectedTopLevelRoots,
+    "dependency root contains an unexpected top-level entry",
+  );
   const actualBundleInventory = await bundleInventoryUnder(inventoryRoot);
   assert.deepEqual(
     actualBundleInventory,
@@ -282,11 +291,6 @@ if (inventoryRoot) {
     "development bundle dependency inventory differs from the reviewed closure",
   );
   if (inventoryRoot !== join(gatewayRoot, "node_modules")) {
-    assert.deepEqual(
-      (await readdir(inventoryRoot)).sort(comparePaths),
-      ["@miller", "openai", "partial-json"],
-      "bundle has an unexpected dependency root",
-    );
     assert.deepEqual(
       (await readdir(join(inventoryRoot, "@miller"))).sort(comparePaths),
       ["pi-mvp-overlay"],

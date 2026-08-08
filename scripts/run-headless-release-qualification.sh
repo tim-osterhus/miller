@@ -11,6 +11,7 @@ measurement_root="$repo_root/.artifacts/headless-measurement"
 report_path="$repo_root/docs/qualification/v0.1.1-headless-report.md"
 package_measurement="$release_root/package-measurement.env"
 report_tmp_path=""
+report_committed=false
 qualification_failed=0
 package_measurement_status=NOT_RUN
 clean_build_duration_ms=NOT_RUN
@@ -32,6 +33,14 @@ typeset -A owned_ppid=()
 typeset -A owned_start=()
 typeset -A owned_exec=()
 typeset -A owned_executable_hash=()
+typeset -a owned_process_tree=()
+typeset -A qualification_owned_seen=()
+typeset -a qualification_owned_process_tree=()
+typeset -A qualification_owned_uid=()
+typeset -A qualification_owned_ppid=()
+typeset -A qualification_owned_start=()
+typeset -A qualification_owned_exec=()
+typeset -A qualification_owned_executable_hash=()
 
 baseline_miller_pid_record=NONE
 baseline_gateway_pid_record=NONE
@@ -89,6 +98,10 @@ safe_remove_measurement() {
     [[ ! -L "$report_tmp_path" ]] || exit 1
     rm -f -- "$report_tmp_path"
   fi
+  if [[ "$report_committed" != true && -e "$report_path" ]]; then
+    [[ ! -L "$report_path" && -f "$report_path" ]] || exit 1
+    rm -f -- "$report_path"
+  fi
 }
 trap safe_remove_measurement EXIT INT TERM
 
@@ -124,24 +137,34 @@ run_check() {
   local check_exit_code
   local finished_ms
   local log_path="$measurement_root/logs/$label.log"
+  local check_pid
   set +e
-  "$@" > "$log_path" 2>&1
+  "$@" > "$log_path" 2>&1 &
+  check_pid="$!"
+  for _ in {1..100}; do
+    record_process_tree "$check_pid" 2>/dev/null || true
+    kill -0 "$check_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  wait "$check_pid"
   check_exit_code="$?"
+  record_process_tree "$check_pid" 2>/dev/null || true
   set -e
   finished_ms="$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')"
   record_check "$label" "$check_exit_code" "$((finished_ms - started_ms))"
+  assert_owned_process_tree_stopped || qualification_failed=1
 }
 
 capture_identity_values() {
   local pid="$1"
   local identity_snapshot
   # Capture UID, parent, start time, and executable path before hashing.
-  identity_snapshot="$(ps -p "$pid" -o uid=,ppid=,lstart=,comm=)"
+  identity_snapshot="$(ps -p "$pid" -o uid=,ppid=,lstart=,comm=,command=)"
   [[ -n "$identity_snapshot" ]] || return 1
   observed_uid="$(ps -p "$pid" -o uid= | tr -d ' ')"
   observed_ppid="$(ps -p "$pid" -o ppid= | tr -d ' ')"
   observed_start="$(ps -p "$pid" -o lstart= | sed 's/^[[:space:]]*//')"
-  observed_exec="$(ps -p "$pid" -o comm= | sed 's/^[[:space:]]*//')"
+  observed_exec="$(ps -p "$pid" -o command= | sed 's/^[[:space:]]*//' | awk '{print $1}')"
   [[ "$observed_uid" == <1-> && "$observed_ppid" == <1-> ]] || return 1
   [[ -x "$observed_exec" && ! -L "$observed_exec" ]] || return 1
   observed_executable_hash="$(shasum -a 256 "$observed_exec" | awk '{print $1}')"
@@ -196,14 +219,24 @@ record_owned_process() {
   local pid="$1"
   [[ "$pid" == <1-> && "$pid" -gt 1 ]] || return 1
   (( $+owned_seen[$pid] )) && return 0
-  capture_identity_values "$pid"
+  capture_identity_values "$pid" || return 1
   owned_seen[$pid]=1
   owned_pids+=("$pid")
+  owned_process_tree+=("$pid")
   owned_uid[$pid]="$observed_uid"
   owned_ppid[$pid]="$observed_ppid"
   owned_start[$pid]="$observed_start"
   owned_exec[$pid]="$observed_exec"
   owned_executable_hash[$pid]="$observed_executable_hash"
+  if (( ! $+qualification_owned_seen[$pid] )); then
+    qualification_owned_seen[$pid]=1
+    qualification_owned_process_tree+=("$pid")
+    qualification_owned_uid[$pid]="$observed_uid"
+    qualification_owned_ppid[$pid]="$observed_ppid"
+    qualification_owned_start[$pid]="$observed_start"
+    qualification_owned_exec[$pid]="$observed_exec"
+    qualification_owned_executable_hash[$pid]="$observed_executable_hash"
+  fi
 }
 
 record_process_tree() {
@@ -224,6 +257,13 @@ assert_owned_identity() {
   [[ "$observed_start" == "$owned_start[$pid]" ]] || return 1
   [[ "$observed_exec" == "$owned_exec[$pid]" ]] || return 1
   [[ "$observed_executable_hash" == "$owned_executable_hash[$pid]" ]] || return 1
+}
+
+assert_owned_process_tree_stopped() {
+  local pid
+  for pid in "${owned_process_tree[@]}"; do
+    ! kill -0 "$pid" 2>/dev/null || return 1
+  done
 }
 
 stop_owned_process_tree() {
@@ -316,6 +356,7 @@ measure_launch() {
   owned_start=()
   owned_exec=()
   owned_executable_hash=()
+  owned_process_tree=()
   mkdir -p "$run_root/cache"
   database_before="$(sqlite_logical_bytes "$database")"
   cache_before="$(logical_file_bytes "$run_root/cache")"
@@ -350,13 +391,15 @@ measure_launch() {
   app_rss="$(ps -o rss= -p "$pid" | tr -d ' ')"
   [[ "$app_rss" == <1-> ]] || { stop_owned_process_tree "$pid"; return 1; }
   if [[ "$helper_process_state" == MEASURED ]]; then
-    helper_rss=0
+    local measured_helper_rss=0
     for child in "$owned_pids[@]"; do
       [[ "$child" == "$pid" ]] && continue
       local child_rss="$(ps -o rss= -p "$child" | tr -d ' ' || true)"
-      [[ "$child_rss" == <1-> ]] && helper_rss=$((helper_rss + child_rss))
+      [[ "$child_rss" == <1-> ]] || { stop_owned_process_tree "$pid"; return 1; }
+      measured_helper_rss=$((measured_helper_rss + child_rss))
     done
-    (( helper_rss > 0 )) || { stop_owned_process_tree "$pid"; return 1; }
+    (( measured_helper_rss > 0 )) || { stop_owned_process_tree "$pid"; return 1; }
+    helper_rss="$measured_helper_rss"
   fi
   database_after="$(sqlite_logical_bytes "$database")"
   cache_after="$(logical_file_bytes "$run_root/cache")"
@@ -382,8 +425,78 @@ measure_launch() {
   fi
 }
 
+run_measurement_check() {
+  local label="$1"
+  local measurement_label="$2"
+  local started_ms
+  local finished_ms
+  local measurement_exit_code
+  local log_path="$measurement_root/logs/$label.log"
+  started_ms="$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')"
+  set +e
+  # Keep this invocation in the qualification shell.  measure_launch writes
+  # the measured values into the parent shell's fields; running it through
+  # run_check would hide those assignments in a background subshell.
+  measure_launch "$measurement_label" > "$log_path" 2>&1
+  measurement_exit_code="$?"
+  set -e
+  finished_ms="$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')"
+  record_check "$label" "$measurement_exit_code" "$((finished_ms - started_ms))"
+  assert_owned_process_tree_stopped || qualification_failed=1
+}
+
+is_nonnegative_integer() {
+  [[ "$1" =~ '^[0-9]+$' ]]
+}
+
+is_signed_integer() {
+  [[ "$1" =~ '^-?[0-9]+$' ]]
+}
+
+assert_measurements() {
+  local value
+  for value in \
+    "$cold_storage_initialized_ms" "$warm_storage_initialized_ms" \
+    "$cold_app_rss_kib" "$warm_app_rss_kib" \
+    "$cold_process_tree_count" "$warm_process_tree_count"; do
+    is_nonnegative_integer "$value" || {
+      print -u2 "missing or invalid mandatory qualification measurement: $value"
+      return 1
+    }
+  done
+  for value in "$cold_database_growth_bytes" "$warm_database_growth_bytes" \
+               "$cold_cache_growth_bytes" "$warm_cache_growth_bytes"; do
+    is_signed_integer "$value" || {
+      print -u2 "missing or invalid logical growth measurement: $value"
+      return 1
+    }
+  done
+  [[ "$cold_helper_process_state" == EXPECTED_NOT_STARTED || \
+     "$cold_helper_process_state" == MEASURED ]] || return 1
+  [[ "$warm_helper_process_state" == EXPECTED_NOT_STARTED || \
+     "$warm_helper_process_state" == MEASURED ]] || return 1
+  [[ "$cold_provider_adapter_state" == EXPECTED_NOT_STARTED || \
+     "$cold_provider_adapter_state" == MEASURED ]] || return 1
+  [[ "$warm_provider_adapter_state" == EXPECTED_NOT_STARTED || \
+     "$warm_provider_adapter_state" == MEASURED ]] || return 1
+  if [[ "$cold_helper_process_state" == EXPECTED_NOT_STARTED ]]; then
+    [[ "$cold_helper_rss_kib" == NOT_RUN ]] || return 1
+  else
+    is_nonnegative_integer "$cold_helper_rss_kib" &&
+      (( cold_helper_rss_kib > 0 )) || return 1
+  fi
+  if [[ "$warm_helper_process_state" == EXPECTED_NOT_STARTED ]]; then
+    [[ "$warm_helper_rss_kib" == NOT_RUN ]] || return 1
+  else
+    is_nonnegative_integer "$warm_helper_rss_kib" &&
+      (( warm_helper_rss_kib > 0 )) || return 1
+  fi
+}
+
 assert_cleanup_boundary() {
-  local bridge_root="/private/tmp/ai.millrace.miller-$EUID/capability-bridge"
+  local system_temporary_parent="${TMPDIR:-/private/tmp}"
+  system_temporary_parent="${system_temporary_parent%/}"
+  local bridge_root="$system_temporary_parent/ai.millrace.miller-$EUID/capability-bridge"
   local pid
   test -d "$bundle_root" && test ! -L "$bundle_root"
   test -f "$inventory_path" && test ! -L "$inventory_path"
@@ -391,6 +504,7 @@ assert_cleanup_boundary() {
   test ! -e "$repo_root/.build"
   test ! -e "$repo_root/.cache"
   test ! -e "$repo_root/Gateway/node_modules"
+  test ! -e "$report_path"
   test ! -e "$repo_root/.build/vendor/wakeword"
   test ! -e "$repo_root/Gateway/vendor/wakeword"
   test ! -e "$bridge_root"
@@ -398,9 +512,44 @@ assert_cleanup_boundary() {
   test -z "$(find -P "$repo_root/.artifacts" -type l -print -quit 2>/dev/null || true)"
   test -z "$(find -P "$release_root" -type f -name .DS_Store -print -quit 2>/dev/null || true)"
   assert_all_baselines
-  for pid in "$owned_pids[@]"; do
+  for pid in "$qualification_owned_process_tree[@]"; do
     ! kill -0 "$pid" 2>/dev/null || return 1
   done
+}
+
+discover_baseline() {
+  local miller_executable="$bundle_root/Contents/MacOS/Miller"
+  local gateway_executable="$bundle_root/Contents/Resources/Gateway/runtime/node"
+  local gateway_script="$bundle_root/Contents/Resources/Gateway/app/server.mjs"
+  local pid
+  typeset -a discovered_miller=()
+  typeset -a discovered_gateway=()
+  while read -r pid; do
+    [[ -n "$pid" ]] && discovered_miller+=("$pid")
+  done < <(
+    ps -axo pid=,command= | awk -v expected="$miller_executable" \
+      '$2 == expected { print $1 }'
+  )
+  while read -r pid; do
+    [[ -n "$pid" ]] && discovered_gateway+=("$pid")
+  done < <(
+    ps -axo pid=,command= | awk \
+      -v expected="$gateway_executable" -v script="$gateway_script" \
+      '$2 == expected && index($0, script) > 0 { print $1 }'
+  )
+  (( ${#discovered_miller[@]} == 1 && ${#discovered_gateway[@]} == 1 )) || {
+    print -u2 "could not discover one exact baseline Miller/Gateway process pair"
+    return 1
+  }
+  baseline_miller_pids="${discovered_miller[1]}"
+  baseline_gateway_pids="${discovered_gateway[1]}"
+  baseline_helper_pids=""
+  # Capture every existing Gateway child before qualification starts.
+  record_baseline_process_tree "$baseline_miller_pids"
+  record_baseline_process_tree "$baseline_gateway_pids"
+  baseline_miller_pid_record="$baseline_miller_pids"
+  baseline_gateway_pid_record="$baseline_gateway_pids"
+  baseline_helper_pid_record=NONE
 }
 
 write_report() {
@@ -412,6 +561,10 @@ write_report() {
   local release_bytes="$(logical_file_bytes "$release_root")"
   local report_bytes
   local index=1
+  assert_measurements || {
+    qualification_failed=1
+    return 1
+  }
   (( qualification_failed == 0 )) || return 1
   [[ "$package_measurement_status" == PASS && "$clean_build_duration_ms" == <1-> ]] || return 1
   [[ "$(status_for_check deterministic_route_typed)" == PASS ]] || return 1
@@ -425,9 +578,9 @@ write_report() {
     printf 'This report is deterministic, synthetic, and sanitized. It makes no owner-visible claim and does not claim Developer ID signing, notarization, publication, real-provider behavior, microphone behavior, audio behavior, browser behavior, clipboard behavior, or account readiness.\n\n'
     printf '## Deterministic matrix\n\n'
     printf '| Evidence | Status | Explicit evidence |\n| --- | --- | --- |\n'
-    printf '| Same read-only tool through Codex typed / App Server | %s | named Task 18 three-route E2E, typed fake Codex App Server route, local MCP fixture, miller_mcp/task18/read_only_lookup |\n' "$(status_for_check deterministic_route_typed)"
-    printf '| Same read-only tool through Codex Live sideband / App Server | %s | named Task 18 three-route E2E, sideband fake Codex App Server route, local MCP fixture, same tool |\n' "$(status_for_check deterministic_route_sideband)"
-    printf '| Same read-only tool through Pi / Gateway | %s | named Task 18 three-route E2E, fake Pi provider through Gateway, local MCP fixture, same tool |\n' "$(status_for_check deterministic_route_pi)"
+    printf '| Same read-only tool through Codex typed / App Server | %s | explicit named route result: typed fake Codex App Server independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_typed)"
+    printf '| Same read-only tool through Codex Live sideband / App Server | %s | explicit named route result: GPT-Live sideband fake Codex App Server independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_sideband)"
+    printf '| Same read-only tool through Pi / Gateway | %s | explicit named route result: fake Pi provider through Gateway independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_pi)"
     printf '| Read-only automatic policy | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
     printf '| Ask-before-changes approval | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
     printf '| Fully trusted approval | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
@@ -455,7 +608,7 @@ write_report() {
     printf 'Clean-build duration: %s ms\nRelease app logical file size: %s bytes\n' "$clean_build_duration_ms" "$bundle_bytes"
     printf 'Application binary: %s bytes\nNode runtime: %s bytes\nGateway dependency logical bytes: %s\n' \
       "$app_binary_bytes" "$node_binary_bytes" "$dependency_bytes"
-    printf 'Idle native Miller broker/adapter RSS: cold %s KiB, warm %s KiB\n' "$cold_app_rss_kib" "$warm_app_rss_kib"
+    printf 'Idle native Miller app RSS (broker/helper not started): cold %s KiB, warm %s KiB\n' "$cold_app_rss_kib" "$warm_app_rss_kib"
     printf 'Idle Node helper RSS: cold %s (%s), warm %s (%s); provider adapter subprocesses: cold %s, warm %s\n' \
       "$cold_helper_rss_kib" "$cold_helper_process_state" "$warm_helper_rss_kib" "$warm_helper_process_state" \
       "$cold_provider_adapter_state" "$warm_provider_adapter_state"
@@ -467,16 +620,21 @@ write_report() {
     printf 'The preserve-release check passed only with the canonical release root retained. Build/cache roots, Gateway dependencies, wake inputs, sockets, unknown artifacts, .DS_Store files, and measurement-owned processes were absent; baseline processes remained unchanged.\n\n'
     printf 'Human microphone, audio, browser, clipboard, account, and real-provider rows remain NOT_RUN. No transcript text, audio, account secret, provider payload, socket, local filesystem location, or runtime log is retained in this report.\n'
   } > "$report_tmp_path"
-  report_bytes="$(stat -f %z "$report_tmp_path")"
-  local retained_bytes="$((release_bytes + report_bytes))"
-  RETAINED_BYTES="$retained_bytes" perl -0pi -e \
-    's/Post-cleanup retained bytes \(release inspection root plus this report\): PENDING bytes/Post-cleanup retained bytes (release inspection root plus this report): $ENV{RETAINED_BYTES} bytes/' \
-    "$report_tmp_path"
+  local retained_bytes
+  for _ in {1..3}; do
+    report_bytes="$(stat -f %z "$report_tmp_path")"
+    retained_bytes="$((release_bytes + report_bytes))"
+    RETAINED_BYTES="$retained_bytes" perl -0pi -e \
+      's/Post-cleanup retained bytes \(release inspection root plus this report\): (?:PENDING|[0-9]+) bytes/Post-cleanup retained bytes (release inspection root plus this report): $ENV{RETAINED_BYTES} bytes/' \
+      "$report_tmp_path"
+  done
+  assert_cleanup_boundary
+  grep -q '^Marker: MILLER_V0_1_1_READY_HUMAN_NOT_RUN$' "$report_tmp_path"
+  ! grep -E 'release-(closed|approved)|MILLER_.*(CLOSED|APPROVED)' "$report_tmp_path" >/dev/null
   [[ ! -e "$report_path" && ! -L "$report_path" ]] || return 1
-  mv -f -- "$report_tmp_path" "$report_path"
+  mv -- "$report_tmp_path" "$report_path"
   report_tmp_path=""
-  grep -q '^Marker: MILLER_V0_1_1_READY_HUMAN_NOT_RUN$' "$report_path"
-  ! grep -E 'release-(closed|approved)|MILLER_.*(CLOSED|APPROVED)' "$report_path" >/dev/null
+  report_committed=true
 }
 
 preflight_release_inputs() {
@@ -507,27 +665,14 @@ test -d "$repo_root/Gateway/node_modules" && test ! -L "$repo_root/Gateway/node_
 require_storage_headroom "deterministic-tests" 3145728
 mkdir -p "$measurement_root/logs"
 
-# Capture all baseline descendants and immutable identity fields. The explicit
-# PID checks protect the owner app and Gateway from measurement cleanup.
+# Capture all baseline descendants and immutable identity fields. Dynamic
+# discovery protects the owner app and Gateway from measurement cleanup.
 # Explicit route labels: deterministic_route_codex_typed,
 # deterministic_route_codex_live_sideband, deterministic_route_pi_gateway.
 # Matrix sources: MillerCapabilitiesTests, MillerLiveTests, MillerAppTests,
 # MillerStorageTests; fake Pi provider; read-only MCP fixture; state-changing approval;
 # unsupported tool model; selectable transcript composition; post-cleanup retained bytes.
-baseline_miller_pids="$(pgrep -f 'Miller.app/Contents/MacOS/Miller' || true)"
-baseline_gateway_pids="$(pgrep -f 'Gateway/app/server.mjs' || true)"
-baseline_helper_pids="$(pgrep -f 'Gateway/src/server.mjs|Gateway/src/fake-helper.mjs|Gateway/tests/' || true)"
-[[ " $baseline_miller_pids " == *" 99733 "* ]] || exit 1
-[[ " $baseline_gateway_pids " == *" 99795 "* ]] || exit 1
-for pid in $baseline_miller_pids; do [[ -n "$pid" ]] && record_baseline_process_tree "$pid"; done
-for pid in $baseline_gateway_pids; do [[ -n "$pid" ]] && record_baseline_process_tree "$pid"; done
-for pid in $baseline_helper_pids; do [[ -n "$pid" ]] && record_baseline_process_tree "$pid"; done
-baseline_miller_pid_record="$(print -r -- "$baseline_miller_pids" | tr '\n' ',' | sed 's/,$//')"
-baseline_gateway_pid_record="$(print -r -- "$baseline_gateway_pids" | tr '\n' ',' | sed 's/,$//')"
-baseline_helper_pid_record="$(print -r -- "$baseline_helper_pids" | tr '\n' ',' | sed 's/,$//')"
-[[ -n "$baseline_miller_pid_record" ]] || baseline_miller_pid_record=NONE
-[[ -n "$baseline_gateway_pid_record" ]] || baseline_gateway_pid_record=NONE
-[[ -n "$baseline_helper_pid_record" ]] || baseline_helper_pid_record=NONE
+discover_baseline
 
 run_check deterministic_full "$repo_root/scripts/test.sh"
 run_check deterministic_route_typed "$repo_root/scripts/run-task18-three-route-e2e.sh" typed
@@ -536,8 +681,8 @@ run_check deterministic_route_pi "$repo_root/scripts/run-task18-three-route-e2e.
 run_check pi_provider "$npm_path" --prefix "$repo_root/Gateway" test
 run_check provenance "$repo_root/scripts/verify-provenance.sh"
 run_check package_verifier "$repo_root/scripts/verify-release-package.sh" "$bundle_root"
-run_check idle_cold measure_launch cold
-run_check idle_warm measure_launch warm
+run_measurement_check idle_cold cold
+run_measurement_check idle_warm warm
 
 rm -f -- "$package_measurement"
 safe_remove_measurement
@@ -557,12 +702,5 @@ cleanup_proof_finished_ms="$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time *
 record_check cleanup_proof "$cleanup_proof_status" "$((cleanup_proof_finished_ms - cleanup_proof_started_ms))"
 
 write_report
-report_retained_root_bytes="$(( $(logical_file_bytes "$release_root") + $(stat -f %z "$report_path") ))"
-RETAINED_BYTES="$report_retained_root_bytes" perl -0pi -e \
-  's/Post-cleanup retained bytes \(release inspection root plus this report\): [0-9]+ bytes/Post-cleanup retained bytes (release inspection root plus this report): $ENV{RETAINED_BYTES} bytes/' \
-  "$report_path"
-[[ "$(grep -c '^Marker: MILLER_V0_1_1_READY_HUMAN_NOT_RUN$' "$report_path")" == 1 ]]
-[[ -z "$(find -P "$repo_root/.artifacts" -type l -print -quit 2>/dev/null || true)" ]]
-[[ -z "$(find -P "$release_root" -type f -name .DS_Store -print -quit 2>/dev/null || true)" ]]
-[[ -z "$(grep -E 'release-(closed|approved)|MILLER_.*(CLOSED|APPROVED)' "$report_path" || true)" ]]
+[[ "$report_committed" == true ]]
 printf 'MILLER_V0_1_1_READY_HUMAN_NOT_RUN\n'

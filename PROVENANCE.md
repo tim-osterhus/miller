@@ -370,3 +370,10 @@ extracts only `bin/node` and `LICENSE`, verifies their final bytes, copies them
 to `Miller.app/Contents/Resources/Gateway/runtime/`, and removes the archive
 and extraction root on every exit. npm, Corepack, headers, manuals, and other
 archive files are not copied.
+
+The bundled Node file has a narrowly reviewed exact-hash Node exception: the
+SHA-256 above is the only allowed Node runtime hash, and its known upstream
+build-path strings are attributable only to that exact official binary. The
+exception does not apply to Miller binaries, JavaScript, legal files, or any
+other hash; the final inventory and verifier reject private/build paths in all
+other shipped files.

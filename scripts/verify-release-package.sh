@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 bundle_root="${1:-$repo_root/.artifacts/release/Miller.app}"
+release_root="$bundle_root/.."
 plist="$bundle_root/Contents/Info.plist"
 gateway="$bundle_root/Contents/Resources/Gateway"
 legal="$bundle_root/Contents/Resources/Legal"
@@ -10,6 +11,20 @@ inventory="$(dirname "$bundle_root")/inventory.json"
 
 test -d "$bundle_root"
 test ! -L "$bundle_root"
+test -d "$release_root"
+test ! -L "$release_root"
+for retained in "$release_root"/*(DN); do
+  retained_name="$(basename "$retained")"
+  case "$retained_name" in
+    Miller.app|inventory.json|package-measurement.env)
+      test ! -L "$retained"
+      ;;
+    *)
+      print -u2 "unexpected release-root artifact: $retained"
+      exit 1
+      ;;
+  esac
+done
 test -f "$plist"
 test -x "$bundle_root/Contents/MacOS/Miller"
 bridge="$bundle_root/Contents/Helpers/MillerCapabilityBridge"
@@ -23,6 +38,11 @@ test -f "$gateway/app/node_modules/partial-json/package.json"
 test -f "$inventory"
 test ! -L "$inventory"
 for document in LICENSE NOTICE PROVENANCE.md THIRD_PARTY_NOTICES.md Miller.spdx.json; do
+  test -f "$legal/$document"
+done
+for document in \
+  mcp-swift-sdk-LICENSE.txt
+do
   test -f "$legal/$document"
 done
 
@@ -60,8 +80,17 @@ test -z "$(find "$bundle_root" \( \
 test -z "$(strings "$bundle_root/Contents/MacOS/Miller" \
   | grep -E 'GPT_LIVE_(HARNESS_SMOKE_TEXT_ONLY|OPERATOR_CLEANUP_OK)' \
   | head -n 1 || true)"
+test -z "$(strings "$bridge" \
+  | grep -E '/Users/|/private/tmp|Desktop/Millrace-Dev|\.build' \
+  | head -n 1 || true)"
 
 test "$("$gateway/runtime/node" --version)" = "v22.22.0"
+test "$(shasum -a 256 "$gateway/runtime/node" | awk '{print $1}')" = \
+  "913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
+test -z "$(strings "$gateway/runtime/node" \
+  | grep -E '/private/tmp|Desktop/Millrace-Dev|/Users/' \
+  | grep -Ev '/Users/admin/build/' \
+  | head -n 1 || true)"
 "$gateway/runtime/node" "$repo_root/scripts/release-inventory.mjs" \
   --verify "$bundle_root" "$inventory"
 codesign --verify --deep --strict "$bundle_root"
@@ -70,10 +99,12 @@ test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
   | sed -n 's/^Signature=//p' | head -1)" = \
   "$(codesign -dvvv "$bridge" 2>&1 \
   | sed -n 's/^Signature=//p' | head -1)"
-"$gateway/runtime/node" --input-type=module - "$legal/Miller.spdx.json" <<'EOF'
+"$gateway/runtime/node" --input-type=module - \
+  "$legal/Miller.spdx.json" "$legal/mcp-swift-sdk-LICENSE.txt" <<'EOF'
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const sbom = JSON.parse(await readFile(process.argv[2], "utf8"));
+const mcpLicense = await readFile(process.argv[3], "utf8");
 assert.equal(sbom.spdxVersion, "SPDX-2.3");
 assert.equal(sbom.dataLicense, "CC0-1.0");
 assert.deepEqual(
@@ -112,6 +143,15 @@ assert.equal(
       && entry.relatedSpdxElement === "SPDXRef-Package-MillerCapabilityBridge"),
   true
 );
+const mcp = sbom.packages.find((entry) => entry.name === "MCP Swift SDK");
+assert.ok(mcp);
+assert.deepEqual(mcp.licenseInfoFromFiles, ["Apache-2.0", "MIT"]);
+assert.equal(
+  mcp.packageFileName,
+  "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt",
+);
+assert.match(mcpLicense, /Apache License/i);
+assert.match(mcpLicense, /MIT License/i);
 assert.equal(
   sbom.relationships.some((entry) =>
     entry.spdxElementId === "SPDXRef-Package-Miller"

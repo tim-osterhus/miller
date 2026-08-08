@@ -9,7 +9,9 @@ if [[ -n "${MILLER_CLEAN_ROOT:-}" ]]; then
   }
   repo_root="$MILLER_CLEAN_ROOT"
 fi
-bridge_runtime_parent="/private/tmp/ai.millrace.miller-${EUID}"
+system_temporary_parent="${TMPDIR:-/private/tmp}"
+system_temporary_parent="${system_temporary_parent%/}"
+bridge_runtime_parent="$system_temporary_parent/ai.millrace.miller-${EUID}"
 if [[ "${MILLER_CLEAN_TESTING:-0}" == "1" && \
       -n "${MILLER_CLEAN_BRIDGE_PARENT:-}" ]]; then
   [[ "${MILLER_CLEAN_BRIDGE_PARENT:h}" == "/private/tmp" && \
@@ -22,9 +24,19 @@ fi
 bridge_runtime_root="$bridge_runtime_parent/capability-bridge"
 bridge_socket="$bridge_runtime_root/capability.sock"
 bridge_pid_file="$bridge_runtime_root/bridge.pid"
+bridge_metadata_file="$bridge_runtime_root/bridge.lease"
 
 terminate_bridge() {
-  [[ ! -e "$bridge_pid_file" ]] && return 0
+  [[ ! -e "$bridge_pid_file" && ! -e "$bridge_metadata_file" ]] && return 0
+  [[ -f "$bridge_metadata_file" && ! -L "$bridge_metadata_file" ]] || {
+    print -u2 "refusing unsafe capability bridge identity lease: $bridge_metadata_file"
+    return 1
+  }
+  [[ "$(stat -f '%u' "$bridge_metadata_file")" == "$EUID" && \
+     "$(stat -f '%Lp' "$bridge_metadata_file")" == "600" ]] || {
+    print -u2 "refusing capability bridge identity lease ownership/mode mismatch"
+    return 1
+  }
   [[ -f "$bridge_pid_file" && ! -L "$bridge_pid_file" ]] || {
     print -u2 "refusing unsafe capability bridge PID lease: $bridge_pid_file"
     return 1
@@ -39,6 +51,18 @@ terminate_bridge() {
     print -u2 "refusing non-numeric capability bridge PID lease"
     return 1
   }
+  local lease_pid="$(sed -n 's/^pid=//p' "$bridge_metadata_file")"
+  local lease_uid="$(sed -n 's/^uid=//p' "$bridge_metadata_file")"
+  local lease_ppid="$(sed -n 's/^ppid=//p' "$bridge_metadata_file")"
+  local lease_start="$(sed -n 's/^start=//p' "$bridge_metadata_file")"
+  local lease_exec="$(sed -n 's/^exec=//p' "$bridge_metadata_file")"
+  [[ "$lease_pid" == "$bridge_pid" && "$lease_uid" == "$EUID" && \
+     "$lease_ppid" == <1-> && "$lease_ppid" -gt 0 && \
+     -n "$lease_start" && "$lease_start" != *$'\n'* && \
+     "$lease_exec" == /* && -x "$lease_exec" && ! -L "$lease_exec" ]] || {
+    print -u2 "refusing incomplete or mismatched capability bridge identity lease"
+    return 1
+  }
   if ! kill -0 "$bridge_pid" 2>/dev/null; then
     return 0
   fi
@@ -51,6 +75,13 @@ terminate_bridge() {
   local expected_bridge_start="$bridge_start"
   local expected_bridge_exec="$bridge_exec"
   local expected_bridge_executable_hash="$bridge_executable_hash"
+  [[ "$expected_bridge_uid" == "$lease_uid" && \
+     "$expected_bridge_ppid" == "$lease_ppid" && \
+     "$expected_bridge_start" == "$lease_start" && \
+     "$expected_bridge_exec" == "$lease_exec" ]] || {
+    print -u2 "refusing PID lease with stale process identity"
+    return 1
+  }
   assert_bridge_identity \
     "$bridge_pid" \
     "$expected_bridge_uid" \
@@ -86,8 +117,8 @@ capture_bridge_identity() {
   local pid="$1"
   bridge_uid="$(ps -p "$pid" -o uid= | tr -d ' ')"
   bridge_ppid="$(ps -p "$pid" -o ppid= | tr -d ' ')"
-  bridge_start="$(ps -p "$pid" -o lstart= | sed 's/^[[:space:]]*//')"
-  bridge_exec="$(ps -p "$pid" -o comm= | sed 's/^[[:space:]]*//')"
+  bridge_start="$(ps -p "$pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  bridge_exec="$(ps -p "$pid" -o command= | sed 's/^[[:space:]]*//' | awk '{print $1}')"
   [[ "$bridge_uid" == "$EUID" && "$bridge_ppid" == <1-> ]] || return 1
   [[ "${bridge_exec:t}" == "MillerCapabilityBridge" ]] || return 1
   [[ -x "$bridge_exec" && ! -L "$bridge_exec" ]] || return 1
@@ -110,7 +141,9 @@ assert_bridge_identity() {
      "$bridge_exec" == "$expected_exec" && \
      "$bridge_executable_hash" == "$expected_executable_hash" ]] || return 1
   /usr/sbin/lsof -a -p "$pid" -Fn "$bridge_pid_file" 2>/dev/null \
-    | grep -Fx "n$bridge_pid_file" >/dev/null
+    | grep -Fx "n$bridge_pid_file" >/dev/null && \
+  /usr/sbin/lsof -a -p "$pid" -Fn "$bridge_metadata_file" 2>/dev/null \
+    | grep -Fx "n$bridge_metadata_file" >/dev/null
 }
 
 clean_bridge_runtime() {
@@ -141,9 +174,10 @@ clean_bridge_runtime() {
   }
   terminate_bridge
   local entries=("$bridge_runtime_root"/*(DN))
-  for entry in "${entries[@]}"; do
+    for entry in "${entries[@]}"; do
     [[ ("$entry" == "$bridge_socket" && -S "$entry" && ! -L "$entry") || \
-       ("$entry" == "$bridge_pid_file" && -f "$entry" && ! -L "$entry") ]] || {
+       ("$entry" == "$bridge_pid_file" && -f "$entry" && ! -L "$entry") || \
+       ("$entry" == "$bridge_metadata_file" && -f "$entry" && ! -L "$entry") ]] || {
       print -u2 "refusing unrecognized capability runtime entry: $entry"
       exit 1
     }
@@ -161,6 +195,9 @@ clean_bridge_runtime() {
   fi
   if [[ -f "$bridge_pid_file" && ! -L "$bridge_pid_file" ]]; then
     unlink "$bridge_pid_file"
+  fi
+  if [[ -f "$bridge_metadata_file" && ! -L "$bridge_metadata_file" ]]; then
+    unlink "$bridge_metadata_file"
   fi
   rmdir "$bridge_runtime_root"
 }
