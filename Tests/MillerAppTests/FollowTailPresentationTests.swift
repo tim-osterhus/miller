@@ -25,6 +25,39 @@ struct FollowTailPresentationTests {
     }
 
     @Test
+    func followTailTrailingClosuresEndBeforeCapabilityActivity() throws {
+        for surfaceName in ["ConversationView.swift", "OverlayView.swift"] {
+            let surface = try source(named: surfaceName)
+            let followTailEnd = trailingClosureEnd(in: surface)
+            let activityStart = surface.range(
+                of: "CapabilityActivityView(rows: model.capabilityActivityRows)"
+            )?.lowerBound
+
+            #expect(followTailEnd != nil)
+            #expect(activityStart != nil)
+            if let followTailEnd, let activityStart {
+                #expect(followTailEnd < activityStart)
+            }
+        }
+    }
+
+    @Test
+    func capabilityActivityIsBoundedOutsideBothTranscriptSurfaces() throws {
+        let conversation = try source(named: "ConversationView.swift")
+        let overlay = try source(named: "OverlayView.swift")
+        let activity = try source(named: "CapabilityActivityView.swift")
+
+        #expect(conversation.contains("FollowTailScrollView("))
+        #expect(overlay.contains("FollowTailScrollView("))
+        #expect(conversation.contains("CapabilityActivityView(rows: model.capabilityActivityRows)"))
+        #expect(overlay.contains("CapabilityActivityView(rows: model.capabilityActivityRows)"))
+        #expect(activity.contains("ScrollView(.vertical)"))
+        #expect(activity.contains(".frame(maxHeight:"))
+        #expect(!activity.contains("FollowTailScrollView("))
+        #expect(!activity.contains("SelectableTranscriptSurface"))
+    }
+
+    @Test
     func jumpToLatestHasAStableAccessibleContract() throws {
         let source = try source(named: "FollowTailScrollView.swift")
 
@@ -73,5 +106,49 @@ struct FollowTailPresentationTests {
                 .appendingPathComponent(name),
             encoding: .utf8
         )
+    }
+
+    private func trailingClosureEnd(in source: String) -> String.Index? {
+        guard let callStart = source.range(of: "FollowTailScrollView(")?.lowerBound else {
+            return nil
+        }
+
+        var parentheses = 0
+        var callClosed = false
+        var index = callStart
+        while index < source.endIndex {
+            switch source[index] {
+            case "(": parentheses += 1
+            case ")":
+                parentheses -= 1
+                callClosed = parentheses == 0
+            case "{" where callClosed && parentheses == 0:
+                return balancedBraceEnd(in: source, startingAt: index)
+            default:
+                break
+            }
+            index = source.index(after: index)
+        }
+        return nil
+    }
+
+    private func balancedBraceEnd(
+        in source: String,
+        startingAt openingBrace: String.Index
+    ) -> String.Index? {
+        var braces = 0
+        var index = openingBrace
+        while index < source.endIndex {
+            switch source[index] {
+            case "{": braces += 1
+            case "}": braces -= 1
+            default: break
+            }
+            if braces == 0 {
+                return source.index(after: index)
+            }
+            index = source.index(after: index)
+        }
+        return nil
     }
 }

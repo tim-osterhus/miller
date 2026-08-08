@@ -23,6 +23,14 @@ struct SettingsNavigationTests {
             "Privacy and data settings",
             "Diagnostics settings",
         ])
+        #expect(SettingsSection.allCases.map(\.systemImage) == [
+            "gearshape",
+            "network",
+            "waveform",
+            "wrench.and.screwdriver",
+            "hand.raised",
+            "stethoscope",
+        ])
     }
 
     @Test
@@ -61,15 +69,29 @@ struct SettingsNavigationTests {
     }
 
     @Test
-    func shellUsesTaggedTabsKeyboardNavigationAndMinimumWindowSize() throws {
+    func shellUsesFixedSidebarKeyboardNavigationAndMinimumWindowSize() throws {
         let source = try presentationSource(named: "SettingsView.swift")
 
-        #expect(source.contains("TabView(selection:"))
+        #expect(source.contains("@AppStorage(SettingsSelectionPreferences.key)"))
+        #expect(source.contains("HStack(spacing: 0)"))
+        #expect(source.contains("Binding<SettingsSection?>"))
+        #expect(source.contains("List(selection: selection)"))
         #expect(source.contains("ForEach(SettingsSection.allCases)"))
+        #expect(source.contains("Label(section.title, systemImage: section.systemImage)"))
+        #expect(source.contains(".accessibilityLabel(section.accessibilityLabel)"))
         #expect(source.contains(".tag(section)"))
+        #expect(source.contains(".accessibilityLabel(\"Settings sections\")"))
+        #expect(source.contains(".frame(width: SettingsLayout.sidebarWidth)"))
+        #expect(source.contains("Divider()"))
         #expect(source.contains("key.modifiers.contains(.control)"))
         #expect(source.contains("minWidth: SettingsLayout.minimumWidth"))
         #expect(source.contains("minHeight: SettingsLayout.minimumHeight"))
+        #expect(!source.contains("TabView"))
+        #expect(!source.contains(".tabItem"))
+        #expect(!source.contains("NavigationSplitView"))
+        #expect(!source.contains(".toolbar"))
+        let layout = try settingsSectionSource()
+        #expect(layout.contains("static let sidebarWidth: CGFloat = 200"))
         #expect(SettingsLayout.minimumWidth >= 700)
         #expect(SettingsLayout.minimumHeight >= 480)
     }
@@ -131,6 +153,16 @@ struct SettingsNavigationTests {
             contentsOf: repository
                 .appendingPathComponent("Sources/MillerApp/Presentation/Settings")
                 .appendingPathComponent(name),
+            encoding: .utf8
+        )
+    }
+
+    private func settingsSectionSource() throws -> String {
+        let repository = repositoryRoot()
+        return try String(
+            contentsOf: repository
+                .appendingPathComponent("Sources/MillerApp/Presentation/Settings")
+                .appendingPathComponent("SettingsSection.swift"),
             encoding: .utf8
         )
     }

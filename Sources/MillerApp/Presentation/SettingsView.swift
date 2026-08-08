@@ -21,14 +21,31 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        TabView(selection: selectedSection) {
-            ForEach(SettingsSection.allCases) { section in
-                tabContent(for: section)
-                    .tabItem {
-                        Label(section.title, systemImage: section.systemImage)
-                    }
-                    .tag(section)
+        let selection = Binding<SettingsSection?>(
+            get: { SettingsSection(rawValue: selectedSectionRawValue) ?? .general },
+            set: { selectedSectionRawValue = ($0 ?? .general).rawValue }
+        )
+
+        HStack(spacing: 0) {
+            List(selection: selection) {
+                ForEach(SettingsSection.allCases) { section in
+                    Label(section.title, systemImage: section.systemImage)
+                        .accessibilityLabel(section.accessibilityLabel)
+                        .tag(section)
+                }
             }
+            .listStyle(.sidebar)
+            .frame(width: SettingsLayout.sidebarWidth)
+            .accessibilityLabel("Settings sections")
+
+            Divider()
+
+            tabContent(for: selection.wrappedValue ?? .general)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
         }
         .padding()
         .frame(
@@ -43,18 +60,12 @@ struct SettingsView: View {
             else {
                 return .ignored
             }
-            selectedSection.wrappedValue = selectedSection.wrappedValue.moving(
+            let currentSection = selection.wrappedValue ?? .general
+            selection.wrappedValue = currentSection.moving(
                 key.modifiers.contains(.shift) ? .backward : .forward
             )
             return .handled
         }
-    }
-
-    private var selectedSection: Binding<SettingsSection> {
-        Binding(
-            get: { SettingsSection(rawValue: selectedSectionRawValue) ?? .general },
-            set: { selectedSectionRawValue = $0.rawValue }
-        )
     }
 
     @ViewBuilder

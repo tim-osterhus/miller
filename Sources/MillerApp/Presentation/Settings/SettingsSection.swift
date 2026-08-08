@@ -101,5 +101,6 @@ struct SettingsSelectionPreferences {
 enum SettingsLayout {
     static let minimumWidth: CGFloat = 760
     static let minimumHeight: CGFloat = 520
+    static let sidebarWidth: CGFloat = 200
     static let contentSpacing: CGFloat = 16
 }
