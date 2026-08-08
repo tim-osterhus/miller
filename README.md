@@ -3,7 +3,7 @@
 Miller is a standalone-capable personal assistant for real-time messaging,
 voice, and governed delegation.
 
-Miller v0.1.0 is the source-first MVP. It is a
+Miller v0.1.1 is the source-first capability and voice-history candidate. It is a
 local Apple Silicon macOS 15 menu-bar assistant with durable typed
 conversations, Codex OAuth, an OpenAI-compatible provider path, and GPT-Live
 voice through a separately installed official Codex CLI.
@@ -38,12 +38,13 @@ The protocol is a target, not an implemented API.
 
 ## Dependency posture
 
-The text-first alpha uses a native Swift 6.1 application with AppKit and
+The v0.1.1 application uses a native Swift 6.1 application with AppKit and
 SwiftUI, system SQLite for durable conversation state, and a supervised Node
-helper behind a Miller-owned JSONL gateway. The reviewed Node 22.22.0 macOS
-arm64 runtime is bundled in development and source-release packages; the
-source-release package is ad-hoc signed and does not establish Developer ID or
-notarization status. GPT-Live uses
+helper behind a Miller-owned JSONL gateway. The capability bridge, MCP Swift
+SDK, reviewed Node 22.22.0 macOS arm64 runtime, Pi overlay, and existing
+JavaScript dependencies are the complete shipped runtime inventory. The
+source-release package is ad-hoc signed for structural checks only and does
+not establish Developer ID or notarization status. GPT-Live uses
 the App Server in a separately installed official Codex CLI. Miller discovers
 common installation locations or uses an owner-selected path, admits only an
 OpenAI-signed arm64 `codex` executable, and launches that native binary
@@ -58,6 +59,11 @@ local history remain usable when Live Voice is unavailable, but the v0.1 voice
 path is not an offline feature.
 
 The GPT-Live path supplies its own WebRTC speech input and output for the MVP.
+Live Voice captures microphone audio only after the explicit Start Live Voice
+action and plays remote WebRTC audio through the system media peer. Audio is
+not saved. The visible transcript is selectable text; saving a text turn never
+implies that audio was saved. History is reviewed explicitly from Miller's
+history surface.
 Replaceable standalone STT and TTS adapters and local neural speech remain
 deferred to the first post-MVP update. Miller Avatar is a separate follow-on
 product. Miller v0.1 contains no avatar renderer or VRM asset and does not
@@ -88,10 +94,34 @@ See `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`.
   owner-visible external-Codex and GPT-Live qualification evidence.
 - `docs/qualification/offline-gate-4a-report.md`: sanitized headless
   qualification evidence and remaining human gates.
+- `docs/qualification/v0.1.1-headless-report.md`: deterministic sanitized
+  release-candidate evidence.
+- `docs/qualification/v0.1.1-human-protocol.md`: owner-visible rows that remain
+  not run in this bounded qualification.
 
 The deterministic source and package checks do not claim Developer ID signing,
-notarization, clean-machine installation, or beta qualification. The separate
-Gate 4B report records the completed owner-visible microphone/audio gate.
+notarization, clean-machine installation, microphone/audio behavior, or beta
+qualification. Human rows in the v0.1.1 protocol remain not run.
+
+## v0.1.1 operating boundaries
+
+MCP setup is explicit: add a local or remote server, review its displayed
+identity and declared tools, and choose a trust policy before enabling it.
+Read-only calls may run automatically under the read-only policy; changing or
+unknown calls require approval under ask-before-changes; fully trusted mode is
+an explicit owner choice. Policy decisions and tool outcomes are recorded as
+bounded audit events.
+
+Account-backed apps are Codex-only in v0.1.1. Other providers are reachable
+through the provider adapter boundary and do not receive Codex account
+installation or management. Codex Live Voice therefore requires an
+owner-installed official Codex App Server; missing, incompatible, unavailable,
+or failed external Codex leaves typed operation and local history available.
+Provider portability applies to typed reasoning and the Pi gateway, not to
+the Codex-only account surface.
+
+Wake-word inputs remain source-only for v0.1.2. v0.1.1 packaging does not
+bootstrap, download, compile, or ship wake dependencies or models.
 
 ## License
 

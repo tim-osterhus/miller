@@ -3,8 +3,8 @@
 ## Toolchain
 
 Miller targets Apple Silicon macOS 15 with Swift 6.1 and exact Node
-`v22.22.0` at `/opt/homebrew/opt/node@22/bin/`. The Swift package has no
-third-party Swift dependency. Gateway dependencies are lockfile-pinned and
+`v22.22.0` at `/opt/homebrew/opt/node@22/bin/`. The capability bridge uses
+the lockfile-pinned MCP Swift SDK. Gateway dependencies are lockfile-pinned and
 installed with scripts disabled:
 
 ```bash
@@ -39,10 +39,9 @@ Run the complete headless suite from the repository root:
 `test.sh` runs the Swift suite and the protocol-fixture Node suite. The separate
 Gateway command runs all Node tests. `package-dev-app.sh` creates an ad-hoc
 signed development bundle under `.artifacts/`. It is not a release package.
-`package-release-app.sh` compiles with release settings, removes the
-noninteractive harness behavior, omits fake-helper payloads and harness
-metadata, assembles the production gateway closure, ad-hoc signs it only for
-structural verification, and writes a sanitized inventory under
+`package-release-app.sh` compiles with release settings, removes development
+harness metadata, assembles the production gateway closure, ad-hoc signs it
+only for structural verification, and writes a sanitized inventory under
 `.artifacts/release/`. It remains unsigned by a Developer ID and unnotarized.
 
 The default cleanup removes `.build/`, `.artifacts/`, and `.cache/`.
@@ -62,6 +61,32 @@ The package command performs only ad-hoc development signing.
 
 Human checks remain in `docs/qualification/text-alpha-host-check.md` and
 `docs/qualification/provider-check.md`. Do not infer those results from CI.
+
+## v0.1.1 qualification contract
+
+The bounded release-candidate sequence is run from a clean source tree:
+
+```bash
+./scripts/clean.sh
+git diff --check
+./scripts/test.sh
+./scripts/package-release-app.sh
+./scripts/verify-release-package.sh .artifacts/release/Miller.app
+./scripts/run-headless-release-qualification.sh
+du -sk .build .cache .artifacts Gateway/node_modules 2>/dev/null
+```
+
+Before Swift, Node, or package work, the scripts print available space and a
+bounded expected peak. They stop before a step whose expected peak would
+consume the available headroom. The release qualification removes build
+caches, installed Gateway dependencies, sockets, wake inputs, and helper/test
+processes with `./scripts/clean.sh --preserve-release`, retaining only the
+release app and sanitized qualification evidence.
+
+The v0.1.1 app never bootstraps, downloads, compiles, or packages wake inputs.
+Wake foundation work is source-only for v0.1.2. Human microphone, audio,
+clipboard, browser, credential, and real-provider rows are not inferred from
+the deterministic checks.
 
 ## GPT-Live deterministic check
 

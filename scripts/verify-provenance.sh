@@ -54,6 +54,10 @@ grep -Fq \
 grep -Fq '## Node.js 22.22.0 bundled runtime' \
   "$repo_root/PROVENANCE.md"
 grep -Fq '## Node.js 22.22.0' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '## Model Context Protocol Swift SDK 0.12.1' \
+  "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq 'v0.1.2' "$repo_root/PROVENANCE.md"
+grep -Fq 'source-only' "$repo_root/PROVENANCE.md"
 
 "$node_bin" --input-type=module - "$repo_root" "$inventory_root" <<'EOF'
 import assert from "node:assert/strict";

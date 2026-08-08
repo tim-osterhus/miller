@@ -51,3 +51,20 @@ exact envelope and helper thread, then discarded immediately. Only admitted,
 bounded live-session events can enter the returned result.
 
 See `removal.md` before deleting the app when local-data removal is desired.
+
+## Voice, selection, and history review
+
+Live Voice is opt-in and begins only after the owner chooses Start Live Voice.
+The microphone track and remote WebRTC track are session media; Miller does
+not save either audio stream. Live transcript text is selectable presentation
+text. Copying or selecting text does not copy or retain audio.
+
+Saving a typed or reviewed transcript turn saves text and metadata only. It
+does not imply that audio was saved. History is reviewed explicitly by opening
+the history surface and selecting a conversation; a live session does not
+silently create a second durable history. Export is an explicit owner action,
+and exported text should be handled as user data.
+
+Headless qualification uses synthetic fixtures and reports only pass/fail
+status and bounded measurements. It does not use a real provider, microphone,
+audio device, browser, clipboard, or owner account.

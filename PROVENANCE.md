@@ -65,17 +65,30 @@ and provenance review before incorporation.
 - Resolved revision: `a0ae212ebf6eab5f754c3129608bc5557637e605`
 - License: upstream mixed Apache-2.0/MIT transition terms recorded in the
   revision's `LICENSE` file.
-- Current scope: package dependency lock only. Task 1 does not add the SDK to a
-  Miller target, copy SDK source, or bundle SDK artifacts.
+- Current scope: statically linked capability-bridge dependency in the v0.1.1
+  application. The app SBOM and runtime inventory list this component only at
+  its reviewed version; no SDK source tree is copied into the application.
 
 `Package.swift` pins the release exactly and `Package.resolved` records the
-official repository, revision, and complete SwiftPM resolution. The planned
-Swift MCP broker will consume the SDK in a later task.
+official repository, revision, and complete SwiftPM resolution. The Swift
+capability broker consumes the SDK through the Miller bridge.
+
+### v0.1.1 application boundary
+
+The shipped application contains only the Miller executable, the statically
+linked capability bridge and MCP SDK, the reviewed Node.js 22.22.0 runtime, the
+Pi-derived gateway overlay, and the existing openai and partial-json gateway
+packages. Packaging/Miller.spdx.json and the generated runtime inventory
+enumerate those components exactly.
+
+Codex is an external prerequisite for Live Voice and is not bundled. Optional
+speech, wake, model, donor, and test inputs are source-only and are excluded
+from the v0.1.1 application SBOM, runtime inventory, and legal payload.
 
 ### Cortana wakeword donor
 
-- Canonical donor repository: `/Users/alex/Desktop/bonzo-dashboard/cortana` on
-  `kindly-macmini`
+- Canonical donor repository: owner-controlled Cortana repository, reviewed at
+  the immutable commit below.
 - Approved donor commit: `8f4af867c575c089f45a8df4768663a521f88203`
 - Ownership: owner-authored Cortana material.
 - Imported scope: the nine bridge, detector, coordinator, frame accumulator,
@@ -88,10 +101,11 @@ boundary adaptations. The Cortana settings view, tests, probes, installed app,
 and current working tree were not source donors. VoiceInk was neither inspected
 nor used.
 
-### Fetched-and-verified wakeword build inputs
+### Fetched-and-verified wakeword build inputs (v0.1.2 source-only)
 
 These are optional build inputs for the wakeword subsystem. They are never
-committed. `scripts/bootstrap-wakeword-dependencies.sh` fetches the exact
+committed or shipped in v0.1.1. `scripts/bootstrap-wakeword-dependencies.sh`
+fetches the exact
 official archives into a bounded generated directory, verifies each archive
 before extraction, stages only the required arm64 inputs, deletes the archives
 and extraction trees, and verifies the retained bytes again.

@@ -1,5 +1,35 @@
 # Miller security boundary
 
+## MCP setup and policy audit
+
+MCP setup is owner-mediated. Miller shows the server identity, endpoint class,
+and declared tool metadata before enabling a server. The broker admits
+read-only calls automatically only under the read-only policy. Changing,
+unknown, or insufficiently declared calls prompt under ask-before-changes and
+execute only after an owner approval. Fully trusted mode is a separate
+explicit policy choice. Each classification, approval, denial, and bounded
+result is recorded in the broker's audit stream; provider payloads and secrets
+are not copied into that audit stream.
+
+Codex typed reasoning, Codex Live sideband delegation, and Pi use the same
+broker and policy boundary. Account-backed apps are Codex-only. Provider
+portability covers the typed reasoning adapters and Pi route, not the
+installation or management of a Codex account app.
+
+## v0.1.1 package refusal boundary
+
+The release verifier fails closed on wake bridges, wake/model assets, Sherpa or
+ONNX payloads, Codex or Rust build artifacts, fake helpers, fixtures,
+transcripts, runtime logs, sockets, and credential material. The application
+SBOM and runtime inventory list only the MCP SDK, capability bridge, Node,
+Pi overlay, and shipped JavaScript dependencies. Wake foundation inputs are
+source-only for v0.1.2.
+
+Live Voice depends on an owner-installed official Codex App Server. Missing or
+incompatible Codex, denied permission, unsupported model, provider refusal,
+timeout, malformed protocol data, or helper termination fails closed for the
+live session while leaving typed operation and local history available.
+
 ## Credentials
 
 Miller owns persistence. It stores versioned, bounded credential payloads as

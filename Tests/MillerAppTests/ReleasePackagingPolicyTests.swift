@@ -327,6 +327,105 @@ struct ReleasePackagingPolicyTests {
         #expect(violations.contains { $0.contains("private transcript export") })
     }
 
+    @Test
+    func applicationAndSBOMDeclareOnlyTheV011ShippedRuntimeComponents() throws {
+        let plist = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Packaging/Info.plist"),
+            encoding: .utf8
+        )
+        #expect(plist.contains("<string>0.1.1</string>"))
+
+        let data = try Data(contentsOf: repositoryRoot.appending(
+            path: "Packaging/Miller.spdx.json"
+        ))
+        let document = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let packages = try #require(document["packages"] as? [[String: Any]])
+        let packageNames: [String] = packages.compactMap { package -> String? in
+            guard let name = package["name"] as? String,
+                  let version = package["versionInfo"] as? String else { return nil }
+            return "\(name)@\(version)"
+        }
+        #expect(packageNames.sorted() == [
+            "@miller/pi-mvp-overlay@0.82.0-a3",
+            "MCP Swift SDK@0.12.1",
+            "Miller@0.1.1",
+            "MillerCapabilityBridge@0.1.1",
+            "Node.js@22.22.0",
+            "openai@6.26.0",
+            "partial-json@0.1.7",
+        ].sorted())
+        #expect(packageNames.allSatisfy {
+            !$0.localizedCaseInsensitiveContains("sherpa")
+                && !$0.localizedCaseInsensitiveContains("onnx")
+                && !$0.localizedCaseInsensitiveContains("wake")
+        })
+    }
+
+    @Test
+    func releasePackagingHasNoFakePayloadAndNeverBootstrapsWakeInputs() throws {
+        let packageScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "scripts/package-dev-app.sh"
+            ),
+            encoding: .utf8
+        )
+        let releaseScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "scripts/package-release-app.sh"
+            ),
+            encoding: .utf8
+        )
+        #expect(packageScript.contains("fake-helper") == false)
+        #expect(packageScript.contains("bootstrap-wakeword-dependencies.sh") == false)
+        #expect(releaseScript.contains("bootstrap-wakeword-dependencies.sh") == false)
+        #expect(packageScript.contains("MillerWakeBridge") == true)
+    }
+
+    @Test
+    func headlessQualificationDeclaresTheDeterministicMatrixAndSafeMarker() throws {
+        let script = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "scripts/run-headless-release-qualification.sh"
+            ),
+            encoding: .utf8
+        )
+        for required in [
+            "MILLER_V0_1_1_READY_HUMAN_NOT_RUN",
+            "MillerCapabilitiesTests",
+            "MillerLiveTests",
+            "MillerAppTests",
+            "MillerStorageTests",
+            "fake Pi provider",
+            "read-only MCP fixture",
+            "state-changing approval",
+            "unsupported tool model",
+            "selectable transcript composition",
+            "post-cleanup retained bytes",
+        ] {
+            #expect(script.contains(required), "missing headless contract: \(required)")
+        }
+        #expect(script.contains("MILLER_V0_1_1_RELEASE_APPROVED") == false)
+        #expect(script.contains("bootstrap-wakeword-dependencies.sh") == false)
+    }
+
+    @Test
+    func qualificationDocumentsAreSanitizedAndKeepHumanRowsUnrun() throws {
+        let report = try String(contentsOf: repositoryRoot.appendingPathComponent(
+            "docs/qualification/v0.1.1-headless-report.md"
+        ), encoding: .utf8)
+        let protocolDocument = try String(contentsOf: repositoryRoot.appendingPathComponent(
+            "docs/qualification/v0.1.1-human-protocol.md"
+        ), encoding: .utf8)
+        #expect(report.contains("MILLER_V0_1_1_READY_HUMAN_NOT_RUN"))
+        #expect(report.contains("MILLER_V0_1_1_RELEASE_APPROVED") == false)
+        #expect(protocolDocument.contains("NOT_RUN"))
+        #expect(protocolDocument.contains("transcript body") == false)
+        #expect(protocolDocument.contains("credential") == false)
+        #expect(protocolDocument.contains("private path") == false)
+    }
+
     private var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -8,15 +8,25 @@ revision `a0ae212ebf6eab5f754c3129608bc5557637e605`.
 
 The upstream project is transitioning from MIT to Apache-2.0. Contributions
 are licensed under the applicable Apache-2.0 or MIT terms identified by the
-upstream `LICENSE` file. In Task 1 the package is locked but is not linked into
-a Miller target or bundled in a Miller distribution.
+upstream `LICENSE` file. In v0.1.1 the SDK is statically linked through the
+Miller capability bridge; no SDK source tree is bundled.
 
-## Optional wakeword build inputs
+## v0.1.1 application inventory
 
-Miller's explicit optional wakeword bootstrap fetches and verifies Sherpa-ONNX
-1.13.2 and the Apache-2.0 GigaSpeech keyword model from the official
-Sherpa-ONNX releases, plus ONNX Runtime 1.24.4 static libraries licensed under
-MIT. Exact source URLs and approved hashes are recorded in `PROVENANCE.md`.
+The application ships only the Miller executable, the statically linked MCP
+Swift SDK and capability bridge, Node.js 22.22.0, the Pi overlay
+`@miller/pi-mvp-overlay@0.82.0-a3`, `openai@6.26.0`, and
+`partial-json@0.1.7`. The SPDX document and generated runtime inventory are
+the authoritative v0.1.1 list.
+
+## Optional wakeword build inputs (v0.1.2 source-only)
+
+Miller's optional wakeword bootstrap fetches and verifies Sherpa-ONNX 1.13.2
+and the Apache-2.0 GigaSpeech keyword model from the official releases, plus
+ONNX Runtime 1.24.4 static libraries licensed under MIT. Exact source URLs and
+approved hashes are recorded in `PROVENANCE.md`. These inputs are not
+downloaded, compiled, packaged, or listed in the v0.1.1 application SBOM or
+runtime inventory.
 
 The archives, binaries, and model files are generated build inputs and are not
 committed. The bootstrap deletes archives and extraction trees after retaining

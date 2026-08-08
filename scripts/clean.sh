@@ -166,7 +166,8 @@ elif [[ "$#" == 1 && "$1" == "--preserve-release" ]]; then
     "$repo_root/.artifacts/tests" \
     "$repo_root/.artifacts/package-staging" \
     "$repo_root/.artifacts/release-staging" \
-    "$repo_root/.artifacts/overlay-build"
+    "$repo_root/.artifacts/overlay-build" \
+    "$repo_root/.build/vendor/wakeword"
   do
     safe_remove_tree \
       "$target" \
@@ -177,7 +178,8 @@ elif [[ "$#" == 1 && "$1" == "--preserve-release" ]]; then
       "$repo_root/.artifacts/tests" \
       "$repo_root/.artifacts/package-staging" \
       "$repo_root/.artifacts/release-staging" \
-      "$repo_root/.artifacts/overlay-build"
+      "$repo_root/.artifacts/overlay-build" \
+      "$repo_root/.build/vendor/wakeword"
   done
   if [[ -f "$repo_root/.artifacts/.DS_Store" ]]; then
     find -P "$repo_root/.artifacts" -maxdepth 1 -type f -name .DS_Store -delete

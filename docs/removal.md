@@ -41,3 +41,25 @@ For repository cleanup during development, run:
 
 Those commands remove only fixed repository-generated roots. They do not touch
 Miller user data, Keychain, or unrelated system caches.
+
+## Export, deletion, and reset
+
+Export is an explicit action from the selected history conversation. It
+produces selectable text and does not export microphone or remote audio.
+Deleting a turn or conversation removes it from Miller's SQLite history; reset
+removes the database, WAL/SHM sidecars, cache, preferences, and Miller-owned
+Keychain items after the owner confirms the listed roots. These operations are
+not secure-erasure claims because backups and operating-system storage may
+retain prior bytes.
+
+Before app removal, review the export and deletion results, reset Miller, quit
+the app, and verify that no Miller process remains. Removing the app does not
+remove an owner-installed Codex runtime or provider account.
+
+## Repository qualification cleanup
+
+The v0.1.1 release cleanup removes `.build`, `.cache`,
+`Gateway/node_modules`, staging roots, wake inputs, sockets, and
+helper/test processes. `.artifacts/release/Miller.app` and the sanitized
+qualification report are retained for inspection. Wake foundation work remains
+source-only for v0.1.2.

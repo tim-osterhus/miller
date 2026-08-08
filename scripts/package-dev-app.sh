@@ -40,6 +40,18 @@ resource_bundle_matches=()
 resource_bundle=""
 bin_path=""
 
+require_storage_headroom() {
+  local label="$1"
+  local expected_peak_kib="$2"
+  local free_kib="$(df -Pk "$repo_root" | awk 'NR == 2 { print $4 }')"
+  printf 'MILLER_STORAGE_CHECK label=%s free_kib=%s expected_peak_kib=%s\n' \
+    "$label" "$free_kib" "$expected_peak_kib"
+  (( free_kib >= expected_peak_kib )) || {
+    print -u2 "insufficient storage for bounded $label package step"
+    exit 75
+  }
+}
+
 cleanup_staging() {
   if [[ -n "$node_stage" && -e "$node_stage" ]]; then
     case "$node_stage" in
@@ -57,6 +69,7 @@ cleanup_staging() {
 }
 trap cleanup_staging EXIT INT TERM
 
+require_storage_headroom "gateway-dependencies" 524288
 (
   cd "$gateway_root"
   "$npm_path" ci --ignore-scripts --offline
@@ -66,13 +79,17 @@ test "$("$node_path" --version)" = "v22.22.0"
 test -x "$node_path"
 test -x "$npm_path"
 
-env \
-  SWIFTPM_MODULECACHE_OVERRIDE="$swift_cache" \
-  CLANG_MODULE_CACHE_PATH="$clang_cache" \
-  swift build \
-    --package-path "$repo_root" \
-    --scratch-path "$build_root" \
-    "${swift_configuration_args[@]}"
+require_storage_headroom "swift-build" 3145728
+for product in MillerApp MillerCapabilityBridge; do
+  env \
+    SWIFTPM_MODULECACHE_OVERRIDE="$swift_cache" \
+    CLANG_MODULE_CACHE_PATH="$clang_cache" \
+    swift build \
+      --package-path "$repo_root" \
+      --scratch-path "$build_root" \
+      --product "$product" \
+      "${swift_configuration_args[@]}"
+done
 bin_path="$(
   env \
     SWIFTPM_MODULECACHE_OVERRIDE="$swift_cache" \
@@ -80,6 +97,7 @@ bin_path="$(
     swift build \
       --package-path "$repo_root" \
       --scratch-path "$build_root" \
+      --product MillerApp \
       "${swift_configuration_args[@]}" \
       --show-bin-path
 )"
@@ -136,35 +154,32 @@ if [[ "$package_mode" == "release" ]]; then
   mkdir -p "$legal_root"
   cp "$repo_root/LICENSE" "$legal_root/LICENSE"
   cp "$repo_root/NOTICE" "$legal_root/NOTICE"
-  cp "$repo_root/PROVENANCE.md" "$legal_root/PROVENANCE.md"
-  cp "$repo_root/THIRD_PARTY_NOTICES.md" "$legal_root/THIRD_PARTY_NOTICES.md"
+  {
+    printf '# Miller v0.1.1 packaged provenance\n\n'
+    printf 'This unsigned release candidate contains the Miller application, the statically linked capability bridge, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
+    printf 'The application inventory excludes optional speech, wake, and model build inputs. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
+    printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
+  } > "$legal_root/PROVENANCE.md"
+  {
+    printf '# Third-party notices for Miller v0.1.1\n\n'
+    printf -- '- Model Context Protocol Swift SDK 0.12.1: Apache-2.0/MIT transition terms; https://github.com/modelcontextprotocol/swift-sdk.git\n'
+    printf -- '- Node.js 22.22.0: MIT and bundled upstream notices; see LICENSE.node-22.22.0.\n'
+    printf -- '- @miller/pi-mvp-overlay 0.82.0-a3, openai 6.26.0, and partial-json 0.1.7: notices reviewed in this repository.\n'
+    printf -- '- Optional speech and wake build inputs are source-only for a later release and are not shipped here.\n'
+  } > "$legal_root/THIRD_PARTY_NOTICES.md"
   cp "$repo_root/Packaging/Miller.spdx.json" "$legal_root/Miller.spdx.json"
 fi
 
-# Keep the earlier fake-helper host gate available until the native profile
-# choreography selects the production helper.
-# Inline the repository-owned strict parser so fake-helper.mjs has no sibling
-# module dependency inside the bundle.
-if [[ "$package_mode" == "development" ]]; then
-  sed 's/^export function /function /' "$gateway_source/strict-json.mjs" \
-    > "$gateway_bundle/fake-helper.mjs"
-  sed '/strict-json\.mjs/d' "$gateway_source/fake-helper.mjs" \
-    >> "$gateway_bundle/fake-helper.mjs"
-  cp "$gateway_source/codex-models.mjs" "$gateway_bundle/codex-models.mjs"
-fi
-
-test "$(
-  find "$gateway_source" -maxdepth 1 -type f -name '*.mjs' -print \
-    | sed "s|$gateway_source/||" \
-    | LC_ALL=C sort
-)" = "codex-models.mjs
-credential-store.mjs
-fake-helper.mjs
-protocol.mjs
-providers.mjs
-reasoning.mjs
-server.mjs
-strict-json.mjs"
+test -z "$(find "$gateway_source" -maxdepth 1 -type f -name '*.mjs' \
+  ! -name codex-models.mjs \
+  ! -name credential-store.mjs \
+  ! -name protocol.mjs \
+  ! -name providers.mjs \
+  ! -name reasoning.mjs \
+  ! -name server.mjs \
+  ! -name strict-json.mjs \
+  ! -name '*fake*helper*' \
+  -print -quit)"
 
 for source in \
   codex-models.mjs \
@@ -213,6 +228,7 @@ cp -R "$gateway_dependencies/partial-json" "$gateway_app/node_modules/"
 
 # Acquire the exact official Apple Silicon runtime in a bounded staging root.
 # The archive, extraction root, and download bytes are removed by the trap.
+require_storage_headroom "node-runtime-download" 1048576
 node_stage="$(mktemp -d "$artifacts_root/node-stage.XXXXXX")"
 curl \
   --fail \
@@ -247,9 +263,6 @@ chmod 0755 \
   "$staging_root/Miller.app/Contents/MacOS/Miller" \
   "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge" \
   "$gateway_runtime/node"
-if [[ "$package_mode" == "development" ]]; then
-  chmod 0755 "$gateway_bundle/fake-helper.mjs"
-fi
 
 plutil -lint "$staging_root/Miller.app/Contents/Info.plist" >/dev/null
 test -x "$staging_root/Miller.app/Contents/MacOS/Miller"
@@ -261,12 +274,8 @@ test -z "$(
     -type l -print -quit
 )"
 test -f "$gateway_app/server.mjs"
-if [[ "$package_mode" == "development" ]]; then
-  test -f "$gateway_bundle/codex-models.mjs"
-else
-  test ! -e "$gateway_bundle/codex-models.mjs"
-  test ! -e "$gateway_bundle/fake-helper.mjs"
-fi
+test ! -e "$gateway_bundle/codex-models.mjs"
+test -z "$(find "$gateway_bundle" -mindepth 1 -maxdepth 1 -type f -print -quit)"
 test -f "$gateway_app/node_modules/@miller/pi-mvp-overlay/package.json"
 test -f "$gateway_app/node_modules/openai/package.json"
 test -f "$gateway_app/node_modules/partial-json/package.json"
@@ -281,23 +290,24 @@ if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$r
   print -u2 "refusing to package an audio-input entitlement"
   exit 1
 fi
-test -z "$(find "$staging_root/Miller.app" \( \
+test -z "$(find "$staging_root/Miller.app" \
+  ! -path "$gateway_app/credential-store.mjs" \
+  ! -path "$gateway_app/node_modules/@miller/pi-mvp-overlay/dist/auth/credential-store.js" \( \
   -type f \( -name codex -o -name cargo -o -name rustc \) -o \
-  -iname '*cortana*' -o -iname '*codex-rs*' -o -iname '*webrtc*' \
+  -iname '*cortana*' -o -iname '*voiceink*' -o -iname '*codex-rs*' -o \
+  -iname '*MillerWakeBridge*' -o -iname '*MillerWake*' -o \
+  -iname '*sherpa*' -o -iname '*onnx*' -o -iname '*gigaspeech*' -o \
+  -iname '*wake-model*' -o -iname '*webrtc*' -o -iname '*fake*helper*' -o \
+  -iname '*fixture*' -o -iname '*credential*.json' -o \
+  -iname '*credential*.plist' -o -iname '*credential*.db' -o \
+  -iname '*credential*.sqlite*' -o -iname '*credentials' -o \
+  -iname '*transcript*.json' -o -iname '*transcript*.txt' -o \
+  -iname '*transcript*.md' -o -iname '*transcript*.sqlite*' -o \
+  -iname '*socket-token*' -o -iname '*unix-socket*' -o \
+  -iname '*.sock' -o -iname '*.socket' -o -iname '*token*.json' -o \
+  -iname '*token*.txt' -o -iname '*.token' -o -iname '*.log' \
 \) -print -quit)"
 test "$("$gateway_runtime/node" --version)" = "v22.22.0"
-if [[ "$package_mode" == "development" ]]; then
-  test "$("$gateway_runtime/node" "$gateway_bundle/fake-helper.mjs" </dev/null \
-    | head -n 1 \
-    | "$gateway_runtime/node" -e '
-      let value = "";
-      process.stdin.on("data", (chunk) => { value += chunk; });
-      process.stdin.on("end", () => {
-        const record = JSON.parse(value);
-        process.stdout.write(record.type === "gateway.ready" ? "ready" : "invalid");
-      });
-      ')" = "ready"
-fi
 test "$(
   shasum -a 256 "$gateway_runtime/node" | awk '{print $1}'
 )" = "$node_binary_sha256"
@@ -328,7 +338,7 @@ if [[ "$package_mode" == "development" ]]; then
 fi
 cleanup_staging
 if [[ "$package_mode" == "development" ]]; then
-  printf 'MILLER_DEV_APP_READY=%s\n' "$bundle_root"
+  printf 'MILLER_DEV_APP_READY=1\n'
 else
-  printf 'MILLER_UNSIGNED_RELEASE_APP_READY=%s\n' "$bundle_root"
+  printf 'MILLER_UNSIGNED_RELEASE_APP_READY=1\n'
 fi

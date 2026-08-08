@@ -248,3 +248,49 @@ Later work retains:
 The final local-neural voice and numerical qualification profiles remain
 unresolved. Miller Avatar, post-MVP providers, tools, channels, and Millrace
 integrations remain outside Miller v0.1.
+
+## Capability broker and trust
+
+Miller has one native capability broker and one SQLite owner. An MCP server is
+added through an explicit setup flow that displays its identity, endpoint
+class, and declared tools before the owner enables it. The owner selects one
+of three policies: read-only automatic, ask before changes, or fully trusted.
+The broker classifies each call from the reviewed tool declaration and current
+policy; unknown or changing calls are never silently upgraded. Policy
+decisions, approvals, denials, and bounded results are audit events owned by
+the broker.
+
+The same broker is used by Codex typed turns, Codex Live sideband delegation,
+and the Pi gateway. No provider may install or remove an account app. The
+account-backed app surface is Codex-only, while provider adapters keep typed
+reasoning portable across the supported Codex and OpenAI-compatible paths.
+
+## Live Voice and history presentation
+
+Live Voice is an explicit user action. Before Start Live Voice, Miller does
+not request microphone access, create a media peer, or start the external
+Codex runtime. After start, system WebKit owns one microphone track and one
+remote WebRTC audio track. Stop, interrupt, mute, session failure, or external
+runtime loss closes that bounded media session; typed operation remains
+available when the live route is unavailable. Miller does not save microphone
+or remote audio.
+
+Live transcript text is presentation state and can be selected and copied by
+the owner from the conversation surface. Selecting text does not export audio.
+Saving a text turn stores text only. History review is explicit: Miller shows
+the selected conversation and its saved turns only after the owner opens the
+history surface; Live Voice does not silently append a second history model.
+
+## External prerequisite and failure modes
+
+Codex Live Voice requires an owner-installed official Codex App Server. Miller
+does not download, bundle, update, or remove it. Missing or incompatible
+external Codex, unavailable credentials, denied microphone permission,
+unsupported model, network failure, provider refusal, malformed sideband data,
+timeout, or helper exit produce a bounded unavailable or failed state. The
+typed conversation, local history, and non-live provider routes remain
+independent of those failures.
+
+Wake-word foundation inputs remain source-only for v0.1.2. The v0.1.1 app
+target, package scripts, SBOM, and runtime inventory do not bootstrap,
+download, compile, or ship wake inputs.

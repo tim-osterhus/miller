@@ -2,8 +2,8 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "Miller-0.1.0-source-release",
-  "documentNamespace": "https://miller.local/spdx/miller/0.1.0/source-release",
+  "name": "Miller-0.1.1-source-release",
+  "documentNamespace": "https://miller.local/spdx/miller/0.1.1/source-release",
   "creationInfo": {
     "created": "2026-08-05T00:00:00Z",
     "creators": ["Tool: Miller source-release closure"]
@@ -12,7 +12,7 @@
     {
       "name": "Miller",
       "SPDXID": "SPDXRef-Package-Miller",
-      "versionInfo": "0.1.0",
+      "versionInfo": "0.1.1",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
@@ -29,6 +29,17 @@
       "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION",
       "packageFileName": "Contents/Helpers/MillerCapabilityBridge"
+    },
+    {
+      "name": "MCP Swift SDK",
+      "SPDXID": "SPDXRef-Package-MCPSwiftSDK",
+      "versionInfo": "0.12.1",
+      "downloadLocation": "https://github.com/modelcontextprotocol/swift-sdk.git",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0 AND MIT",
+      "licenseDeclared": "Apache-2.0 AND MIT",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/Helpers/MillerCapabilityBridge (statically linked)"
     },
     {
       "name": "@miller/pi-mvp-overlay",
@@ -97,6 +108,11 @@
       "spdxElementId": "SPDXRef-Package-Miller",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-Node"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
     },
     {
       "spdxElementId": "SPDXRef-Package-PiOverlay",
