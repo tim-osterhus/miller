@@ -653,6 +653,20 @@ test("the three-route E2E is explicit opt-in outside its packaged runner", async
   assert.match(routeTest, /MILLER_TASK18_NODE_PATH/);
 });
 
+test("headless qualification runs packaged routes before the full suite can remove development dependencies", async () => {
+  const script = await readFile(
+    join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
+    "utf8",
+  );
+  const typed = script.indexOf("run_check deterministic_route_typed");
+  const sideband = script.indexOf("run_check deterministic_route_sideband");
+  const pi = script.indexOf("run_check deterministic_route_pi");
+  const provider = script.indexOf("run_check pi_provider");
+  const full = script.indexOf("run_check deterministic_full");
+  assert.ok(typed >= 0 && sideband > typed && pi > sideband && provider > pi);
+  assert.ok(full > provider);
+});
+
 test("the Codex fixture keeps its MCP client beside bundled fixture resources", async () => {
   const fixturePath = join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "fake-codex-app-server.mjs");
   const fixture = await readFile(fixturePath, "utf8");

@@ -675,11 +675,11 @@ mkdir -p "$measurement_root/logs"
 # unsupported tool model; selectable transcript composition; post-cleanup retained bytes.
 discover_baseline
 
-run_check deterministic_full "$repo_root/scripts/test.sh"
 run_check deterministic_route_typed "$repo_root/scripts/run-task18-three-route-e2e.sh" typed
 run_check deterministic_route_sideband "$repo_root/scripts/run-task18-three-route-e2e.sh" sideband
 run_check deterministic_route_pi "$repo_root/scripts/run-task18-three-route-e2e.sh" pi
 run_check pi_provider "$npm_path" --prefix "$repo_root/Gateway" test
+run_check deterministic_full "$repo_root/scripts/test.sh"
 run_check provenance "$repo_root/scripts/verify-provenance.sh"
 run_check package_verifier "$repo_root/scripts/verify-release-package.sh" "$bundle_root"
 run_measurement_check idle_cold cold
