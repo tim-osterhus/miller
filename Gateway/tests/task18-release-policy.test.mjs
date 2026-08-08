@@ -17,11 +17,17 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const node = process.execPath;
 const inventoryScript = join(repoRoot, "scripts", "release-inventory.mjs");
+const {
+  buildInventory,
+  dependencyClosureInventory,
+  verifyInventory,
+  writeAtomic,
+} = await import(pathToFileURL(inventoryScript).href);
 
 async function makeBundle() {
   const root = await mkdtemp(join(tmpdir(), "miller-task18-policy-"));
@@ -83,9 +89,30 @@ function runInventory(args) {
 
 async function generateFixture() {
   const fixture = await makeBundle();
-  const result = runInventory([fixture.bundle, fixture.output]);
+  const result = await runFixtureInventory(fixture);
   assert.equal(result.status, 0, result.stderr);
   return fixture;
+}
+
+async function runFixtureInventory(fixture, verify = false) {
+  try {
+    const expectedDependencyInventory = await dependencyClosureInventory(fixture.bundle);
+    if (verify) {
+      await verifyInventory(fixture.bundle, fixture.output, {
+        expectedDependencyInventory,
+        allowSyntheticBinary: true,
+      });
+    } else {
+      const inventory = await buildInventory(fixture.bundle, fixture.output, {
+        expectedDependencyInventory,
+        allowSyntheticBinary: true,
+      });
+      await writeAtomic(fixture.output, inventory);
+    }
+    return { status: 0, stderr: "" };
+  } catch (error) {
+    return { status: 1, stderr: String(error) };
+  }
 }
 
 test("release inventory has an explicit external self-exclusion", async () => {
@@ -102,13 +129,18 @@ test("release inventory has an explicit external self-exclusion", async () => {
   }
 });
 
+test("release inventory has no production path-based fixture bypass", async () => {
+  const script = await readFile(inventoryScript, "utf8");
+  assert.doesNotMatch(script, /isSyntheticPolicyFixture|miller-task18-policy/);
+});
+
 test("release inventory generation rejects an incomplete canonical bundle", async () => {
   const fixture = await makeBundle();
   try {
     await rm(
       join(fixture.bundle, "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png"),
     );
-    const result = runInventory([fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture);
     assert.notEqual(result.status, 0, "incomplete canonical bundle was accepted");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -125,7 +157,7 @@ test("release inventory generation rejects a neutral extra under an allowed root
       ),
       "synthetic neutral artifact\n",
     );
-    const result = runInventory([fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture);
     assert.notEqual(result.status, 0, "neutral allowed-root extra was accepted");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -178,7 +210,7 @@ test("release verification rejects changed, extra, neutral, and symlinked files"
     const fixture = await generateFixture();
     try {
       await mutate(fixture);
-      const result = runInventory(["--verify", fixture.bundle, fixture.output]);
+      const result = await runFixtureInventory(fixture, true);
       assert.notEqual(result.status, 0, `${name} was accepted`);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
@@ -192,7 +224,7 @@ test("inventory generation rejects a pre-existing output symlink", async () => {
   await writeFile(sentinel, "unchanged\n");
   await symlink(sentinel, fixture.output);
   try {
-    const result = runInventory([fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture);
     assert.notEqual(result.status, 0);
     assert.equal(await readlink(fixture.output), sentinel);
     assert.equal(await readFile(sentinel, "utf8"), "unchanged\n");
@@ -205,7 +237,7 @@ test("inventory generation rejects a pre-existing regular output", async () => {
   const fixture = await makeBundle();
   await writeFile(fixture.output, "sentinel\n");
   try {
-    const result = runInventory([fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture);
     assert.notEqual(result.status, 0);
     assert.equal(await readFile(fixture.output, "utf8"), "sentinel\n");
   } finally {
@@ -220,7 +252,7 @@ test("private build-path bytes are rejected even in an otherwise allowed file", 
       join(fixture.bundle, "Contents/Resources/Gateway/app/server.mjs"),
       "/Users/tester/project/.build/private\n",
     );
-    const result = runInventory(["--verify", fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture, true);
     assert.notEqual(result.status, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -237,7 +269,7 @@ test("neutral allowed files cannot carry credential or provider artifacts", asyn
       ),
       'OPENAI_API_KEY = "synthetic-secret"\nAuthorization: Bearer synthetic-token\n',
     );
-    const result = runInventory([fixture.bundle, fixture.output]);
+    const result = await runFixtureInventory(fixture);
     assert.notEqual(result.status, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -591,15 +623,41 @@ test("the named three-route E2E is bounded and uses one local read-only tool", a
   assert.match(script, /fake-codex-app-server\.mjs/);
   assert.match(script, /fake Pi provider|fake-pi-provider/i);
   assert.match(script, /local MCP fixture|read-only MCP fixture/i);
-  assert.match(script, /miller_mcp\/task18\/read_only_lookup/);
+  assert.match(script, /miller_mcp\/task18_fixture\/lookup_note/);
   assert.match(script, /typed.*sideband.*Pi|Pi.*typed.*sideband/s);
+});
+
+test("the three-route E2E crosses the broker and packaged bridge boundary", async () => {
+  const routeTest = await readFile(
+    join(repoRoot, "Gateway", "tests", "task18-three-route-e2e.test.mjs"),
+    "utf8",
+  );
+  const codexFixture = await readFile(
+    join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "fake-codex-app-server.mjs"),
+    "utf8",
+  );
+  assert.doesNotMatch(routeTest, /callTask18ReadOnlyMCP|task18-mcp-client\.mjs/);
+  assert.doesNotMatch(codexFixture, /callTask18ReadOnlyMCP|task18-mcp-client\.mjs/);
+  assert.match(routeTest, /MILLER_TASK18_BROKER_HARNESS/);
+  assert.match(routeTest, /MillerCapabilityBridge/);
+  assert.match(routeTest, /miller_capability_broker/);
+  assert.match(routeTest, /tool_result_ok/);
+});
+
+test("the three-route E2E is explicit opt-in outside its packaged runner", async () => {
+  const routeTest = await readFile(
+    join(repoRoot, "Gateway", "tests", "task18-three-route-e2e.test.mjs"),
+    "utf8",
+  );
+  assert.match(routeTest, /skip:\s*!process\.env\.MILLER_TASK18_BROKER_HARNESS/);
+  assert.match(routeTest, /MILLER_TASK18_NODE_PATH/);
 });
 
 test("the Codex fixture keeps its MCP client beside bundled fixture resources", async () => {
   const fixturePath = join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "fake-codex-app-server.mjs");
   const fixture = await readFile(fixturePath, "utf8");
-  assert.match(fixture, /from ["']\.\/task18-mcp-client\.mjs["']/);
-  await readFile(join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "task18-mcp-client.mjs"), "utf8");
+  assert.match(fixture, /from ["']\.\/task18-bridge-client\.mjs["']/);
+  await readFile(join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "task18-bridge-client.mjs"), "utf8");
   await readFile(join(repoRoot, "Tests", "MillerLiveTests", "Fixtures", "read-only-mcp-server.mjs"), "utf8");
 });
 

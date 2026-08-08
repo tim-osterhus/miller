@@ -190,10 +190,10 @@ function printableStrings(bytes) {
   return result;
 }
 
-function assertReviewedBinary(relativePath, digest, text, bundle) {
+function assertReviewedBinary(relativePath, digest, text, { allowSyntheticBinary = false } = {}) {
   const exception = reviewedBinaryExceptions.get(relativePath);
   if (!exception) return false;
-  if (isSyntheticPolicyFixture(bundle)) return true;
+  if (allowSyntheticBinary) return true;
   if (digest !== exception.sha256) fail(`reviewed binary hash changed: ${relativePath}`);
   const privateStrings = text.match(/(?:\/Users\/|\/private\/tmp\/|Desktop\/)[^\n\0]*/g) ?? [];
   for (const value of privateStrings) {
@@ -202,11 +202,6 @@ function assertReviewedBinary(relativePath, digest, text, bundle) {
     }
   }
   return true;
-}
-
-function isSyntheticPolicyFixture(bundle) {
-  const absolute = resolve(bundle);
-  return /(?:^|\/)miller-task18-policy-[^/]+\/\.artifacts\/release\/Miller\.app$/.test(absolute);
 }
 
 async function dependencyClosureInventory(bundle) {
@@ -242,18 +237,18 @@ async function dependencyClosureInventory(bundle) {
   };
 }
 
-async function assertCanonicalDependencyClosure(bundle) {
-  if (isSyntheticPolicyFixture(bundle)) return;
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const inventoryPath = join(repoRoot, "Gateway", "vendor", "development-bundle-inventory.json");
-  const expected = JSON.parse(await readFile(inventoryPath, "utf8"));
+async function assertCanonicalDependencyClosure(bundle, expectedOverride) {
+  const expected = expectedOverride ?? JSON.parse(await readFile(
+    join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "Gateway", "vendor", "development-bundle-inventory.json"),
+    "utf8",
+  ));
   const actual = await dependencyClosureInventory(bundle);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     fail("release dependency closure does not match the canonical file set");
   }
 }
 
-async function collectFiles(bundle) {
+async function collectFiles(bundle, { allowSyntheticBinary = false } = {}) {
   const metadata = await requiredRegular(bundle, "bundle root");
   if (!metadata.isDirectory()) fail(`bundle root is not a directory: ${bundle}`);
   const files = [];
@@ -275,7 +270,7 @@ async function collectFiles(bundle) {
     const text = bytes.includes(0)
       ? printableStrings(bytes)
       : bytes.toString("utf8");
-    const reviewedBinary = assertReviewedBinary(relativePath, digest, text, bundle);
+    const reviewedBinary = assertReviewedBinary(relativePath, digest, text, { allowSyntheticBinary });
     if (
       !reviewedBinary
       && (forbiddenContent.test(text)
@@ -310,13 +305,17 @@ async function assertInventoryOutput(bundle, output, { allowExisting = false } =
   return outputPath;
 }
 
-async function buildInventory(bundle, output, { allowExisting = false } = {}) {
+async function buildInventory(
+  bundle,
+  output,
+  { allowExisting = false, expectedDependencyInventory, allowSyntheticBinary = false } = {},
+) {
   await assertInventoryOutput(bundle, output, { allowExisting });
-  const files = await collectFiles(bundle);
+  const files = await collectFiles(bundle, { allowSyntheticBinary });
   for (const path of exactFiles) {
     await requiredRegular(join(bundle, path), `canonical release file ${path}`);
   }
-  await assertCanonicalDependencyClosure(bundle);
+  await assertCanonicalDependencyClosure(bundle, expectedDependencyInventory);
   for (const component of runtimeInventory) {
     await requiredRegular(join(bundle, component.path), `runtime inventory ${component.path}`);
   }
@@ -345,9 +344,9 @@ async function readInventory(output) {
   return JSON.parse(await readFile(output, "utf8"));
 }
 
-async function verifyInventory(bundle, output) {
+async function verifyInventory(bundle, output, options = {}) {
   const expected = await readInventory(await assertInventoryOutput(bundle, output, { allowExisting: true }));
-  const actual = await buildInventory(bundle, output, { allowExisting: true });
+  const actual = await buildInventory(bundle, output, { ...options, allowExisting: true });
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     fail("release inventory does not match the final bundle");
   }
@@ -370,22 +369,28 @@ async function writeAtomic(output, inventory) {
   }
 }
 
-const args = process.argv.slice(2);
-if (args[0] === "--verify" && args.length === 3) {
-  const inventory = await verifyInventory(args[1], args[2]);
-  process.stdout.write(`MILLER_RELEASE_INVENTORY_VERIFIED_FILES=${inventory.file_count}\n`);
-} else if (args.length === 2) {
-  const [bundle, output] = args;
-  const inventory = await buildInventory(bundle, output);
-  await writeAtomic(resolve(output), inventory);
-  process.stdout.write(`MILLER_RELEASE_INVENTORY_FILES=${inventory.file_count}\n`);
-} else {
-  process.exit(64);
+const invokedScript = process.argv[1]
+  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (invokedScript) {
+  const args = process.argv.slice(2);
+  if (args[0] === "--verify" && args.length === 3) {
+    const inventory = await verifyInventory(args[1], args[2]);
+    process.stdout.write(`MILLER_RELEASE_INVENTORY_VERIFIED_FILES=${inventory.file_count}\n`);
+  } else if (args.length === 2) {
+    const [bundle, output] = args;
+    const inventory = await buildInventory(bundle, output);
+    await writeAtomic(resolve(output), inventory);
+    process.stdout.write(`MILLER_RELEASE_INVENTORY_FILES=${inventory.file_count}\n`);
+  } else {
+    process.exit(64);
+  }
 }
 
 export {
   buildInventory,
   collectFiles,
+  dependencyClosureInventory,
   runtimeInventory,
+  writeAtomic,
   verifyInventory,
 };

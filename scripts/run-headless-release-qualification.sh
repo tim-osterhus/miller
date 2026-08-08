@@ -578,9 +578,9 @@ write_report() {
     printf 'This report is deterministic, synthetic, and sanitized. It makes no owner-visible claim and does not claim Developer ID signing, notarization, publication, real-provider behavior, microphone behavior, audio behavior, browser behavior, clipboard behavior, or account readiness.\n\n'
     printf '## Deterministic matrix\n\n'
     printf '| Evidence | Status | Explicit evidence |\n| --- | --- | --- |\n'
-    printf '| Same read-only tool through Codex typed / App Server | %s | explicit named route result: typed fake Codex App Server independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_typed)"
-    printf '| Same read-only tool through Codex Live sideband / App Server | %s | explicit named route result: GPT-Live sideband fake Codex App Server independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_sideband)"
-    printf '| Same read-only tool through Pi / Gateway | %s | explicit named route result: fake Pi provider through Gateway independently executed the local MCP JSON-RPC fixture and recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_pi)"
+    printf '| Same read-only tool through Codex typed / App Server | %s | packaged MillerCapabilityBridge -> Swift CapabilityBroker -> local MCP JSON-RPC fixture; route-specific broker audit/result and fixture audit recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_typed)"
+    printf '| Same read-only tool through Codex Live sideband / App Server | %s | packaged MillerCapabilityBridge -> Swift CapabilityBroker -> local MCP JSON-RPC fixture; route-specific broker audit/result and fixture audit recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_sideband)"
+    printf '| Same read-only tool through Pi / Gateway | %s | packaged MillerCapabilityBridge -> Swift CapabilityBroker -> local MCP JSON-RPC fixture; route-specific broker audit/result and fixture audit recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_pi)"
     printf '| Read-only automatic policy | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
     printf '| Ask-before-changes approval | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
     printf '| Fully trusted approval | %s | authentic full scripts/test.sh suite |\n' "$(status_for_check deterministic_full)"
@@ -600,6 +600,7 @@ write_report() {
     printf 'Signing: ad-hoc structural verification only\nNotarization: NOT_RUN\n'
     printf 'Runtime inventory: MCP Swift SDK, Miller capability bridge, Node.js, Pi overlay, openai, and partial-json only\n'
     printf 'Wake foundation: source-only for v0.1.2 and excluded from the application SBOM/runtime inventory\n\n'
+    printf 'Nonblocking follow-up boundary: exhaustive transitive Swift SBOM expansion, opaque canonical-data provenance binding, broader ancestor-symlink hardening beyond the introduced proof paths, official Node upstream build-path removal, and generalized process-group redesign are deferred beyond this bounded Task 18 closure.\n\n'
     printf 'Baseline process identities preserved: Miller PIDs %s; Gateway PIDs %s; helper/test baseline PIDs %s. UID, executable path hash, parent, and start time were unchanged.\n' \
       "$baseline_miller_pid_record" "$baseline_gateway_pid_record" "$baseline_helper_pid_record"
     printf 'Measurement-owned process tree: cold %s processes, warm %s processes; all were stopped after measurement.\n\n' \

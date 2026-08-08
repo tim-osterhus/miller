@@ -38,6 +38,10 @@ let package = Package(
             name: "MillerCapabilityBridge",
             targets: ["MillerCapabilityBridge"]
         ),
+        .executable(
+            name: "MillerTask18RouteHarness",
+            targets: ["MillerTask18RouteHarness"]
+        ),
     ],
     dependencies: [
         .package(
@@ -84,6 +88,10 @@ let package = Package(
                 "MillerCapabilities",
                 .product(name: "MCP", package: "swift-sdk"),
             ]
+        ),
+        .executableTarget(
+            name: "MillerTask18RouteHarness",
+            dependencies: ["MillerCapabilities", "MillerCore"]
         ),
         .executableTarget(
             name: "MillerApp",

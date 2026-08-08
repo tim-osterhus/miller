@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
-import { callTask18ReadOnlyMCP } from "./task18-mcp-client.mjs";
+import { callTask18Bridge } from "./task18-bridge-client.mjs";
 
 const mode = process.argv[2] ?? "normal";
 const pidPath = process.argv[3];
@@ -52,17 +52,13 @@ let nativeApprovalResponses = 0;
 let inventoryRefreshFloodCount = 0;
 const pendingInventoryRefreshes = new Map();
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
-const task18ToolMarker = "miller_mcp/task18/read_only_lookup";
+const task18ToolMarker = "miller_mcp/task18_fixture/lookup_note";
 
 async function task18RouteResult(value) {
   if (typeof value !== "string" || value !== task18ToolMarker) {
     process.exit(59);
   }
-  return callTask18ReadOnlyMCP({
-    root: process.env.MILLER_MCP_FIXTURE_ROOT,
-    auditPath: process.env.MILLER_MCP_FIXTURE_AUDIT_PATH,
-    route: process.env.MILLER_TASK18_ROUTE,
-  });
+  return callTask18Bridge();
 }
 
 function featureConfigurationIsAdmitted() {
@@ -237,7 +233,7 @@ async function emitLifecycle() {
     const result = await task18RouteResult(realtimePrompt);
     const item = {
       type: "mcpToolCall", id: "task18-read-only-sideband",
-      server: "miller_mcp", tool: "task18/read_only_lookup",
+      server: "miller-capability-bridge", tool: result.toolName,
       arguments: {}, status: "inProgress",
     };
     notify("thread/realtime/itemAdded", {
@@ -247,10 +243,11 @@ async function emitLifecycle() {
       threadId: emittedThread, turnId: "task18-live-turn-1",
       item: {
         ...item, status: "completed",
-        result: { content: [{ type: "text", text: result }], isError: false },
+        result: { content: [{ type: "text", text: result.result }], isError: false },
       },
     });
     notify("thread/realtime/closed", { threadId: emittedThread, reason: "synthetic-complete" });
+    setTimeout(() => process.exit(0), 0);
     return;
   }
   if (mode === "realtime-error") {
@@ -809,7 +806,7 @@ lines.on("line", async (line) => {
         const result = await task18RouteResult(input[0].text);
         const item = {
           type: "mcpToolCall", id: "task18-read-only-typed",
-          server: "miller_mcp", tool: "task18/read_only_lookup",
+          server: "miller-capability-bridge", tool: result.toolName,
           arguments: {}, status: "inProgress",
         };
         notify("item/started", { threadId, turnId: typedTurnId, startedAtMs: 1, item });
@@ -817,7 +814,7 @@ lines.on("line", async (line) => {
           threadId, turnId: typedTurnId, completedAtMs: 2,
           item: {
             ...item, status: "completed",
-            result: { content: [{ type: "text", text: result }], isError: false },
+            result: { content: [{ type: "text", text: result.result }], isError: false },
           },
         });
       } else if (mode === "typed-failure") {
@@ -845,6 +842,7 @@ lines.on("line", async (line) => {
         threadId,
         turn: { id: typedTurnId, status: "completed", items: [], error: null },
       });
+      if (mode === "typed-task18-three-route") setTimeout(() => process.exit(0), 0);
       return;
     }
     if (mode === "typed-refresh" && request.id === "typed-refresh-1") {

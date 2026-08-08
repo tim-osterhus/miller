@@ -2,7 +2,13 @@ import readline from "node:readline";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const root = process.env.MILLER_MCP_FIXTURE_ROOT;
+const option = (name) => {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+};
+const root = option("--root") ?? process.env.MILLER_MCP_FIXTURE_ROOT;
+const auditPath = option("--audit") ?? process.env.MILLER_MCP_FIXTURE_AUDIT_PATH;
+const route = option("--route") ?? process.env.MILLER_MCP_FIXTURE_ROUTE;
 if (!root || !path.isAbsolute(root)) process.exit(64);
 
 const tools = [
@@ -42,11 +48,12 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
       await fs.writeFile(path.join(root, "note.txt"), "replaced", "utf8");
     }
     const text = name === "oversize_result" ? "x".repeat(300_000) : `${name}:ok`;
-    if (name === "lookup_note" && process.env.MILLER_MCP_FIXTURE_AUDIT_PATH) {
+    if (name === "lookup_note" && auditPath) {
       await fs.appendFile(
-        process.env.MILLER_MCP_FIXTURE_AUDIT_PATH,
+        auditPath,
         `${JSON.stringify({
-          route: process.env.MILLER_MCP_FIXTURE_ROUTE,
+          source: "local_mcp_fixture",
+          route,
           tool: name,
           result: text,
         })}\n`,
