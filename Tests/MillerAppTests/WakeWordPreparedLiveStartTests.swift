@@ -160,7 +160,7 @@ struct WakeWordPreparedLiveStartTests {
     }
 
     @Test @MainActor
-    func manualLiveDoesNotInvokeWakeCleanupCallback() async {
+    func manualLiveInvokesWakeCleanupCallbackAfterTerminalCleanup() async {
         let callbacks = WakeLiveCleanupCallbacks()
         let model = AppPresentationModel(
             dependencies: HostDependencies(
@@ -186,7 +186,7 @@ struct WakeWordPreparedLiveStartTests {
 
         await model.startLiveVoice()
 
-        #expect(await callbacks.finishedCount == 0)
+        #expect(await callbacks.finishedCount == 1)
         #expect(model.voiceState == .closed)
     }
 }

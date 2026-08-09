@@ -1442,11 +1442,9 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         await prepareLiveStart(activationSource)
-        liveVoiceFinishedDelivered = activationSource != .wakeword
+        liveVoiceFinishedDelivered = false
         guard canStartLiveVoice else {
-            if activationSource == .wakeword {
-                await deliverLiveVoiceFinishedIfNeeded()
-            }
+            await deliverLiveVoiceFinishedIfNeeded()
             return
         }
         liveVoiceStartPending = true
