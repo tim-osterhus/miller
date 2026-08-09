@@ -486,7 +486,7 @@ final class AppPresentationModel: ObservableObject {
     private let capabilityController: CapabilityController?
     private let prepareLiveStart: @MainActor @Sendable (
         VoiceActivationSource
-    ) async -> Void
+    ) async -> Bool
     private let liveVoiceFinished: @MainActor @Sendable () async -> Void
     private let voiceHistoryAttachmentBuilder = VoiceHistoryAttachmentBuilder()
     private var turnObservation: Task<Void, Never>?
@@ -543,7 +543,7 @@ final class AppPresentationModel: ObservableObject {
         capabilityController: CapabilityController? = nil,
         prepareLiveStart: @escaping @MainActor @Sendable (
             VoiceActivationSource
-        ) async -> Void = { _ in },
+        ) async -> Bool = { _ in false },
         liveVoiceFinished: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.dependencies = dependencies
@@ -1436,13 +1436,14 @@ final class AppPresentationModel: ObservableObject {
     ) async {
         guard canStartLiveVoice else {
             if activationSource == .wakeword {
-                liveVoiceFinishedDelivered = false
+                liveVoiceFinishedDelivered = !(await prepareLiveStart(
+                    activationSource
+                ))
                 await deliverLiveVoiceFinishedIfNeeded()
             }
             return
         }
-        await prepareLiveStart(activationSource)
-        liveVoiceFinishedDelivered = false
+        liveVoiceFinishedDelivered = !(await prepareLiveStart(activationSource))
         guard canStartLiveVoice else {
             await deliverLiveVoiceFinishedIfNeeded()
             return
@@ -3302,7 +3303,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             voiceHistory: voiceHistory,
             capabilityController: capabilityController,
             prepareLiveStart: { [weak wakeIntegration] source in
-                await wakeIntegration?.prepareLiveStart(source)
+                await wakeIntegration?.prepareLiveStart(source) ?? false
             },
             liveVoiceFinished: { [weak wakeIntegration] in
                 await wakeIntegration?.liveVoiceFinished()

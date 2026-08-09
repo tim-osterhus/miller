@@ -25,10 +25,19 @@ final class WakeWordLiveIntegration {
         )
     }
 
-    func prepareLiveStart(_ source: VoiceActivationSource) async {
-        guard source == .manual else { return }
+    func prepareLiveStart(_ source: VoiceActivationSource) async -> Bool {
+        if source == .wakeword {
+            return liveSessionActive
+        }
+        guard let production else { return false }
+        let stateBeforeSuspension = production.state
+        await production.suspend(.foregroundSession)
+        guard stateBeforeSuspension != production.state,
+              production.state == .suspended(.foregroundSession) else {
+            return false
+        }
         liveSessionActive = true
-        await production?.suspend(.foregroundSession)
+        return true
     }
 
     func liveVoiceFinished() async {

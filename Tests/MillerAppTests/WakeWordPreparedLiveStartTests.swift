@@ -104,7 +104,11 @@ struct WakeWordPreparedLiveStartTests {
                 end: {}
             ),
             prepareLiveStart: { source in
-                if source == .wakeword { await callbacks.markSuspended() }
+                if source == .wakeword {
+                    await callbacks.markSuspended()
+                    return true
+                }
+                return false
             },
             liveVoiceFinished: { await callbacks.markFinished() }
         )
@@ -145,7 +149,11 @@ struct WakeWordPreparedLiveStartTests {
                 end: {}
             ),
             prepareLiveStart: { source in
-                if source == .wakeword { await callbacks.markSuspended() }
+                if source == .wakeword {
+                    await callbacks.markSuspended()
+                    return true
+                }
+                return false
             },
             liveVoiceFinished: { await callbacks.markFinished() }
         )
@@ -160,7 +168,7 @@ struct WakeWordPreparedLiveStartTests {
     }
 
     @Test @MainActor
-    func manualLiveInvokesWakeCleanupCallbackAfterTerminalCleanup() async {
+    func manualLiveWithoutWakeIntegrationDoesNotInvokeCleanupCallback() async {
         let callbacks = WakeLiveCleanupCallbacks()
         let model = AppPresentationModel(
             dependencies: HostDependencies(
@@ -186,7 +194,7 @@ struct WakeWordPreparedLiveStartTests {
 
         await model.startLiveVoice()
 
-        #expect(await callbacks.finishedCount == 1)
+        #expect(await callbacks.finishedCount == 0)
         #expect(model.voiceState == .closed)
     }
 }
