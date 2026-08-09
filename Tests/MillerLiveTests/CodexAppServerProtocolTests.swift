@@ -842,6 +842,52 @@ struct CodexAppServerProtocolTests {
         }
     }
 
+    @Test
+    func initializeAndLoginResponsesIgnoreAdditiveRootAndResultFields() throws {
+        let initialize = try protocolCodec.decode(line("""
+        {"id":"request-1:initialize","futureRoot":true,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex","futureResult":{"enabled":true}}}
+        """))
+        #expect(initialize == .initializeResponse(id: "request-1:initialize"))
+
+        let login = try protocolCodec.decode(line("""
+        {"id":"request-1:login","futureRoot":{"version":2},"result":{"type":"chatgptAuthTokens","futureResult":true}}
+        """))
+        #expect(login == .loginResponse(id: "request-1:login"))
+
+        for frame in [
+            "{\"id\":\"request-1:initialize\",\"result\":{\"codexHome\":7,\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex\"}}",
+            "{\"id\":\"request-1:initialize\",\"result\":{\"codexHome\":\"relative\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex\"}}",
+            "{\"id\":\"request-1:login\",\"result\":{\"type\":7,\"futureResult\":true}}",
+            "{\"id\":\"request-1:login\",\"result\":{\"type\":\"apikey\",\"futureResult\":true}}",
+        ] {
+            #expect(throws: LiveProtocolError.invalidField) {
+                try protocolCodec.decode(line(frame))
+            }
+        }
+
+        #expect(throws: LiveProtocolError.missingField) {
+            try protocolCodec.decode(line("""
+            {"id":"request-1:initialize","futureRoot":true,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","userAgent":"codex"}}
+            """))
+        }
+    }
+
+    @Test
+    func realtimeItemAddedRequiresBoundedJSONObjectButAllowsAdditiveFields() throws {
+        let valid = try protocolCodec.decode(line("""
+        {"method":"thread/realtime/itemAdded","params":{"threadId":"thread-1","item":{"future":true,"nested":{"value":[1,2,3]}}}}
+        """))
+        #expect(valid == .realtimeItemAdded(threadID: "thread-1"))
+
+        for item in ["null", "7", "[1,2,3]"] {
+            #expect(throws: LiveProtocolError.invalidField) {
+                try protocolCodec.decode(line(
+                    "{\"method\":\"thread/realtime/itemAdded\",\"params\":{\"threadId\":\"thread-1\",\"item\":\(item)}}"
+                ))
+            }
+        }
+    }
+
     private func line(_ value: String) -> Data { Data(value.utf8) }
 
     private func threadStartResponse(id: String, threadID: String) -> String {

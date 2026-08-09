@@ -202,17 +202,16 @@ public struct CodexAppServerProtocol: Sendable {
             guard let code = error["code"] as? Int else { throw LiveProtocolError.invalidField }
             return .requestError(id: id, code: code, message: try boundedText(error, "message"))
         }
-        try requireFields(root, required: ["id", "result"], optional: [])
+        try requireRequiredFields(root, required: ["id", "result"])
         guard let id = root["id"] as? String,
               let result = root["result"] as? [String: Any]
         else {
             throw LiveProtocolError.invalidField
         }
         if id.hasSuffix(":initialize") {
-            try requireFields(
+            try requireRequiredFields(
                 result,
-                required: ["codexHome", "platformFamily", "platformOs", "userAgent"],
-                optional: []
+                required: ["codexHome", "platformFamily", "platformOs", "userAgent"]
             )
             let codexHome = try string(result, "codexHome")
             guard codexHome.hasPrefix("/") else { throw LiveProtocolError.invalidField }
@@ -222,7 +221,7 @@ public struct CodexAppServerProtocol: Sendable {
             return .initializeResponse(id: id)
         }
         if id.hasSuffix(":login") {
-            try requireFields(result, required: ["type"], optional: [])
+            try requireRequiredFields(result, required: ["type"])
             guard try string(result, "type") == "chatgptAuthTokens" else {
                 throw LiveProtocolError.invalidField
             }
@@ -381,7 +380,10 @@ public struct CodexAppServerProtocol: Sendable {
             return .threadStarted(threadID: try validatedThread(params["thread"]))
         case "thread/realtime/itemAdded":
             try requireFields(params, required: ["threadId", "item"], optional: [])
-            _ = params["item"]
+            guard let item = params["item"] as? [String: Any] else {
+                throw LiveProtocolError.invalidField
+            }
+            try validateBoundedJSON(item)
             return .realtimeItemAdded(threadID: try string(params, "threadId"))
         case "thread/realtime/started":
             try requireFields(params, required: ["threadId", "version"], optional: ["realtimeSessionId"])

@@ -108,9 +108,11 @@ struct CodexTypedReasoningGatewayTests {
                 && factory.latestClient?.hasActiveTypedTurn == true
         }
         let materialized = try #require(
-            try FileManager.default.contentsOfDirectory(
+            FileManager.default.enumerator(
                 at: parent, includingPropertiesForKeys: nil
-            ).first { $0.lastPathComponent.hasPrefix("portable-skills-") }
+            )?.compactMap { $0 as? URL }.first {
+                $0.lastPathComponent.hasPrefix("portable-skills-")
+            }
         )
         try FileManager.default.removeItem(at: materialized)
         try FileManager.default.createSymbolicLink(
@@ -157,6 +159,62 @@ struct CodexTypedReasoningGatewayTests {
         ])
         #expect(factory.createdRoots.allSatisfy {
             !FileManager.default.fileExists(atPath: $0.path)
+        })
+    }
+
+    @Test
+    func concurrentTypedClientsUseDistinctBoundedWorkspacesAndCleanThem() async throws {
+        let workspaceParent = FileManager.default.temporaryDirectory.appending(
+            path: "miller-typed-workspace-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(
+            at: workspaceParent,
+            withIntermediateDirectories: false
+        )
+        let marker = workspaceParent.appending(path: "cwd-record.txt")
+        defer { try? FileManager.default.removeItem(at: workspaceParent) }
+
+        let factory = TypedClientFactory(
+            mode: "typed-record-workspace", extraArguments: [marker.path]
+        )
+        let firstGateway = CodexTypedReasoningGateway(
+            makeClient: { try factory.makeClient() },
+            credential: { credential },
+            model: { "gpt-5.6-terra" },
+            cwd: workspaceParent.path
+        )
+        let secondGateway = CodexTypedReasoningGateway(
+            makeClient: { try factory.makeClient() },
+            credential: { credential },
+            model: { "gpt-5.6-terra" },
+            cwd: workspaceParent.path
+        )
+
+        let first = Task { () throws -> [ReasoningEvent] in
+            try await collect(try await firstGateway.start(request(
+                context: [], userText: "first"
+            )))
+        }
+        let second = Task { () throws -> [ReasoningEvent] in
+            try await collect(try await secondGateway.start(request(
+                context: [], userText: "second"
+            )))
+        }
+        _ = try await first.value
+        _ = try await second.value
+
+        let cwds = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        #expect(cwds.count == 2)
+        #expect(Set(cwds).count == 2)
+        #expect(cwds.allSatisfy {
+            $0.hasPrefix(workspaceParent.path + "/miller-typed-request.")
+        })
+        #expect(try FileManager.default.contentsOfDirectory(
+            at: workspaceParent, includingPropertiesForKeys: nil
+        ).allSatisfy {
+            !$0.lastPathComponent.hasPrefix("miller-typed-request.")
         })
     }
 

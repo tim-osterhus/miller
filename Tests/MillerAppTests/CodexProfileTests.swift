@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import MillerCore
 import MillerGateway
+import MillerLive
 import MillerStorage
 import Testing
 @testable import MillerApp
@@ -259,6 +260,74 @@ struct CodexProfileTests {
         #expect(await counts.values().remote == 1)
     }
 
+    @Test
+    func snapshotDiscardsReadinessFromAProfileGenerationThatMutatedDuringProbe() async throws {
+        _ = NSApplication.shared
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let cache = root.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex OAuth",
+            baseURL: nil,
+            model: "gpt-5",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        let credentials = KeychainCredentialStore()
+        try await credentials.store(
+            CredentialEnvelope(
+                providerKind: .codexOAuth,
+                payload: Data("synthetic".utf8)
+            ),
+            for: profile.credentialReference
+        )
+        let gatewayRoot = helperPath
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let supervisor = GatewaySupervisor(configuration: .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [helperPath.path, "normal"],
+            workingDirectoryURL: gatewayRoot,
+            environment: [
+                "LANG": "C", "LC_ALL": "C", "TMPDIR": cache.path, "TZ": "UTC",
+            ],
+            terminationGrace: .milliseconds(200)
+        ))
+        let probe = SnapshotReadinessProbe()
+        let controller = ProviderSettingsController(
+            repository: repository,
+            credentials: credentials,
+            supervisor: supervisor,
+            databaseURL: database,
+            cacheURL: cache,
+            codexTypedReadiness: { profile in await probe.load(profile) },
+            codexTypedRemoteReadiness: { _ in .init(state: .remoteProbeTimedOut) }
+        )
+        defer {
+            Task {
+                await supervisor.shutdown()
+                await repository.close()
+                try? await credentials.delete(for: profile.credentialReference)
+            }
+        }
+
+        let snapshotTask = Task { try await controller.snapshot() }
+        try await probe.waitUntilEntered()
+        try await controller.saveCodexModel("gpt-5.6-terra")
+        await probe.release()
+
+        let snapshot = try await snapshotTask.value
+        #expect(snapshot.profiles.first?.model == "gpt-5.6-terra")
+        #expect(snapshot.readiness == "Ready")
+        #expect(await probe.calls == 2)
+    }
+
     private var helperPath: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -285,5 +354,30 @@ struct CodexProfileTests {
             "MILLER_NODE_PATH": "/opt/homebrew/opt/node@22/bin/node",
             "MILLER_FAKE_HELPER_MODE": "normal",
         ]
+    }
+}
+
+private actor SnapshotReadinessProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+
+    func load(_ profile: ProviderProfile) async -> CodexTypedReadiness {
+        _ = profile
+        calls += 1
+        if calls == 1 {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return .init(state: .ready)
+    }
+
+    func waitUntilEntered() async throws {
+        while calls == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }

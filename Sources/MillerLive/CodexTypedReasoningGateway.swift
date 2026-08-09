@@ -10,6 +10,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         let generation: Int
         let client: CodexAppServerClient
         let skillRoot: URL?
+        let workspaceRoot: URL
         var cancelled: Bool
     }
 
@@ -48,12 +49,21 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         }
         let client = try makeClient()
         let requestID = UUID().uuidString.lowercased()
+        let workspaceRoot: URL
+        do {
+            workspaceRoot = try Self.makeRequestWorkspace(
+                parent: skillParent, requestID: requestID
+            )
+        } catch {
+            throw error
+        }
         activeRun = ActiveRun(
             requestID: requestID,
             turnID: request.turnID,
             generation: request.generation,
             client: client,
             skillRoot: nil,
+            workspaceRoot: workspaceRoot,
             cancelled: false
         )
         let credential: CodexOAuthCredential
@@ -65,6 +75,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
             try requireActive(requestID: requestID)
         } catch {
             if activeRun?.requestID == requestID { activeRun = nil }
+            try? Self.removeRequestWorkspace(workspaceRoot, parent: skillParent)
             throw error
         }
         let context = request.context.map {
@@ -82,18 +93,19 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         do {
             skillRuntime = try Self.materializeSkills(
                 request.portableSkillAttachment,
-                parent: skillParent,
+                parent: workspaceRoot,
                 requestID: requestID
             )
         } catch {
             activeRun = nil
+            try? Self.removeRequestWorkspace(workspaceRoot, parent: skillParent)
             throw error
         }
         let source = client.typedEvents(
             requestID: requestID,
             credential: credential,
             model: model,
-            cwd: cwd,
+            cwd: workspaceRoot.path,
             context: context,
             userText: currentText,
             skillRoot: skillRuntime?.root.path,
@@ -114,6 +126,7 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
                         generation: request.generation,
                         client: client,
                         skillRoot: skillRuntime?.root,
+                        workspaceRoot: workspaceRoot,
                         cancelled: false
                     ),
                     continuation: continuation
@@ -293,16 +306,27 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         _ run: ActiveRun,
         continuation: AsyncThrowingStream<ReasoningEvent, Error>.Continuation
     ) -> Bool {
-        guard let root = run.skillRoot else { return true }
+        var success = true
+        if let root = run.skillRoot {
+            do {
+                try Self.removeSkillRoot(root, parent: run.workspaceRoot)
+            } catch {
+                success = false
+            }
+        }
         do {
-            try Self.removeSkillRoot(root, parent: URL(
-                fileURLWithPath: cwd, isDirectory: true
-            ))
-            return true
+            try Self.removeRequestWorkspace(
+                run.workspaceRoot,
+                parent: URL(fileURLWithPath: cwd, isDirectory: true)
+            )
         } catch {
+            success = false
+        }
+        guard success else {
             continuation.yield(.status(.portableSkillCleanupPending))
             return false
         }
+        return true
     }
 
     private func finishCleanupFailure(
@@ -349,6 +373,39 @@ public actor CodexTypedReasoningGateway: ReasoningGateway {
         for child in children {
             try removeSkillRoot(child, parent: trustedParent)
         }
+    }
+
+    private static func makeRequestWorkspace(parent: URL, requestID: String) throws -> URL {
+        let trustedParent = parent.standardizedFileURL
+        guard trustedParent.isFileURL,
+              trustedParent.path.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: trustedParent.path)
+        else { throw CodexTypedProtocolError.invalidField }
+        let root = trustedParent.appendingPathComponent(
+            "miller-typed-request.\(requestID)", isDirectory: true
+        )
+        guard root.deletingLastPathComponent().standardizedFileURL == trustedParent
+        else { throw CodexTypedProtocolError.invalidField }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return root
+    }
+
+    private static func removeRequestWorkspace(_ root: URL, parent: URL) throws {
+        let trustedParent = parent.standardizedFileURL
+        let candidate = root.standardizedFileURL
+        guard candidate.deletingLastPathComponent() == trustedParent,
+              candidate.lastPathComponent.hasPrefix("miller-typed-request.")
+        else { throw CodexTypedProtocolError.invalidField }
+        let values = try candidate.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey,
+        ])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw CodexTypedProtocolError.invalidField
+        }
+        try FileManager.default.removeItem(at: candidate)
     }
 
     private static func cleanupFailureStream()

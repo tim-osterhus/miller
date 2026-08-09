@@ -310,6 +310,8 @@ actor GPTLiveController {
         var projectedSkillRoot: URL?
         var projectedSkillInstructions: String?
         var projectedSkillCleanupAttempted = false
+        var helperProcess: CodexAppServerProcess?
+        var helperCleanupFailurePresented = false
         if makeDirectSession == nil,
            let attachment = try await portableSkillAttachment(confirmedProfile.id)
         {
@@ -358,6 +360,7 @@ actor GPTLiveController {
                 cleanupPendingDelay: cleanupPendingDelay,
                 spawnedProcessVerifier: spawnedProcessVerifier
             ))
+            helperProcess = process
             let providerCallbacks = providerCallbacks()
             let client = CodexAppServerClient(
                 process: process,
@@ -456,15 +459,21 @@ actor GPTLiveController {
                         await self.markClientSessionActive()
                         await receive(.sessionAdmitted(id: sessionID))
                     },
-                    onCleanupPending: {
-                        await self.markTerminalFailurePresented()
-                        await receive(.failed(code: "cleanup_pending"))
-                    }
+                    onCleanupPending: {},
                 ) { event in
                     if case .failed = event {
                         await self.markTerminalFailurePresented()
                     }
                     await Self.present(event, receive: receive)
+                }
+            }
+            if let helperProcess, helperProcess.cleanupPending {
+                helperCleanupFailurePresented = true
+                terminalFailurePresented = true
+                await receive(.failed(code: "cleanup_pending"))
+                _ = await helperProcess.stop()
+                guard !helperProcess.cleanupPending else {
+                    throw GPTLiveSkillProjectionError.cleanupPending
                 }
             }
             await releaseAttachedPeerIfNeeded()
@@ -479,6 +488,13 @@ actor GPTLiveController {
                 guard await cleanupProjectedSkillRoot(
                     projectedSkillRoot, projector: projector, receive: receive
                 ) else { throw GPTLiveSkillProjectionError.cleanupPending }
+            }
+            if let helperProcess, helperProcess.cleanupPending,
+               !helperCleanupFailurePresented {
+                helperCleanupFailurePresented = true
+                terminalFailurePresented = true
+                await receive(.failed(code: "cleanup_pending"))
+                _ = await helperProcess.stop()
             }
             guard !stopRequested || clientSessionBecameActive else { return }
             if !terminalFailurePresented {

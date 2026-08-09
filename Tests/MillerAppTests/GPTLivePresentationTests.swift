@@ -1662,7 +1662,7 @@ struct GPTLivePresentationTests {
 
         #expect(chmod(temporaryParent.path, 0o500) == 0)
         let end = Task { await model.endLiveVoice() }
-        try await waitUntil {
+        try await waitUntil(timeout: .seconds(6)) {
             await MainActor.run { model.liveVoiceFailureCode == "cleanup_pending" }
         }
 
@@ -2218,9 +2218,10 @@ struct GPTLivePresentationTests {
     }
 
     private func waitUntil(
+        timeout: Duration = .seconds(2),
         _ predicate: @escaping @Sendable () async -> Bool
     ) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while !(await predicate()) {
             guard ContinuousClock.now < deadline else { throw LiveProcessError.timeout }
             try await Task.sleep(for: .milliseconds(10))

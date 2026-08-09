@@ -227,6 +227,53 @@ struct CodexAppServerProcessTests {
         #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
     }
 
+    @Test
+    func stopDuringSpawnVerifierCannotPublishLiveProcessOrResurrectRoot() async throws {
+        let verifier = BlockingSpawnVerifier()
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "normal",
+            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) }
+        ))
+        let start = Task { () -> Bool in
+            do {
+                _ = try process.start()
+                return true
+            } catch {
+                return false
+            }
+        }
+        try await waitUntil { verifier.isEntered }
+
+        let stop = Task { await process.stop() }
+        try await Task.sleep(for: .milliseconds(30))
+        verifier.release()
+
+        #expect(await start.value == false)
+        #expect(await stop.value == .completed)
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func cleanupPendingCallbackOnlyFiresForFinalPendingResult() async throws {
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "ignore-term"],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(80),
+            cleanupPendingDelay: .milliseconds(20),
+            cleanupDeadline: .milliseconds(300)
+        ))
+        _ = try process.start()
+        let callback = CleanupCallbackCounter()
+
+        #expect(await process.stop(onCleanupPending: { await callback.report() }) == .completed)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(await callback.calls == 0)
+        #expect(!process.cleanupPending)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
     @Test(arguments: ["hang-child", "crash-child"])
     func processGroupKillsRecordedDescendantAndCleansRoot(mode: String) async throws {
         let pidFile = repository.appendingPathComponent(".artifacts/\(mode)-pid.txt")
@@ -598,6 +645,39 @@ private final class SpawnVerifierProbe: @unchecked Sendable {
         self.pid = pid
         guard outcome == .accept else { throw SpawnVerifierError.rejected }
     }
+}
+
+private final class BlockingSpawnVerifier: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var isEntered: Bool {
+        condition.lock(); defer { condition.unlock() }
+        return entered
+    }
+
+    func verify(pid: pid_t) throws {
+        _ = pid
+        condition.lock()
+        entered = true
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+private actor CleanupCallbackCounter {
+    private(set) var calls = 0
+
+    func report() { calls += 1 }
 }
 
 private actor ProcessStopCompletion {

@@ -5,6 +5,10 @@ import { callTask18Bridge } from "./task18-bridge-client.mjs";
 
 const mode = process.argv[2] ?? "normal";
 const pidPath = process.argv[3];
+if (mode === "ignore-term" || mode === "typed-capability-inventory-late" ||
+    mode === "typed-late-terminal" || mode === "realtime-late-start") {
+  process.on("SIGTERM", () => {});
+}
 if (mode === "record-helper-launch") {
   fs.writeFileSync(pidPath, "launched\n", { mode: 0o600 });
 }
@@ -50,6 +54,7 @@ let realtimePrompt = null;
 let connectorApprovalResponses = 0;
 let nativeApprovalResponses = 0;
 let inventoryRefreshFloodCount = 0;
+let lateInventoryResponseScheduled = false;
 const pendingInventoryRefreshes = new Map();
 const expectedFeatureConfig = "[features]\nrealtime_conversation = true\n\n[realtime]\nversion = \"v1\"\n";
 const task18ToolMarker = "miller_mcp/task18_fixture/lookup_note";
@@ -517,6 +522,13 @@ lines.on("line", async (line) => {
         if (pidPath) fs.writeFileSync(pidPath, "inventory-pending\n", { mode: 0o600 });
         return;
       }
+      if (mode === "typed-capability-inventory-late" &&
+          request.method === "app/list" && request.params?.cursor === null &&
+          !lateInventoryResponseScheduled) {
+        lateInventoryResponseScheduled = true;
+        setTimeout(() => respondInventoryRequest(request), 60);
+        return;
+      }
       if (mode === "typed-capability-inventory-refresh") {
         const refreshId = `inventory-refresh-${request.id}`;
         pendingInventoryRefreshes.set(refreshId, request);
@@ -561,6 +573,9 @@ lines.on("line", async (line) => {
       }
       helperThreadCreated = true;
       threadId = "typed-thread-1";
+      if (mode === "typed-record-workspace" && pidPath) {
+        fs.appendFileSync(pidPath, `${request.params.cwd}\n`, { mode: 0o600 });
+      }
       const response = {
         id: request.id,
         result: typedThreadStartResult(threadId, request.params.cwd),
@@ -636,6 +651,20 @@ lines.on("line", async (line) => {
         emitTypedTurnStarted();
       }
       if (mode.startsWith("typed-turn-duplicate-")) return;
+      if (mode === "typed-late-terminal") {
+        notify("item/started", {
+          threadId, turnId: typedTurnId, startedAtMs: 1,
+          item: {
+            type: "mcpToolCall", id: "typed-late-capability-1",
+            server: "gmail", tool: "search", status: "inProgress", arguments: {},
+          },
+        });
+        notify("turn/completed", {
+          threadId,
+          turn: { id: typedTurnId, status: "completed", items: [], error: null },
+        });
+        return;
+      }
       if (mode === "typed-wait" || mode === "typed-portable-skill-wait") {
         if (pidPath) fs.writeFileSync(pidPath, "turn-started\n", { mode: 0o600 });
         return;
@@ -1065,7 +1094,7 @@ lines.on("line", async (line) => {
     }
     const id = mode === "wrong-request" ? "wrong-request" : request.id;
     const result = initializeResult();
-    if (mode === "unknown-field") result.unexpected = true;
+    if (mode === "initialize-required-wrong-type") result.codexHome = 42;
     send({ id, result });
     return;
   }
@@ -1084,7 +1113,7 @@ lines.on("line", async (line) => {
     }
     if (mode === "login-notifications-before-response") emitAccountNotifications();
     const loginResult = { type: "chatgptAuthTokens" };
-    if (mode === "login-response-extra") loginResult.future = true;
+    if (mode === "login-required-wrong-type") loginResult.type = 42;
     send({ id: request.id, result: loginResult });
     if (mode !== "thread-response-before-login-notifications" &&
         mode !== "login-notifications-before-response" &&
@@ -1191,6 +1220,11 @@ lines.on("line", async (line) => {
     }
     if (mode === "wait-realtime-response") {
       fs.writeFileSync(pidPath, "realtime-response\n", { mode: 0o600 });
+      return;
+    }
+    if (mode === "realtime-late-start") {
+      send({ id: request.id, result: {} });
+      setTimeout(() => { void emitLifecycle(); }, 60);
       return;
     }
     if (mode === "unexpected-sdp") {

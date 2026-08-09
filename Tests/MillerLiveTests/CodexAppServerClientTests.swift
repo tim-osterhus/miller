@@ -67,6 +67,33 @@ private final class ApprovalSuspensionProbe: @unchecked Sendable {
     }
 }
 
+private final class BlockingClientSpawnVerifier: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var isEntered: Bool {
+        condition.lock(); defer { condition.unlock() }
+        return entered
+    }
+
+    func verify(pid: pid_t) throws {
+        _ = pid
+        condition.lock()
+        entered = true
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 private let syntheticSHA256Fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 
 private let syntheticWebRTCOffer = """
@@ -181,6 +208,96 @@ struct CodexAppServerClientTests {
         #expect(!catalog.descriptors.contains {
             $0.id.rawValue.contains("miller-capability-bridge")
         })
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func inventoryRejectsCatalogThatArrivesAfterItsAbsoluteDeadline() async throws {
+        let verifier = BlockingClientSpawnVerifier()
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "typed-capability-inventory"],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(100),
+            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) }
+        ))
+        let client = CodexAppServerClient(process: process)
+        let inventory = Task {
+            try await client.inventoryCapabilities(
+                requestID: "inventory-late-1",
+                credential: credential,
+                codexProviderProfileID: UUID(),
+                existingMillerCapabilities: [],
+                timeout: .milliseconds(20)
+            )
+        }
+        try await waitUntil { verifier.isEntered }
+        try await Task.sleep(for: .milliseconds(50))
+        verifier.release()
+
+        await #expect(throws: CodexAppServerClientError.timeout) {
+            _ = try await inventory.value
+        }
+
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func typedTurnRejectsTerminalThatArrivesAfterItsAbsoluteDeadline() async throws {
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-late-terminal"
+        ))
+        let client = CodexAppServerClient(
+            process: process,
+            onCapabilityActivity: { _ in
+                try? await Task.sleep(for: .milliseconds(60))
+            }
+        )
+
+        await #expect(throws: CodexAppServerClientError.timeout) {
+            for try await _ in client.typedEvents(
+                requestID: "typed-late-terminal-1",
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                context: [],
+                userText: "must time out",
+                timeout: .milliseconds(20)
+            ) {}
+        }
+
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func liveStartupRejectsStartedSessionThatArrivesAfterItsAbsoluteDeadline() async throws {
+        let verifier = BlockingClientSpawnVerifier()
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "persistent"],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(100),
+            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) }
+        ))
+        let client = CodexAppServerClient(process: process)
+        let run = Task {
+            try await client.runUntilClosed(
+                identity: identity,
+                credential: credential,
+                timeout: .milliseconds(20)
+            )
+        }
+        try await waitUntil { verifier.isEntered }
+        try await Task.sleep(for: .milliseconds(50))
+        verifier.release()
+
+        await #expect(throws: CodexAppServerClientError.timeout) {
+            _ = try await run.value
+        }
+
         #expect(!process.isRunning)
         #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
     }
@@ -882,7 +999,7 @@ struct CodexAppServerClientTests {
     }
 
     @Test(arguments: [
-        ("unknown-field", "initializeProtocolMismatch"),
+        ("initialize-required-wrong-type", "initializeProtocolMismatch"),
         ("account-updated-invalid", "threadStartProtocolMismatch"),
     ])
     func startupProtocolMismatchReportsOnlyItsPhase(
@@ -940,7 +1057,7 @@ struct CodexAppServerClientTests {
     }
 
     @Test(arguments: [
-        ("login-response-extra", "loginFrameProtocolMismatch(MillerLive.CodexLoginFrameKind.responseResult, Optional(MillerLive.LiveProtocolError.unknownField))"),
+        ("login-required-wrong-type", "loginFrameProtocolMismatch(MillerLive.CodexLoginFrameKind.response, Optional(MillerLive.LiveProtocolError.invalidField))"),
         ("login-unexpected-notification", "loginSequenceProtocolMismatch"),
     ])
     func loginProtocolMismatchDistinguishesFrameFromSequence(
@@ -1146,7 +1263,8 @@ struct CodexAppServerClientTests {
             arguments: [fixture.path, "wait-stop"],
             temporaryParentURL: temporaryParent,
             terminationGrace: .milliseconds(100),
-            cleanupPendingDelay: .milliseconds(100)
+            cleanupPendingDelay: .milliseconds(100),
+            cleanupDeadline: .milliseconds(500)
         ))
         let client = CodexAppServerClient(process: process)
         let completion = CleanupCompletionFlag()
@@ -1172,7 +1290,7 @@ struct CodexAppServerClientTests {
         try await Task.sleep(for: .milliseconds(300))
 
         #expect(!(await completion.isComplete))
-        #expect(await completion.pendingReports == 1)
+        #expect(await completion.pendingReports == 0)
         #expect(FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
         let secondIdentity = LiveSessionIdentity(
             requestID: "request-2",
@@ -1189,7 +1307,7 @@ struct CodexAppServerClientTests {
 
         #expect(chmod(temporaryParent.path, 0o700) == 0)
         let events = try await first.value
-        #expect(await completion.pendingReports == 1)
+        #expect(await completion.pendingReports == 0)
         #expect(events.last == .closed(threadID: identity.threadID, reason: "stopped"))
         #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
     }
@@ -1353,7 +1471,7 @@ struct CodexAppServerClientTests {
     @Test(arguments: [
         "wrong-request", "wrong-thread", "duplicate-terminal",
         "late-event", "login-error", "malformed", "unknown-method",
-        "unknown-field", "oversized", "realtime-error", "crash-after-start",
+        "initialize-required-wrong-type", "oversized", "realtime-error", "crash-after-start",
         "hang-client", "feature-missing", "feature-incorrect", "unsafe-thread-response",
         "started-v1",
         "account-completed-invalid",

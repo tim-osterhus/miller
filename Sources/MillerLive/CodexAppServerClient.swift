@@ -109,13 +109,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     private final class StartupTimeoutState: @unchecked Sendable {
         private let lock = NSLock()
-        private let deadline: ContinuousClock.Instant?
+        private let deadline: ContinuousClock.Instant
         private var timedOut = false
         private var started = false
         private var completed = false
 
-        init(timeout: Duration? = nil) {
-            deadline = timeout.map { ContinuousClock.now.advanced(by: $0) }
+        init(timeout: Duration) {
+            deadline = ContinuousClock.now.advanced(by: timeout)
         }
 
         func markTimedOut() {
@@ -132,7 +132,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var didTimeOut: Bool {
             lock.lock(); defer { lock.unlock() }
             guard !completed else { return timedOut }
-            return timedOut || (deadline.map { ContinuousClock.now >= $0 } ?? false)
+            if !timedOut, ContinuousClock.now >= deadline { timedOut = true }
+            return timedOut
         }
 
         var didStart: Bool {
@@ -142,11 +143,25 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
         func markCompletedBeforeDeadline() -> Bool {
             lock.lock(); defer { lock.unlock() }
-            guard !timedOut,
-                  deadline.map({ ContinuousClock.now < $0 }) ?? true
+            guard !timedOut, !completed, ContinuousClock.now < deadline
             else { return false }
             completed = true
             return true
+        }
+
+        func acceptFrame() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !completed else { return true }
+            guard !timedOut, ContinuousClock.now < deadline else {
+                timedOut = true
+                return false
+            }
+            return true
+        }
+
+        var remaining: Duration {
+            lock.lock(); defer { lock.unlock() }
+            return max(ContinuousClock.now.duration(to: deadline), .zero)
         }
     }
 
@@ -272,7 +287,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             }
         }
 
-        let timeoutState = StartupTimeoutState()
+        let timeoutState = StartupTimeoutState(timeout: timeout)
         let watchdog = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             timeoutState.markTimedOut()
@@ -290,7 +305,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 prefix: requestID,
                 credential: &currentCredential,
                 codec: typed,
-                iterator: &iterator
+                iterator: &iterator,
+                timeoutState: timeoutState
             )
 
             var apps: [CodexAccountApp] = []
@@ -298,12 +314,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
             var appCursors = Set<String>()
             for pageNumber in 0..<32 {
                 let id = "\(requestID):apps:\(pageNumber)"
+                try requireWithinDeadline(timeoutState)
                 try process.send(try wire.appsListRequest(
                     id: id, cursor: appCursor, limit: 100
                 ))
                 let frame = try await awaitCapabilityResponse(
                     id: id, currentCredential: &currentCredential,
-                    codec: typed, iterator: &iterator
+                    codec: typed, iterator: &iterator, timeoutState: timeoutState
                 )
                 let page = try wire.decodeAppsListResponse(frame, expectedID: id)
                 apps.append(contentsOf: page.items)
@@ -327,10 +344,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
             ).enumerated() {
                 let id = "\(requestID):app-read:\(chunkNumber)"
                 let appIDs = Array(apps[start..<min(start + 100, apps.count)]).map(\.id)
+                try requireWithinDeadline(timeoutState)
                 try process.send(try wire.appsReadRequest(id: id, appIDs: appIDs))
                 let frame = try await awaitCapabilityResponse(
                     id: id, currentCredential: &currentCredential,
-                    codec: typed, iterator: &iterator
+                    codec: typed, iterator: &iterator, timeoutState: timeoutState
                 )
                 appDetails.append(contentsOf: try wire.decodeAppsReadResponse(
                     frame, expectedID: id
@@ -341,10 +359,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
             }
 
             let installedID = "\(requestID):installed"
+            try requireWithinDeadline(timeoutState)
             try process.send(try wire.appsInstalledRequest(id: installedID))
             let installedFrame = try await awaitCapabilityResponse(
                 id: installedID, currentCredential: &currentCredential,
-                codec: typed, iterator: &iterator
+                codec: typed, iterator: &iterator, timeoutState: timeoutState
             )
             let installed = try wire.decodeAppsInstalledResponse(
                 installedFrame, expectedID: installedID
@@ -356,12 +375,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
             var mcpCursors = Set<String>()
             for pageNumber in 0..<32 {
                 let id = "\(requestID):mcp:\(pageNumber)"
+                try requireWithinDeadline(timeoutState)
                 try process.send(try wire.mcpServerStatusListRequest(
                     id: id, cursor: mcpCursor, limit: 100
                 ))
                 let frame = try await awaitCapabilityResponse(
                     id: id, currentCredential: &currentCredential,
-                    codec: typed, iterator: &iterator
+                    codec: typed, iterator: &iterator, timeoutState: timeoutState
                 )
                 let page = try wire.decodeMCPServerStatusResponse(frame, expectedID: id)
                 serverToolCount += page.items.reduce(0) { $0 + $1.tools.count }
@@ -392,6 +412,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 existingMillerCapabilities: existingMillerCapabilities
             )
             await process.stop(onCleanupPending: onCleanupPending)
+            guard timeoutState.markCompletedBeforeDeadline() else {
+                throw CodexAppServerClientError.timeout
+            }
             return catalog
             } catch {
                 await process.stop(onCleanupPending: onCleanupPending)
@@ -513,7 +536,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     credential: &currentCredential,
                     codec: CodexTypedProtocol(),
                     iterator: &iterator,
-                    progress: progress
+                    progress: progress,
+                    timeoutState: timeoutState
                 )
                 let cleanup = await process.stop(onCleanupPending: onCleanupPending)
                 guard cleanup == .completed else {
@@ -638,9 +662,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
             var iterator = source.makeAsyncIterator()
             try await typedHandshake(
                 prefix: prefix, credential: &currentCredential, codec: codec,
-                iterator: &iterator, progress: progress
+                iterator: &iterator, progress: progress,
+                timeoutState: timeoutState
             )
             let threadRequestID = "\(prefix):probe:thread-start"
+            try requireWithinDeadline(timeoutState)
             try process.send(try codec.threadStartRequest(
                 id: threadRequestID, model: model, cwd: cwd
             ))
@@ -649,9 +675,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 cwd: cwd,
                 currentCredential: &currentCredential,
                 codec: codec,
-                iterator: &iterator
+                iterator: &iterator,
+                timeoutState: timeoutState
             )
             let turnRequestID = "\(prefix):probe:turn-start"
+            try requireWithinDeadline(timeoutState)
             try process.send(try codec.turnStartRequest(
                 id: turnRequestID,
                 threadID: helperThreadID,
@@ -664,11 +692,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 threadID: helperThreadID,
                 currentCredential: &currentCredential,
                 codec: codec,
-                iterator: &iterator
+                iterator: &iterator,
+                timeoutState: timeoutState
             )
             var sawStreamedText = false
             var sawTerminal = false
             while let data = try await iterator.next() {
+                try requireWithinDeadline(timeoutState)
                 switch try codec.decode(data) {
                 case .assistantTextDelta(let threadID, let turnID, _, let text)
                     where threadID == helperThreadID && turnID == helperTurnID
@@ -714,8 +744,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 guard let method = object?["method"] as? String,
                       let id = object?["id"] as? String
                 else { throw CodexTypedProtocolError.invalidField }
+                try requireWithinDeadline(timeoutState)
                 try process.send(request)
                 while let data = try await iterator.next() {
+                    try requireWithinDeadline(timeoutState)
                     let message = try codec.decode(data)
                     switch message {
                     case .featureResponse(let responseID) where responseID == id,
@@ -1005,7 +1037,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 $0.identity = nil
             }
         }
-        let timeoutState = StartupTimeoutState()
+        let timeoutState = StartupTimeoutState(timeout: timeout)
         let startupWatchdog = Task {
             do {
                 try await Task.sleep(for: timeout)
@@ -1022,6 +1054,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     identity: identity,
                     credential: credential,
                     offerSDP: offerSDP,
+                    timeoutState: timeoutState,
                     onStartupComplete: { startupWatchdog.cancel() },
                     onCleanupPending: onCleanupPending,
                     emit: emit
@@ -1074,7 +1107,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 $0.typedInterruptID = nil
             }
         }
-        let timeoutState = StartupTimeoutState()
+        let timeoutState = StartupTimeoutState(timeout: timeout)
         let watchdog = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             timeoutState.markTimedOut()
@@ -1088,30 +1121,35 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 var currentCredential = credential
                 let source = try process.start()
                 try Task.checkCancellation()
+                try requireWithinDeadline(timeoutState)
                 var iterator = source.makeAsyncIterator()
                 try await typedHandshake(
                     prefix: requestID,
                     credential: &currentCredential,
                     codec: codec,
-                    iterator: &iterator
+                    iterator: &iterator,
+                    timeoutState: timeoutState
                 )
                 if let skillRoot {
                     let rootsID = "\(requestID):skills-roots"
+                    try requireWithinDeadline(timeoutState)
                     try process.send(try codec.skillsExtraRootsSetRequest(
                         id: rootsID, roots: [skillRoot]
                     ))
                     try await awaitTypedFeature(
                         id: rootsID, credential: &currentCredential,
-                        codec: codec, iterator: &iterator
+                        codec: codec, iterator: &iterator, timeoutState: timeoutState
                     )
                     let listID = "\(requestID):skills-list"
+                    try requireWithinDeadline(timeoutState)
                     try process.send(try codec.skillsListRequest(id: listID, cwd: cwd))
                     try await awaitTypedFeature(
                         id: listID, credential: &currentCredential,
-                        codec: codec, iterator: &iterator
+                        codec: codec, iterator: &iterator, timeoutState: timeoutState
                     )
                 }
                 let threadRequestID = "\(requestID):thread-start"
+                try requireWithinDeadline(timeoutState)
                 try process.send(try codec.threadStartRequest(
                     id: threadRequestID, model: model, cwd: cwd
                 ))
@@ -1120,10 +1158,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     cwd: cwd,
                     currentCredential: &currentCredential,
                     codec: codec,
-                    iterator: &iterator
+                    iterator: &iterator,
+                    timeoutState: timeoutState
                 )
                 state.locked { $0.typedThreadID = helperThreadID }
                 let turnRequestID = "\(requestID):turn-start"
+                try requireWithinDeadline(timeoutState)
                 try process.send(try codec.turnStartRequest(
                     id: turnRequestID,
                     threadID: helperThreadID,
@@ -1137,7 +1177,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     threadID: helperThreadID,
                     currentCredential: &currentCredential,
                     codec: codec,
-                    iterator: &iterator
+                    iterator: &iterator,
+                    timeoutState: timeoutState
                 )
                 state.locked { $0.typedTurnID = responseTurnID }
                 var sequence = CodexTypedTerminalSequence()
@@ -1149,6 +1190,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 var approvalResponseIDs = Set<JSONRPCRequestID>()
                 var approvalCalls = Set<ProviderApprovalCallAuthority>()
                 while let data = try await iterator.next() {
+                    try requireWithinDeadline(timeoutState)
                     switch try capabilityCodec.decodeActivity(
                         data,
                         existingMillerCapabilities: existingMillerCapabilities
@@ -1208,6 +1250,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                         let isTerminal = try sequence.accept(message)
                         if isTerminal {
                             await process.stop(onCleanupPending: onCleanupPending)
+                            guard timeoutState.markCompletedBeforeDeadline() else {
+                                throw CodexAppServerClientError.timeout
+                            }
                             emit(message)
                             return
                         }
@@ -1225,13 +1270,21 @@ public final class CodexAppServerClient: @unchecked Sendable {
         }
     }
 
+    private func requireWithinDeadline(_ timeoutState: StartupTimeoutState?) throws {
+        guard timeoutState?.acceptFrame() ?? true else {
+            throw CodexAppServerClientError.timeout
+        }
+    }
+
     private func awaitTypedFeature(
         id: String,
         credential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws {
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             switch try codec.decode(data) {
             case .featureResponse(let responseID) where responseID == id:
                 return
@@ -1261,9 +1314,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         credential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
         notifications: inout StartupNotifications,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws {
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             switch try codec.decode(data) {
             case .featureResponse(let responseID) where responseID == id:
                 return
@@ -1297,25 +1352,31 @@ public final class CodexAppServerClient: @unchecked Sendable {
         credential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
         iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
-        progress: TypedHandshakeProgress? = nil
+        progress: TypedHandshakeProgress? = nil,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws {
         let initializeID = "\(prefix):initialize"
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.initializeRequest(id: initializeID))
         try await awaitTypedResponse(
             matching: .initializeResponse(id: initializeID),
             currentCredential: &credential,
             codec: codec,
-            iterator: &iterator
+            iterator: &iterator,
+            timeoutState: timeoutState
         )
         progress?.markAppServerInitialized()
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.initializedNotification())
         let loginID = "\(prefix):login"
+        try requireWithinDeadline(timeoutState)
         try process.send(try bridge.loginRequest(id: loginID, credential: credential))
         try await awaitTypedResponse(
             matching: .loginResponse(id: loginID),
             currentCredential: &credential,
             codec: codec,
-            iterator: &iterator
+            iterator: &iterator,
+            timeoutState: timeoutState
         )
         progress?.markAuthenticated()
     }
@@ -1324,10 +1385,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
         id: String,
         currentCredential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws -> Data {
         var skipped = 0
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             guard data.count <= 1_048_576,
                   let root = try JSONSerialization.jsonObject(with: data)
                     as? [String: Any]
@@ -1359,9 +1422,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         matching expected: CodexTypedMessage,
         currentCredential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws {
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             let message = try codec.decode(data)
             if message == expected { return }
             if message == .ignored { continue }
@@ -1402,11 +1467,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
         cwd: String,
         currentCredential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws -> String {
         var responseThreadID: String?
         var startedThreadID: String?
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             switch try codec.decode(data) {
             case .threadStartResponse(let responseID, let threadID, let authority)
                 where responseID == id:
@@ -1445,6 +1512,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 guard responseThreadID == startedThreadID else {
                     throw CodexTypedProtocolError.invalidSequence
                 }
+                try requireWithinDeadline(timeoutState)
                 return responseThreadID
             }
         }
@@ -1456,11 +1524,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
         threadID: String,
         currentCredential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws -> String {
         var responseTurnID: String?
         var startedTurnID: String?
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             switch try codec.decode(data) {
             case .turnStartResponse(let responseID, let turnID) where responseID == id:
                 guard responseTurnID == nil else {
@@ -1496,6 +1566,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 guard responseTurnID == startedTurnID else {
                     throw CodexTypedProtocolError.invalidSequence
                 }
+                try requireWithinDeadline(timeoutState)
                 return responseTurnID
             }
         }
@@ -1506,6 +1577,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         identity: LiveSessionIdentity,
         credential: CodexOAuthCredential,
         offerSDP: String,
+        timeoutState: StartupTimeoutState,
         onStartupComplete: @escaping @Sendable () -> Void,
         onCleanupPending: @escaping @Sendable () async -> Void,
         emit: @escaping @Sendable (LiveSessionEvent) -> Void
@@ -1545,34 +1617,41 @@ public final class CodexAppServerClient: @unchecked Sendable {
             return
         }
         let source = try process.start()
+        try requireWithinDeadline(timeoutState)
         var iterator = source.makeAsyncIterator()
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.initializeRequest(id: initializeID))
         do {
             try await expect(
                 .initializeResponse(id: initializeID), phase: .initialize,
-                notifications: &startupNotifications, iterator: &iterator
+                notifications: &startupNotifications, iterator: &iterator,
+                timeoutState: timeoutState
             )
         } catch {
             throw Self.classifyStartup(error, phase: .initialize)
         }
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.initializedNotification())
+        try requireWithinDeadline(timeoutState)
         try process.send(try bridge.loginRequest(id: loginID, credential: currentCredential))
         do {
             try await expect(
                 .loginResponse(id: loginID), phase: .login,
                 notifications: &startupNotifications, iterator: &iterator,
-                credentialAdmission: true
+                credentialAdmission: true, timeoutState: timeoutState
             )
         } catch {
             throw Self.classifyStartup(error, phase: .login)
         }
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.threadStartRequest(
             id: threadStartID, cwd: process.temporaryRootURL.path
         ))
         let helperThreadID: String
         do {
             helperThreadID = try await expectThreadStart(
-                id: threadStartID, notifications: &startupNotifications, iterator: &iterator
+                id: threadStartID, notifications: &startupNotifications, iterator: &iterator,
+                timeoutState: timeoutState
             )
         } catch {
             throw Self.classifyStartup(error, phase: .threadStart)
@@ -1581,24 +1660,29 @@ public final class CodexAppServerClient: @unchecked Sendable {
         if let portableSkillRoot {
             let typed = CodexTypedProtocol()
             let rootsID = "\(identity.requestID):skills-roots"
+            try requireWithinDeadline(timeoutState)
             try process.send(try typed.skillsExtraRootsSetRequest(
                 id: rootsID, roots: [portableSkillRoot]
             ))
             try await awaitLiveSkillFeature(
                 id: rootsID, helperThreadID: helperThreadID,
                 credential: &currentCredential, codec: typed,
-                notifications: &startupNotifications, iterator: &iterator
+                notifications: &startupNotifications, iterator: &iterator,
+                timeoutState: timeoutState
             )
             let listID = "\(identity.requestID):skills-list"
+            try requireWithinDeadline(timeoutState)
             try process.send(try typed.skillsListRequest(
                 id: listID, cwd: process.temporaryRootURL.path
             ))
             try await awaitLiveSkillFeature(
                 id: listID, helperThreadID: helperThreadID,
                 credential: &currentCredential, codec: typed,
-                notifications: &startupNotifications, iterator: &iterator
+                notifications: &startupNotifications, iterator: &iterator,
+                timeoutState: timeoutState
             )
         }
+        try requireWithinDeadline(timeoutState)
         try process.send(try codec.realtimeStartRequest(
             id: startID,
             threadID: helperThreadID,
@@ -1616,7 +1700,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 runGeneration: setup.runGeneration,
                 currentCredential: &currentCredential,
                 notifications: &startupNotifications,
-                iterator: &iterator
+                iterator: &iterator,
+                timeoutState: timeoutState
             )
         } catch {
             throw Self.classifyStartup(error, phase: .realtimeStart)
@@ -1635,9 +1720,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         let peerConnected = await waitForPeerConnected(
             identity: identity,
             helperThreadID: helperThreadID,
-            runGeneration: setup.runGeneration
+            runGeneration: setup.runGeneration,
+            timeoutState: timeoutState
         )
         try Task.checkCancellation()
+        try requireWithinDeadline(timeoutState)
         let shouldEmitStarted = try state.locked { value -> Bool in
             guard peerConnected,
                   value.identity == identity,
@@ -1648,6 +1735,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                   value.peerConnected,
                   !value.peerAdmissionAborted
             else { return false }
+            guard timeoutState.markCompletedBeforeDeadline() else {
+                throw CodexAppServerClientError.timeout
+            }
             try value.contract.accept(startedEvent, generation: identity.generation)
             return true
         }
@@ -1756,6 +1846,31 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private func waitForPeerConnected(
         identity: LiveSessionIdentity,
         helperThreadID: String,
+        runGeneration: Int,
+        timeoutState: StartupTimeoutState
+    ) async -> Bool {
+        guard timeoutState.acceptFrame() else { return false }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await self.waitForPeerConnectedCore(
+                    identity: identity,
+                    helperThreadID: helperThreadID,
+                    runGeneration: runGeneration
+                )
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeoutState.remaining)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func waitForPeerConnectedCore(
+        identity: LiveSessionIdentity,
+        helperThreadID: String,
         runGeneration: Int
     ) async -> Bool {
         guard !Task.isCancelled else { return false }
@@ -1843,9 +1958,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         phase: StartupPhase,
         notifications: inout StartupNotifications,
         iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
-        credentialAdmission: Bool = false
+        credentialAdmission: Bool = false,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws {
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             let message: CodexAppServerMessage
             do {
                 message = try codec.decode(data)
@@ -1858,6 +1975,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 throw error
             }
             if message == expected {
+                try requireWithinDeadline(timeoutState)
                 return
             }
             if case .requestError = message, credentialAdmission {
@@ -1900,10 +2018,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private func expectThreadStart(
         id: String,
         notifications: inout StartupNotifications,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws -> String {
         var responseThreadID: String?
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             let message = try codec.decode(data)
             if case let .threadStartResponse(responseID, threadID) = message,
                responseID == id {
@@ -1912,6 +2032,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 }
                 responseThreadID = threadID
                 if notifications.accountLoginCompleted, notifications.accountUpdated {
+                    try requireWithinDeadline(timeoutState)
                     return threadID
                 }
                 continue
@@ -1923,6 +2044,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 else { throw CodexAppServerClientError.unexpectedMessage }
                 notifications.threadStartedID = threadID
                 if notifications.accountLoginCompleted, notifications.accountUpdated {
+                    try requireWithinDeadline(timeoutState)
                     return responseThreadID
                 }
                 continue
@@ -1932,6 +2054,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             )
             if notifications.accountLoginCompleted, notifications.accountUpdated,
                let responseThreadID {
+                try requireWithinDeadline(timeoutState)
                 return responseThreadID
             }
         }
@@ -1968,11 +2091,13 @@ public final class CodexAppServerClient: @unchecked Sendable {
         runGeneration: Int,
         currentCredential: inout CodexOAuthCredential,
         notifications: inout StartupNotifications,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        timeoutState: StartupTimeoutState? = nil
     ) async throws -> String {
         var responseSeen = false
         var answerSDP: String?
         while let data = try await iterator.next() {
+            try requireWithinDeadline(timeoutState)
             try Task.checkCancellation()
             let message: CodexAppServerMessage
             do {
@@ -2045,6 +2170,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             }
             if responseSeen, notifications.threadStartedID == helperThreadID,
                notifications.realtimeStarted, let answerSDP {
+                try requireWithinDeadline(timeoutState)
                 let isCurrentRun = state.locked { value in
                     value.identity == identity &&
                         value.helperThreadID == helperThreadID &&

@@ -2433,7 +2433,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     timeout: .seconds(10)
                 )
             },
-            codexTypedRemoteReadiness: { [repository] profile in
+            codexTypedRemoteReadiness: { [repository, typedRoot] profile in
                 guard let makeSettingsCodexClient else {
                     let state: CodexTypedReadinessState = switch runtimeResolution {
                     case .rejected: .executableRejected
@@ -2457,10 +2457,16 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 } catch {
                     return .init(state: .localCredentialUnavailable)
                 }
+                let requestWorkspace = try Self.makeTypedRequestWorkspace(
+                    parent: typedRoot
+                )
+                defer { try? Self.removeTypedRequestWorkspace(
+                    requestWorkspace, parent: typedRoot
+                ) }
                 return try await makeSettingsCodexClient().probeTypedRemote(
                     credential: credential,
                     model: profile.model,
-                    cwd: typedRoot.path,
+                    cwd: requestWorkspace.path,
                     timeout: .seconds(30)
                 )
             }
@@ -3168,6 +3174,43 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         )
     }
 
+    nonisolated private static func makeTypedRequestWorkspace(parent: URL) throws -> URL {
+        let trustedParent = parent.standardizedFileURL
+        guard trustedParent.isFileURL,
+              trustedParent.path.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: trustedParent.path)
+        else { throw LiveProcessError.invalidConfiguration }
+        let root = trustedParent.appendingPathComponent(
+            "miller-typed-request.\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        guard root.deletingLastPathComponent().standardizedFileURL == trustedParent
+        else { throw LiveProcessError.invalidConfiguration }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return root
+    }
+
+    nonisolated private static func removeTypedRequestWorkspace(
+        _ root: URL,
+        parent: URL
+    ) throws {
+        let trustedParent = parent.standardizedFileURL
+        let candidate = root.standardizedFileURL
+        guard candidate.deletingLastPathComponent() == trustedParent,
+              candidate.lastPathComponent.hasPrefix("miller-typed-request.")
+        else { throw LiveProcessError.invalidConfiguration }
+        let values = try candidate.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey,
+        ])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw LiveProcessError.invalidConfiguration
+        }
+        try FileManager.default.removeItem(at: candidate)
+    }
+
     private static func cacheURL(environment: [String: String]) -> URL {
         if let path = environment["MILLER_CACHE_PATH"] {
             return URL(fileURLWithPath: path, isDirectory: true)
@@ -3304,7 +3347,18 @@ actor ProviderSettingsController {
     }
 
     func snapshot() async throws -> ProviderSettingsSnapshot {
+        try await snapshot(retriesRemaining: 1)
+    }
+
+    private func snapshot(retriesRemaining: Int) async throws -> ProviderSettingsSnapshot {
+        let generation = readinessGeneration
         let profiles = try await repository.providerProfiles()
+        if let replacement = try await snapshotAfterGenerationChange(
+            generation: generation,
+            retriesRemaining: retriesRemaining
+        ) {
+            return replacement
+        }
         guard let selected = profiles.first(where: \.isSelected) else {
             return .init(
                 profiles: profiles.map(ProviderSettingsProfile.init),
@@ -3319,9 +3373,25 @@ actor ProviderSettingsController {
         }
         let codexModels = catalog?.models ?? []
         let codexDefaultModel = catalog?.defaultModel ?? ""
+        if let replacement = try await snapshotAfterGenerationChange(
+            generation: generation,
+            retriesRemaining: retriesRemaining,
+            codexModels: codexModels,
+            codexDefaultModel: codexDefaultModel
+        ) {
+            return replacement
+        }
         if try await repository.credentialIsInvalidated(
             reference: selected.credentialReference
         ) {
+            if let replacement = try await snapshotAfterGenerationChange(
+                generation: generation,
+                retriesRemaining: retriesRemaining,
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            ) {
+                return replacement
+            }
             invalidateCodexReadiness()
             return .init(
                 profiles: profiles.map(ProviderSettingsProfile.init),
@@ -3333,6 +3403,14 @@ actor ProviderSettingsController {
         do {
             _ = try await credentials.load(for: selected.credentialReference)
         } catch {
+            if let replacement = try await snapshotAfterGenerationChange(
+                generation: generation,
+                retriesRemaining: retriesRemaining,
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            ) {
+                return replacement
+            }
             invalidateCodexReadiness()
             return .init(
                 profiles: profiles.map(ProviderSettingsProfile.init),
@@ -3377,6 +3455,14 @@ actor ProviderSettingsController {
                     observed = result
                 }
             }
+            if let replacement = try await snapshotAfterGenerationChange(
+                generation: generation,
+                retriesRemaining: retriesRemaining,
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            ) {
+                return replacement
+            }
             guard observed.state == .ready else {
                 return .init(
                     profiles: profiles.map(ProviderSettingsProfile.init),
@@ -3385,6 +3471,12 @@ actor ProviderSettingsController {
                     codexDefaultModel: codexDefaultModel
                 )
             }
+            return .init(
+                profiles: profiles.map(ProviderSettingsProfile.init),
+                readiness: observed.ownerFacingStatus,
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            )
         }
         let readiness: String
         do {
@@ -3396,12 +3488,39 @@ actor ProviderSettingsController {
         } catch {
             readiness = "Helper readiness unavailable"
         }
+        if let replacement = try await snapshotAfterGenerationChange(
+            generation: generation,
+            retriesRemaining: retriesRemaining,
+            codexModels: codexModels,
+            codexDefaultModel: codexDefaultModel
+        ) {
+            return replacement
+        }
         return .init(
             profiles: profiles.map(ProviderSettingsProfile.init),
             readiness: readiness,
             codexModels: codexModels,
             codexDefaultModel: codexDefaultModel
         )
+    }
+
+    private func snapshotAfterGenerationChange(
+        generation: Int,
+        retriesRemaining: Int,
+        codexModels: [GatewayModelChoice] = [],
+        codexDefaultModel: String = ""
+    ) async throws -> ProviderSettingsSnapshot? {
+        guard readinessGeneration != generation else { return nil }
+        guard retriesRemaining > 0 else {
+            let currentProfiles = try await repository.providerProfiles()
+            return .init(
+                profiles: currentProfiles.map(ProviderSettingsProfile.init),
+                readiness: "Readiness changing; retry",
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            )
+        }
+        return try await snapshot(retriesRemaining: retriesRemaining - 1)
     }
 
     func saveCodexModel(_ rawModel: String) async throws {
