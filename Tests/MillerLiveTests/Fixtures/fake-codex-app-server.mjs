@@ -5,6 +5,10 @@ import { callTask18Bridge } from "./task18-bridge-client.mjs";
 
 const mode = process.argv[2] ?? "normal";
 const pidPath = process.argv[3];
+const liveTextCompatibility = mode.startsWith("live-text-compatibility-");
+const liveTextScenario = liveTextCompatibility
+  ? mode.slice("live-text-compatibility-".length)
+  : null;
 if (mode === "ignore-term" || mode === "typed-capability-inventory-late" ||
     mode === "typed-late-terminal" || mode === "realtime-late-start") {
   process.on("SIGTERM", () => {});
@@ -1186,6 +1190,42 @@ lines.on("line", async (line) => {
       return;
     }
     const params = request.params ?? {};
+    if (liveTextCompatibility) {
+      const keys = Object.keys(params).sort();
+      const expectedKeys = [
+        "initialItems", "outputModality", "prompt", "realtimeSessionId",
+        "threadId", "transport", "version", "voice",
+      ];
+      const initialItems = params.initialItems;
+      const validItems = Array.isArray(initialItems)
+        && initialItems.every((item) => item && typeof item === "object"
+          && Object.keys(item).sort().join(",") === "role,text"
+          && ["user", "developer", "assistant"].includes(item.role)
+          && typeof item.text === "string"
+          && item.text.length > 0
+          && item.text.length <= 768);
+      if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
+          || !validItems
+          || params.outputModality !== "audio"
+          || typeof params.prompt !== "string"
+          || params.prompt.length === 0
+          || params.realtimeSessionId !== null
+          || params.version !== "v3"
+          || params.voice !== null
+          || params.transport?.type !== "websocket") {
+        send({ id: request.id, error: { code: -32602, message: "synthetic realtime start rejected" } });
+        return;
+      }
+      threadId = request.params.threadId;
+      send({ id: request.id, result: {} });
+      notify("thread/realtime/started", {
+        threadId, realtimeSessionId: null, version: "v3",
+      });
+      notify("thread/realtime/transcript/delta", {
+        threadId, role: "assistant", delta: "synthetic-active",
+      });
+      return;
+    }
     const keys = Object.keys(params).sort();
     const expectedKeys = ["outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice"];
     if (JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
@@ -1377,6 +1417,45 @@ lines.on("line", async (line) => {
       fs.appendFileSync(pidPath, "append-received\n", { mode: 0o600 });
       send({ id: request.id, result: {} });
     }
+    return;
+  }
+  if (request.method === "thread/realtime/appendText" && liveTextCompatibility) {
+    const params = request.params ?? {};
+    const keys = Object.keys(params).sort();
+    const validShape = JSON.stringify(keys) === JSON.stringify(["role", "text", "threadId"])
+      && params.threadId === threadId
+      && ["user", "developer", "assistant"].includes(params.role)
+      && typeof params.text === "string"
+      && params.text.length > 0;
+    if (liveTextScenario === "malformed" || !validShape) {
+      send({ id: request.id, error: { code: -32602, message: "synthetic append malformed" } });
+      return;
+    }
+    if (liveTextScenario === "oversized" || params.text.length > 768) {
+      send({ id: request.id, error: { code: -32602, message: "synthetic append oversized" } });
+      return;
+    }
+    if (liveTextScenario === "cancelled") return;
+    const respond = () => {
+      if (liveTextScenario === "rejected") {
+        send({ id: request.id, error: { code: -32602, message: "synthetic append rejected" } });
+        return;
+      }
+      send({ id: request.id, result: {} });
+      if (liveTextScenario === "duplicate") {
+        send({ id: request.id, result: {} });
+      }
+      if (liveTextScenario === "accepted") {
+        notify("thread/realtime/transcript/delta", {
+          threadId, role: "user", delta: "synthetic-echo",
+        });
+        notify("thread/realtime/transcript/done", {
+          threadId, role: "user", text: "synthetic-echo",
+        });
+      }
+    };
+    if (liveTextScenario === "late") setTimeout(respond, 60);
+    else respond();
     return;
   }
   if (request.method === "thread/realtime/stop") {
