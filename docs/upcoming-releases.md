@@ -1,8 +1,7 @@
 # Upcoming Miller releases
 
-This document records the current feature order after v0.1.1. It is a planning
-lineup, not an implementation packet. Version assignments may move after the
-bounded protocol checks named below.
+This document records the public feature order after v0.1.1. It summarizes the
+owner-approved v0.1.2 execution plan maintained in the coordination workspace.
 
 ## v0.1.2: daily-use repairs and stable seams
 
@@ -22,7 +21,7 @@ remain narrow AppKit and presentation work.
 
 - Integrate the completed source-only wakeword foundation into the application.
 - Keep the feature optional and owner-controlled.
-- Support a custom phrase, microphone choice, calibration, clear readiness,
+- Support one custom phrase, the system-default microphone, clear readiness,
   and deterministic disable and cleanup behavior.
 - Run the deferred microphone and owner-visible wake qualification before
   calling the feature complete.
@@ -39,21 +38,21 @@ supported external Codex App Server:
 - Measure whether text injection leaves the WebRTC connection and first-audio
   latency unchanged.
 
-If this proves to be the contained control-plane extension described in the
-detailed plan, typed input during Live may ship in v0.1.2. If it requires
-broader lifecycle or protocol work, it moves intact to v0.1.3.
+This spike ends as confirmed, unsupported, or inconclusive. It does not enable
+typed input during Live in v0.1.2. A confirmed result informs the separate
+v0.1.3 implementation packet.
 
-### Architecture preparation
+### In-process ownership seam
 
-- Define `MillerHost` as the composition boundary for conversations, storage,
-  providers, Live sessions, capabilities, and approvals.
-- Define a Miller Client Protocol for human-facing clients.
+- Route manual and wake Live admission through one Miller-owned in-process
+  operation.
+- Persist the selected conversation before associating the Live transcript.
 - Keep the existing capability RPC private to provider bridges.
-- Move no process boundary merely for architectural neatness. The first host
-  may remain in-process until a second client requires transport.
+- Add no daemon, transport, second database, or unused public host API.
 
-This preparation is intentionally small: contracts, ownership, and regression
-seams only. It does not require a daemon or mobile client in v0.1.2.
+`MillerHost` names the ownership boundary in v0.1.2. It does not require a new
+Swift target or public client protocol. Transport remains deferred until a
+second client exists.
 
 ## v0.1.3: unified Live text and file attachments
 
