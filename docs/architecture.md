@@ -229,14 +229,18 @@ settings. Its typed result preserves executable verification,
 initialization, and authentication evidence alongside a fixed state: missing
 executable, rejected executable, unavailable local credential,
 authentication required, App Server unavailable, unsupported protocol, remote
-probe timeout, provider unavailable, or ready.
+probe timeout, provider unavailable, cleanup pending, or ready. Cleanup has a
+hard deadline. If the task-private root cannot be removed by that deadline,
+readiness remains non-ready and Miller rejects reuse of that root until a later
+cleanup retry succeeds.
 
 The optional remote operation has a separate 30-second ceiling. It may run a
 real typed turn and capability checks, but a timeout is reported as the fixed
 owner-facing message `Readiness probe timed out` and retains all local facts
 already established. Cancellation and timeout terminate only a child started
 by that probe and remove its temporary root. A client that was already sharing
-an external runtime is not stopped by an optional probe failure. Subsequent
+an external runtime is not stopped by an optional probe failure. Cleanup
+notification is best-effort and cannot extend the hard deadline. Subsequent
 ordinary typed use can start normally after probe cleanup.
 
 Settings caches the cheap local result for the selected profile. Ordinary

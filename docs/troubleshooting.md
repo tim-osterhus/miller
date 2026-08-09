@@ -23,6 +23,11 @@ A provider error after successful local
 initialization is shown as `Provider unavailable`, and ordinary typed use is
 not poisoned by that optional probe.
 
+If the message is `Codex cleanup pending`, Miller stopped the child but could
+not remove its task-private root before the cleanup deadline. Do not retry the
+same helper immediately; Miller rejects unsafe root reuse. Restore access to
+the parent directory and retry readiness so the pending cleanup can complete.
+
 If an external Codex update becomes protocol-incompatible, typed Miller remains
 available. Do not replace Miller's identity checks or point it at an arbitrary
 helper.

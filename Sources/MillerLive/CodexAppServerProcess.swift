@@ -11,6 +11,11 @@ public enum LiveProcessError: Error, Equatable, Sendable {
     case timeout
 }
 
+public enum CodexAppServerCleanupResult: String, Equatable, Sendable {
+    case completed
+    case pending
+}
+
 public final class CodexAppServerProcess: @unchecked Sendable {
     public struct Configuration: Sendable {
         public let executableURL: URL
@@ -20,6 +25,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         public let environment: [String: String]
         public let terminationGrace: Duration
         public let cleanupPendingDelay: Duration
+        public let cleanupDeadline: Duration
         public let spawnedProcessVerifier: @Sendable (pid_t) throws -> Void
         let realtimeFeatureConfig: Data?
 
@@ -29,6 +35,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             temporaryParentURL: URL,
             terminationGrace: Duration = .seconds(2),
             cleanupPendingDelay: Duration = .seconds(2),
+            cleanupDeadline: Duration = .seconds(5),
             additionalEnvironment: [String: String] = [:],
             spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in }
         ) throws {
@@ -38,6 +45,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
                 temporaryParentURL: temporaryParentURL,
                 terminationGrace: terminationGrace,
                 cleanupPendingDelay: cleanupPendingDelay,
+                cleanupDeadline: cleanupDeadline,
                 additionalEnvironment: additionalEnvironment,
                 spawnedProcessVerifier: spawnedProcessVerifier,
                 testRealtimeFeatureConfig: Data(
@@ -59,6 +67,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             temporaryParentURL: URL,
             terminationGrace: Duration = .seconds(2),
             cleanupPendingDelay: Duration = .seconds(2),
+            cleanupDeadline: Duration = .seconds(5),
             additionalEnvironment: [String: String] = [:],
             spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in },
             testRealtimeFeatureConfig: Data?
@@ -77,6 +86,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             temporaryRootURL = root
             self.terminationGrace = terminationGrace
             self.cleanupPendingDelay = cleanupPendingDelay
+            self.cleanupDeadline = cleanupDeadline
             self.spawnedProcessVerifier = spawnedProcessVerifier
             realtimeFeatureConfig = testRealtimeFeatureConfig
             let baseline = [
@@ -208,6 +218,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         var exitStatus: Int32?
         var terminationRequested = false
         var cleanupPendingReported = false
+        var cleanupPending = false
 
         func locked<T>(_ body: (State) throws -> T) rethrows -> T {
             lock.lock(); defer { lock.unlock() }
@@ -230,6 +241,10 @@ public final class CodexAppServerProcess: @unchecked Sendable {
 
     public var temporaryRootURL: URL { configuration.temporaryRootURL }
     public var isRunning: Bool { state.locked(\.running) }
+    public var cleanupPending: Bool {
+        state.locked(\.cleanupPending)
+            || FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path)
+    }
     var inputSuppressesSIGPIPE: Bool {
         state.transportLock.lock(); defer { state.transportLock.unlock() }
         guard let descriptor = state.locked(\.input) else { return false }
@@ -242,6 +257,13 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         guard !isRunning else { throw LiveProcessError.processUnavailable }
         guard FileManager.default.isExecutableFile(atPath: configuration.executableURL.path)
         else { throw LiveProcessError.executableMissing }
+        if FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path) {
+            guard removePrivateRoot() else {
+                state.locked { $0.cleanupPending = true }
+                throw LiveProcessError.processUnavailable
+            }
+        }
+        state.locked { $0.cleanupPending = false }
         try preparePrivateRoot()
 
         var stdinPipe = [Int32](repeating: -1, count: 2)
@@ -322,6 +344,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             $0.error = stderrPipe[0]; $0.frameQueue = frameQueue
             $0.buffer = Data(); $0.running = true; $0.exitStatus = nil
             $0.terminationRequested = false; $0.cleanupPendingReported = false
+            $0.cleanupPending = false
         }
         let state = self.state
         let root = configuration.temporaryRootURL
@@ -383,54 +406,90 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         guard state.locked(\.exitStatus) == 0 else { throw LiveProcessError.helperExited }
     }
 
+    @discardableResult
     public func stop(
         onCleanupPending: @escaping @Sendable () async -> Void = {}
-    ) async {
-        let pendingDeadline = ContinuousClock.now.advanced(
-            by: configuration.cleanupPendingDelay
+    ) async -> CodexAppServerCleanupResult {
+        let cleanupStart = ContinuousClock.now
+        let cleanupDeadline = cleanupStart.advanced(by: configuration.cleanupDeadline)
+        let pendingDeadline = min(
+            cleanupDeadline,
+            cleanupStart.advanced(by: configuration.cleanupPendingDelay)
         )
         cancel()
-        let graceDeadline = ContinuousClock.now.advanced(by: configuration.terminationGrace)
+        let graceDeadline = min(
+            cleanupDeadline,
+            cleanupStart.advanced(by: configuration.terminationGrace)
+        )
         while isRunning, ContinuousClock.now < graceDeadline {
             await reportCleanupPendingIfNeeded(
                 deadline: pendingDeadline,
                 onCleanupPending: onCleanupPending
             )
-            await Self.sleepIgnoringCancellation(for: .milliseconds(10))
+            await Self.sleepIgnoringCancellation(until: cleanupDeadline)
         }
         if let pid = state.locked(\.pid), isRunning {
             Self.signalGroup(pid, signal: SIGKILL)
         }
-        while isRunning {
+        while isRunning, ContinuousClock.now < cleanupDeadline {
             await reportCleanupPendingIfNeeded(
                 deadline: pendingDeadline,
                 onCleanupPending: onCleanupPending
             )
-            await Self.sleepIgnoringCancellation(for: .milliseconds(10))
+            await Self.sleepIgnoringCancellation(until: cleanupDeadline)
         }
-        while FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path) {
+        guard !isRunning else {
+            await reportCleanupPendingIfNeeded(
+                deadline: pendingDeadline,
+                onCleanupPending: onCleanupPending,
+                force: true
+            )
+            state.locked { $0.cleanupPending = true }
+            return .pending
+        }
+        while FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path),
+              ContinuousClock.now < cleanupDeadline
+        {
             _ = removePrivateRoot()
             guard FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path)
-            else { break }
+            else {
+                state.locked { $0.cleanupPending = false }
+                return .completed
+            }
             await reportCleanupPendingIfNeeded(
                 deadline: pendingDeadline,
                 onCleanupPending: onCleanupPending
             )
-            await Self.sleepIgnoringCancellation(for: .milliseconds(10))
+            await Self.sleepIgnoringCancellation(until: cleanupDeadline)
         }
+        guard !FileManager.default.fileExists(atPath: configuration.temporaryRootURL.path)
+        else {
+            await reportCleanupPendingIfNeeded(
+                deadline: pendingDeadline,
+                onCleanupPending: onCleanupPending,
+                force: true
+            )
+            state.locked { $0.cleanupPending = true }
+            return .pending
+        }
+        state.locked { $0.cleanupPending = false }
+        return .completed
     }
 
     private func reportCleanupPendingIfNeeded(
         deadline: ContinuousClock.Instant,
-        onCleanupPending: @escaping @Sendable () async -> Void
+        onCleanupPending: @escaping @Sendable () async -> Void,
+        force: Bool = false
     ) async {
-        guard ContinuousClock.now >= deadline else { return }
+        guard force || ContinuousClock.now >= deadline else { return }
         let shouldReport = state.locked { value in
             guard !value.cleanupPendingReported else { return false }
             value.cleanupPendingReported = true
             return true
         }
-        if shouldReport { await onCleanupPending() }
+        if shouldReport {
+            Task.detached(priority: nil) { await onCleanupPending() }
+        }
     }
 
     private func preparePrivateRoot() throws {
@@ -454,7 +513,8 @@ public final class CodexAppServerProcess: @unchecked Sendable {
                 }
             }
         } catch {
-            _ = removePrivateRoot()
+            let removed = removePrivateRoot()
+            state.locked { $0.cleanupPending = !removed }
             throw error
         }
     }
@@ -506,11 +566,11 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         signalGroup(pid, signal: SIGTERM)
         usleep(50_000)
         signalGroup(pid, signal: SIGKILL)
+        let removed = removePrivateRoot(root, parent: parent)
         let terminationSignal = status & 0x7f
         let exitCode: Int32 = terminationSignal == 0
             ? (status >> 8) & 0xff
             : 128 + terminationSignal
-        _ = removePrivateRoot(root, parent: parent)
         state.transportLock.lock()
         let (frameQueue, requested) = state.locked {
             value -> (FrameQueue?, Bool) in
@@ -518,6 +578,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             if let input = value.input { Darwin.close(input) }
             value.input = nil; value.output = nil; value.error = nil
             value.pid = nil; value.running = false; value.exitStatus = exitCode
+            value.cleanupPending = !removed
             let frameQueue = value.frameQueue; value.frameQueue = nil
             return (frameQueue, value.terminationRequested)
         }
@@ -552,6 +613,14 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         await Task.detached {
             try? await Task.sleep(for: duration)
         }.value
+    }
+
+    private static func sleepIgnoringCancellation(
+        until deadline: ContinuousClock.Instant
+    ) async {
+        let remaining = ContinuousClock.now.duration(to: deadline)
+        guard remaining > .zero else { return }
+        await sleepIgnoringCancellation(for: min(remaining, .milliseconds(10)))
     }
 
     private static func closeDescriptors(_ descriptors: [Int32]) {

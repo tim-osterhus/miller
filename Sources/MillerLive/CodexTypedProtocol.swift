@@ -363,10 +363,6 @@ public struct CodexTypedProtocol: Sendable {
         }
         let result = try requireObject(root["result"])
         if id.hasSuffix(":initialize") {
-            try requireExactFields(
-                result,
-                required: ["codexHome", "platformFamily", "platformOs", "userAgent"]
-            )
             try validateAbsolutePath(try text(result, key: "codexHome"))
             _ = try text(result, key: "platformFamily")
             _ = try text(result, key: "platformOs")
@@ -374,7 +370,6 @@ public struct CodexTypedProtocol: Sendable {
             return .initializeResponse(id: id)
         }
         if id.hasSuffix(":login") {
-            try requireExactFields(result, required: ["type"])
             guard try text(result, key: "type") == "chatgptAuthTokens" else {
                 throw CodexTypedProtocolError.invalidField
             }
@@ -616,15 +611,6 @@ public struct CodexTypedProtocol: Sendable {
             throw CodexTypedProtocolError.invalidField
         }
         return value
-    }
-
-    private func requireExactFields(
-        _ object: [String: Any],
-        required: Set<String>
-    ) throws {
-        guard Set(object.keys) == required else {
-            throw CodexTypedProtocolError.invalidField
-        }
     }
 
     private func requireArray(_ value: Any?) throws -> [Any] {

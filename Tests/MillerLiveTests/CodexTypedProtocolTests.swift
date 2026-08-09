@@ -75,6 +75,29 @@ struct CodexTypedProtocolTests {
         ]))
         #expect(login == .loginResponse(id: "typed:login"))
 
+        let initializeWithFutureFields = try codec.decode(frame([
+            "id": "typed:initialize",
+            "result": [
+                "codexHome": "/private/tmp/codex",
+                "platformFamily": "unix",
+                "platformOs": "macos",
+                "userAgent": "codex",
+                "future": true,
+                "metadata": ["release": "future"],
+            ],
+        ]))
+        #expect(initializeWithFutureFields == .initializeResponse(id: "typed:initialize"))
+
+        let loginWithFutureFields = try codec.decode(frame([
+            "id": "typed:login",
+            "result": [
+                "type": "chatgptAuthTokens",
+                "future": true,
+                "metadata": ["account": "future"],
+            ],
+        ]))
+        #expect(loginWithFutureFields == .loginResponse(id: "typed:login"))
+
         let invalidInitializeResults: [[String: Any]] = [
             [:],
             ["codexHome": "/private/tmp/codex"],
@@ -90,13 +113,6 @@ struct CodexTypedProtocolTests {
                 "platformOs": "macos",
                 "userAgent": "codex",
             ],
-            [
-                "codexHome": "/private/tmp/codex",
-                "platformFamily": "unix",
-                "platformOs": "macos",
-                "userAgent": "codex",
-                "future": true,
-            ],
         ]
         for result in invalidInitializeResults {
             #expect(throws: CodexTypedProtocolError.invalidField) {
@@ -111,7 +127,6 @@ struct CodexTypedProtocolTests {
             [:],
             ["type": "apikey"],
             ["type": 7],
-            ["type": "chatgptAuthTokens", "future": true],
         ]
         for result in invalidLoginResults {
             #expect(throws: CodexTypedProtocolError.invalidField) {

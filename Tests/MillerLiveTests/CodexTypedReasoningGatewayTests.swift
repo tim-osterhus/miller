@@ -656,6 +656,62 @@ struct CodexTypedReasoningGatewayTests {
     }
 
     @Test
+    func readinessCannotReturnReadyWhenPrivateRootCleanupIsPending() async throws {
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/readiness-cleanup-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent, withIntermediateDirectories: true
+        )
+        defer {
+            _ = chmod(temporaryParent.path, 0o700)
+            try? FileManager.default.removeItem(at: temporaryParent)
+        }
+        let revokeParent = OneShotParentPermissionRevoker(parent: temporaryParent)
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "typed-readiness-record"],
+            temporaryParentURL: temporaryParent,
+            terminationGrace: .milliseconds(20),
+            cleanupPendingDelay: .milliseconds(20),
+            cleanupDeadline: .milliseconds(100),
+            spawnedProcessVerifier: { _ in try revokeParent.revoke() }
+        ))
+        let client = CodexAppServerClient(process: process)
+        let callback = CleanupPendingRecorder()
+
+        let started = ContinuousClock.now
+        let result = try await client.probeTypedReadiness(
+            credential: credential,
+            timeout: .seconds(2),
+            onCleanupPending: { await callback.report() }
+        )
+
+        #expect(started.duration(to: ContinuousClock.now) < .seconds(1))
+        #expect(result.state == .cleanupPending)
+        #expect(result.ownerFacingStatus == "Codex cleanup pending")
+        #expect(!result.isReady)
+        #expect(process.cleanupPending)
+        #expect(FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+        try await waitUntilAsync { await callback.calls == 1 }
+
+        let blockedReuse = try await client.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(blockedReuse.state == .cleanupPending)
+        #expect(blockedReuse.ownerFacingStatus == "Codex cleanup pending")
+
+        #expect(chmod(temporaryParent.path, 0o700) == 0)
+        #expect(await process.stop() == .completed)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+
+        let recovered = try await client.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(recovered.state == .ready)
+    }
+
+    @Test
     func readinessKeepsExecutableCredentialAndProtocolStatesDistinct() async throws {
         let missing = CodexAppServerClient(
             process: CodexAppServerProcess(configuration: try .init(
@@ -1051,6 +1107,30 @@ private actor SuspendedTypedCredential {
     func release(_ credential: CodexOAuthCredential) {
         continuation?.resume(returning: credential)
         continuation = nil
+    }
+}
+
+private actor CleanupPendingRecorder {
+    private(set) var calls = 0
+
+    func report() { calls += 1 }
+}
+
+private final class OneShotParentPermissionRevoker: @unchecked Sendable {
+    private let lock = NSLock()
+    private let parent: URL
+    private var revoked = false
+
+    init(parent: URL) { self.parent = parent }
+
+    func revoke() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !revoked else { return }
+        guard chmod(parent.path, 0o500) == 0 else {
+            throw LiveProcessError.processUnavailable
+        }
+        revoked = true
     }
 }
 

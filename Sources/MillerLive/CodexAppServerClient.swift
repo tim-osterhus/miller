@@ -185,6 +185,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         let underlying: Error
         let evidence: CodexTypedReadinessEvidence
         let timedOut: Bool
+        let cleanupPending: Bool
     }
 
     private let process: CodexAppServerProcess
@@ -514,18 +515,22 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     iterator: &iterator,
                     progress: progress
                 )
-                if probeStarted {
-                    await process.stop(onCleanupPending: onCleanupPending)
+                let cleanup = await process.stop(onCleanupPending: onCleanupPending)
+                guard cleanup == .completed else {
+                    return .init(state: .cleanupPending, evidence: progress.snapshot())
                 }
                 guard timeoutState.markCompletedBeforeDeadline() else {
                     throw CodexAppServerClientError.timeout
                 }
                 return .init(state: .ready, evidence: progress.snapshot())
             } catch {
-                if probeStarted {
-                    await process.stop(onCleanupPending: onCleanupPending)
-                }
+                let cleanup = probeStarted
+                    ? await process.stop(onCleanupPending: onCleanupPending)
+                    : .completed
                 if Task.isCancelled { throw CancellationError() }
+                if cleanup == .pending || process.cleanupPending {
+                    return .init(state: .cleanupPending, evidence: progress.snapshot())
+                }
                 return localReadiness(
                     error: error,
                     evidence: progress.snapshot(),
@@ -746,8 +751,17 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     throw CodexTypedProtocolError.featureUnavailable
                 }
             }
-            if probeStarted {
-                await process.stop(onCleanupPending: onCleanupPending)
+            let cleanup = await process.stop(onCleanupPending: onCleanupPending)
+            guard cleanup == .completed else {
+                return .init(
+                    state: .cleanupPending,
+                    evidence: progress.snapshot(),
+                    supportsOrdinaryTurns: observed.contains("thread/start")
+                        && observed.contains("turn/start"),
+                    supportsApps: observed.contains("app/list"),
+                    supportsMCPStatus: observed.contains("mcpServerStatus/list"),
+                    supportsSkills: observed.contains("skills/list")
+                )
             }
             guard timeoutState.markCompletedBeforeDeadline() else {
                 throw CodexAppServerClientError.timeout
@@ -762,15 +776,16 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 supportsSkills: observed.contains("skills/list")
             )
         } catch {
-            if probeStarted {
-                await process.stop(onCleanupPending: onCleanupPending)
-            }
+            let cleanup = probeStarted
+                ? await process.stop(onCleanupPending: onCleanupPending)
+                : .completed
             if Task.isCancelled { throw CancellationError() }
             throw TypedProbeFailure(
                 underlying: timeoutState.didTimeOut
                     ? CodexAppServerClientError.timeout : error,
                 evidence: progress.snapshot(),
-                timedOut: timeoutState.didTimeOut
+                timedOut: timeoutState.didTimeOut,
+                cleanupPending: cleanup == .pending || process.cleanupPending
             )
         }
     }
@@ -2132,7 +2147,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     private func remoteReadiness(_ failure: TypedProbeFailure) -> CodexTypedReadiness {
         let state: CodexTypedReadinessState
-        if failure.timedOut {
+        if failure.cleanupPending {
+            state = .cleanupPending
+        } else if failure.timedOut {
             state = .remoteProbeTimedOut
         } else if let error = failure.underlying as? LiveProcessError {
             switch error {
@@ -2196,6 +2213,7 @@ public enum CodexTypedReadinessState: String, Equatable, Sendable {
     case unsupportedProtocol = "unsupported_protocol"
     case remoteProbeTimedOut = "remote_probe_timed_out"
     case providerUnavailable = "provider_unavailable"
+    case cleanupPending = "cleanup_pending"
     case ready
 }
 
@@ -2275,6 +2293,7 @@ public struct CodexTypedReadiness: Equatable, Sendable {
         case .unsupportedProtocol: return "Unsupported Codex App Server protocol"
         case .remoteProbeTimedOut: return "Readiness probe timed out"
         case .providerUnavailable: return "Provider unavailable"
+        case .cleanupPending: return "Codex cleanup pending"
         case .ready: return "Ready"
         }
     }

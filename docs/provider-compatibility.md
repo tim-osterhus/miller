@@ -35,7 +35,8 @@ The owner-visible states are:
 - App Server unavailable during spawn or initialization;
 - unsupported App Server protocol;
 - remote readiness probe timed out;
-- provider unavailable after local initialization; and
+- provider unavailable after local initialization;
+- Codex cleanup pending; and
 - ready.
 
 The optional remote provider and capability probe has its own 30-second
@@ -44,7 +45,9 @@ repeated while Settings loads. A timeout is reported as
 `Readiness probe timed out`; it does not rewrite known executable,
 initialization, or authentication evidence as process absence. A normal typed
 turn may still be attempted after that optional probe, and its result does not
-erase the earlier local facts.
+erase the earlier local facts. If private-root cleanup reaches its hard
+deadline, Miller reports `Codex cleanup pending`, refuses unsafe same-root
+reuse, and permits recovery after a later cleanup retry succeeds.
 
 ## GPT-Live voice
 

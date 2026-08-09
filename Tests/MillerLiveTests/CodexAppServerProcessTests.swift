@@ -295,6 +295,102 @@ struct CodexAppServerProcessTests {
     }
 
     @Test
+    func stopReturnsAfterItsCleanupBoundWhenPrivateRootCannotBeRemoved() async throws {
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/cleanup-deadline-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent, withIntermediateDirectories: true
+        )
+        defer {
+            _ = chmod(temporaryParent.path, 0o700)
+            try? FileManager.default.removeItem(at: temporaryParent)
+        }
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "hang"],
+            temporaryParentURL: temporaryParent,
+            terminationGrace: .milliseconds(20),
+            cleanupPendingDelay: .milliseconds(20),
+            cleanupDeadline: .milliseconds(100)
+        ))
+        _ = try process.start()
+        #expect(chmod(temporaryParent.path, 0o500) == 0)
+
+        let completion = ProcessStopCompletion()
+        let stop = Task {
+            let result = await process.stop()
+            await completion.markComplete(result)
+        }
+        let bound = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while !(await completion.isComplete), ContinuousClock.now < bound {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let completedWithinBound = await completion.isComplete
+        #expect(completedWithinBound)
+        #expect(await completion.result == .pending)
+        #expect(throws: LiveProcessError.processUnavailable) {
+            _ = try process.start()
+        }
+        #expect(chmod(temporaryParent.path, 0o700) == 0)
+        await stop.value
+        #expect(!process.isRunning)
+        #expect(await process.stop() == .completed)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
+    func stopDoesNotWaitForCleanupCallbackThatNeverReturns() async throws {
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/callback-deadline-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent, withIntermediateDirectories: true
+        )
+        defer {
+            _ = chmod(temporaryParent.path, 0o700)
+            try? FileManager.default.removeItem(at: temporaryParent)
+        }
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "hang"],
+            temporaryParentURL: temporaryParent,
+            terminationGrace: .milliseconds(20),
+            cleanupPendingDelay: .milliseconds(20),
+            cleanupDeadline: .milliseconds(100)
+        ))
+        _ = try process.start()
+        #expect(chmod(temporaryParent.path, 0o500) == 0)
+
+        let callback = NeverReturningCleanupCallback()
+        let completion = ProcessStopCompletion()
+        let stop = Task {
+            let result = await process.stop { await callback.call() }
+            await completion.markComplete(result)
+        }
+        let bound = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while !(await completion.isComplete), ContinuousClock.now < bound {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let completedWithinBound = await completion.isComplete
+        #expect(completedWithinBound)
+        #expect(await completion.result == .pending)
+        let callbackBound = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while !(await callback.isEntered), ContinuousClock.now < callbackBound {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await callback.isEntered)
+        #expect(chmod(temporaryParent.path, 0o700) == 0)
+        await callback.release()
+        await stop.value
+        #expect(!process.isRunning)
+        #expect(await process.stop() == .completed)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
     func terminationNeverPublishesStoppedBeforeRootRemoval() async throws {
         for _ in 0..<20 {
             let process = CodexAppServerProcess(configuration: try configuration(mode: "hang"))
@@ -501,5 +597,33 @@ private final class SpawnVerifierProbe: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         self.pid = pid
         guard outcome == .accept else { throw SpawnVerifierError.rejected }
+    }
+}
+
+private actor ProcessStopCompletion {
+    private(set) var isComplete = false
+    private(set) var result: CodexAppServerCleanupResult?
+
+    func markComplete(_ result: CodexAppServerCleanupResult) {
+        self.result = result
+        isComplete = true
+    }
+}
+
+private actor NeverReturningCleanupCallback {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isEntered = false
+    private var released = false
+
+    func call() async {
+        isEntered = true
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
