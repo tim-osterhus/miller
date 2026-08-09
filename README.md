@@ -176,6 +176,7 @@ payloads:
 - `docs/removal.md`: local reset and removal procedure.
 - `docs/troubleshooting.md`: bounded recovery for common failures.
 - `docs/development.md`: build, test, package, and cleanup commands.
+- `docs/upcoming-releases.md`: planned v0.1.2, v0.1.3, and later client work.
 - `CHANGELOG.md`: release history and known limitations.
 - `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`: dependency provenance and
   licensing.

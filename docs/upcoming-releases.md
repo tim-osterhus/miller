@@ -1,0 +1,125 @@
+# Upcoming Miller releases
+
+This document records the current feature order after v0.1.1. It is a planning
+lineup, not an implementation packet. Version assignments may move after the
+bounded protocol checks named below.
+
+## v0.1.2: daily-use repairs and stable seams
+
+The next update should make the current application easier to use while
+preventing new work from deepening desktop-only authority.
+
+### Transcript interaction
+
+- Route Command-C to the active typed or Live transcript selection.
+- Allow pointer selection across rendered line breaks and message blocks.
+- Preserve Markdown, links, code blocks, streaming, and follow-tail behavior.
+
+These repairs are already recorded as accepted v0.1.1 limitations. They should
+remain narrow AppKit and presentation work.
+
+### Custom wake phrases
+
+- Integrate the completed source-only wakeword foundation into the application.
+- Keep the feature optional and owner-controlled.
+- Support a custom phrase, microphone choice, calibration, clear readiness,
+  and deterministic disable and cleanup behavior.
+- Run the deferred microphone and owner-visible wake qualification before
+  calling the feature complete.
+
+### Live text feasibility
+
+Before changing the product UI, run a bounded compatibility spike against the
+supported external Codex App Server:
+
+- Verify the exact `thread/realtime/appendText` request and response shape.
+- Verify whether `initialItems` can seed a new Live session.
+- Verify transcript event ordering, provider echoes, cancellation, and error
+  behavior.
+- Measure whether text injection leaves the WebRTC connection and first-audio
+  latency unchanged.
+
+If this proves to be the contained control-plane extension described in the
+detailed plan, typed input during Live may ship in v0.1.2. If it requires
+broader lifecycle or protocol work, it moves intact to v0.1.3.
+
+### Architecture preparation
+
+- Define `MillerHost` as the composition boundary for conversations, storage,
+  providers, Live sessions, capabilities, and approvals.
+- Define a Miller Client Protocol for human-facing clients.
+- Keep the existing capability RPC private to provider bridges.
+- Move no process boundary merely for architectural neatness. The first host
+  may remain in-process until a second client requires transport.
+
+This preparation is intentionally small: contracts, ownership, and regression
+seams only. It does not require a daemon or mobile client in v0.1.2.
+
+## v0.1.3: unified Live text and file attachments
+
+The target is one Miller conversation that accepts speech, typed text, and
+bounded file context without replacing the low-latency WebRTC audio path.
+
+### Typed input during Live
+
+- Allow text submission while a Live session is active.
+- Route typed text into the admitted Live session rather than opening a second
+  provider thread.
+- Bind the Live session to the selected Miller conversation.
+- Seed only bounded, completed conversation context.
+- Persist the owner's typed entry exactly once and suppress provider echoes.
+- Serialize text submissions with session generation, ordinal, cancellation,
+  and visible failed or unsent states.
+- Preserve mute, interrupt, end, tool activity, and current audio latency.
+- Treat typed input as a natural interruption or steering event unless the
+  protocol spike proves a safer behavior.
+- Offer an explicit post-Live continuation action. Any automatic attachment of
+  the last voice session should remain an owner preference and default off.
+
+### File attachments
+
+- Add a Miller-owned, private, bounded attachment store with opaque IDs,
+  atomic writes, hashes, and explicit deletion.
+- Add picker, drag-and-drop, and attachment chips to typed and Live surfaces.
+- Begin with text, source code, JSON, CSV, and PDFs that already contain text.
+- Expose attachments through fixed read-only capabilities, not one tool per
+  file and not raw host paths.
+- Grant access only to the admitted conversation, turn, or Live session and
+  revoke it on terminal cleanup.
+- Keep file bytes out of App Server JSONL frames. Send only bounded control
+  messages and capability results.
+- Parse files off the main actor and enforce byte, count, text, result, and
+  timeout limits.
+- Treat extracted content as untrusted data, never as instructions.
+
+Image understanding and scanned-PDF OCR may move to a later update if they
+would expand the first attachment implementation materially.
+
+## Later client work
+
+Miller should eventually support more than one presentation client without
+synchronizing multiple SQLite databases.
+
+1. Keep one account-local `MillerHost` authoritative for data, credentials,
+   providers, capabilities, Live sessions, and approvals.
+2. Prove the Miller Client Protocol in-process in the desktop app.
+3. Add a local Unix socket or XPC transport only when another local client
+   needs it.
+4. Prove remote text, status, and approval flows in a responsive web client.
+5. Prove remote Live signaling while the phone carries WebRTC media directly
+   whenever possible.
+6. Consider a native iOS client after those semantics are stable.
+
+The account-local host retains provider, MCP, and OAuth credentials. Remote
+clients receive only the authority and results required for their admitted
+operations.
+
+## Planning sources
+
+- `docs/superpowers/plans/2026-08-08-miller-unified-live-text-and-attachments.md`
+  preserves the detailed architecture review and implementation proposal.
+- `docs/superpowers/specs/2026-08-08-miller-host-client-protocol-direction.md`
+  records the multi-client authority and extraction guardrails.
+
+Both documents require a fresh source and upstream-protocol check before an
+agent compiles them into executable task packets.
