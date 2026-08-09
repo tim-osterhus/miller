@@ -739,6 +739,194 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func shutdownDuringLiveAdmissionDoesNotStartProviderAndReleasesReturnedAdmission() async throws {
+        let admission = SuspendedLiveAdmissionProbe()
+        let provider = StartupProviderProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                await admission.waitForRelease()
+                return LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await admission.recordRelease() }
+                )
+            }),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { _ in await provider.recordStart() },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            )
+        )
+
+        let start = Task { await model.startLiveVoice() }
+        try await waitUntil { await admission.entered }
+
+        await model.shutdownLiveVoice()
+        await admission.releaseAdmission()
+        await start.value
+
+        #expect(await provider.starts == 0)
+        #expect(await admission.releases == 1)
+        #expect(!model.isActiveOperation)
+    }
+
+    @Test
+    func cancellationDuringLiveAdmissionReleasesReturnedAdmissionAndDoesNotStartProvider() async throws {
+        let admission = SuspendedLiveAdmissionProbe()
+        let provider = StartupProviderProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                await admission.waitForRelease()
+                return LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await admission.recordRelease() }
+                )
+            }),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { _ in await provider.recordStart() },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            )
+        )
+
+        let start = Task { await model.startLiveVoice() }
+        try await waitUntil { await admission.entered }
+        start.cancel()
+        await admission.releaseAdmission()
+        await start.value
+
+        #expect(await provider.starts == 0)
+        #expect(await admission.releases == 1)
+        #expect(!model.isActiveOperation)
+    }
+
+    @Test
+    func cancellationDuringProviderStartTerminatesProviderAndReleasesAdmission() async throws {
+        let admission = LiveAdmissionReleaseProbe()
+        let provider = CancellableProviderStartProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await admission.release() }
+                )
+            }),
+            liveVoice: await provider.dependencies()
+        )
+
+        let start = Task { await model.startLiveVoice() }
+        try await waitUntil { await provider.started }
+        start.cancel()
+        await provider.resumeStart()
+        await start.value
+
+        #expect(await provider.ends == 1)
+        #expect(!(await provider.active))
+        #expect(await admission.releases == 1)
+        #expect(!model.isActiveOperation)
+    }
+
+    @Test
+    func explicitLiveShutdownTerminatesSuspendedProviderStart() async throws {
+        let admission = LiveAdmissionReleaseProbe()
+        let provider = CancellableProviderStartProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await admission.release() }
+                )
+            }),
+            liveVoice: await provider.dependencies()
+        )
+
+        let start = Task { await model.startLiveVoice() }
+        try await waitUntil { await provider.started }
+        await model.shutdownLiveVoice()
+        await start.value
+
+        #expect(await provider.ends == 1)
+        #expect(!(await provider.active))
+        #expect(await admission.releases == 1)
+        #expect(!model.isActiveOperation)
+    }
+
+    @Test
+    func destroyingUnreleasedAdmissionSchedulesOneSafeFallbackRelease() async throws {
+        let authority = LiveAdmissionAuthority()
+        let reservation = try await authority.reserve()
+        let releaseProbe = LiveAdmissionReleaseProbe()
+        var admission: LiveAdmission? = LiveAdmission(
+            conversationID: ConversationID(),
+            activationSource: .manual,
+            release: {
+                await reservation.release()
+                await releaseProbe.release()
+            }
+        )
+
+        _ = admission
+        admission = nil
+        try await waitUntil(timeout: .seconds(1)) {
+            do {
+                let replacement = try await authority.reserve()
+                await replacement.release()
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        #expect(await releaseProbe.releases == 1)
+    }
+
+    @Test
+    func hungTranscriptCleanupSurfacesPendingStateAndReleasesAdmissionBoundedly() async throws {
+        let admission = LiveAdmissionReleaseProbe()
+        let cleanup = HungTranscriptCleanupProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await cleanup.persistence()
+        )
+        let voice = CleanupProviderProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await admission.release() }
+                )
+            }),
+            liveVoice: await voice.dependencies(),
+            liveTranscriptRecorder: recorder
+        )
+
+        let start = Task { await model.startLiveVoice() }
+        try await waitUntil { await voice.started }
+        let end = Task { await model.endLiveVoice() }
+        try await waitUntil { await cleanup.finalizeEntered }
+        try await waitUntil(timeout: .seconds(2)) {
+            await MainActor.run { model.liveTranscriptPersistenceMessage != nil }
+        }
+        await end.value
+
+        #expect(model.liveVoiceFailureCode == nil)
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        #expect(await admission.releases == 1)
+
+        await cleanup.resumeFinalize()
+        await start.value
+    }
+
+    @Test
     func liveVoiceAssociatesTranscriptWithSelectedConversation() async {
         let probe = LiveAssociationProbe()
         let recorder = LiveVoiceTranscriptRecorder(
@@ -2165,6 +2353,35 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func lateAdmittedStateAndTranscriptEventsAfterTerminalAreIgnored() async throws {
+        let voice = StaleLiveSessionEventProbe()
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: await voice.dependencies()
+        )
+
+        let session = Task { await model.startLiveVoice() }
+        try await waitUntil { await voice.sessionCount == 1 }
+        await voice.emit(.sessionAdmitted(id: UUID()), from: 0)
+        await voice.emit(.state(.listening), from: 0)
+        await voice.emit(.state(.closed), from: 0)
+        await voice.finish(session: 0)
+        await session.value
+
+        await voice.emit(.state(.listening), from: 0)
+        await voice.emit(.sessionAdmitted(id: UUID()), from: 0)
+        await voice.emit(.state(.failed), from: 0)
+        await voice.emit(
+            .transcriptDone(role: .assistant, text: "late transcript"),
+            from: 0
+        )
+
+        #expect(model.voiceState == .closed)
+        #expect(model.liveTranscriptTurns.isEmpty)
+        #expect(model.liveVoiceFailureCode == nil)
+    }
+
+    @Test
     func resetRejectsDelayedEventsFromThePreviousLiveSession() async throws {
         let voice = StaleLiveSessionEventProbe()
         let model = AppPresentationModel(
@@ -2772,6 +2989,143 @@ private actor LiveAdmissionOrderProbe {
 
     func record(_ event: String) {
         events.append(event)
+    }
+}
+
+private actor SuspendedLiveAdmissionProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var entered = false
+    private(set) var releases = 0
+
+    func waitForRelease() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func releaseAdmission() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func recordRelease() {
+        releases += 1
+    }
+}
+
+private actor StartupProviderProbe {
+    private(set) var starts = 0
+
+    func recordStart() {
+        starts += 1
+    }
+}
+
+private actor LiveAdmissionReleaseProbe {
+    private(set) var releases = 0
+
+    func release() {
+        releases += 1
+    }
+}
+
+private actor CancellableProviderStartProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+    private(set) var active = false
+    private(set) var ends = 0
+
+    func dependencies() -> LiveVoiceDependencies {
+        LiveVoiceDependencies(
+            initialAvailability: .available,
+            availability: { .available },
+            start: { [self] emit in await start(emit: emit) },
+            mute: { _ in },
+            interrupt: { [self] in await end() },
+            end: { [self] in await end() }
+        )
+    }
+
+    func resumeStart() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func start(
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+    ) async {
+        started = true
+        active = true
+        await emit(.state(.listening))
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    private func end() {
+        ends += 1
+        active = false
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor HungTranscriptCleanupProbe {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var finalizeEntered = false
+
+    func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
+        .init(
+            savingEnabled: { true },
+            nextSessionSavingEnabled: { true },
+            restoreNextSessionSavingDefault: {},
+            startSession: { _, _, _, _ in },
+            appendEntry: { _, _, _, _, _, _ in },
+            completeEntry: { _, _ in },
+            finalizeSession: { [self] _, _ in
+                await suspendFinalize()
+            },
+            recoverInterruptedSessions: {}
+        )
+    }
+
+    func resumeFinalize() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func suspendFinalize() async {
+        finalizeEntered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+}
+
+private actor CleanupProviderProbe {
+    private var emit: (@MainActor @Sendable (LiveVoiceEvent) async -> Void)?
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+
+    func dependencies() -> LiveVoiceDependencies {
+        LiveVoiceDependencies(
+            initialAvailability: .available,
+            availability: { .available },
+            start: { [self] emit in await start(emit: emit) },
+            mute: { _ in },
+            interrupt: { [self] in await end() },
+            end: { [self] in await end() }
+        )
+    }
+
+    private func start(
+        emit: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+    ) async {
+        self.emit = emit
+        await emit(.sessionAdmitted(id: UUID()))
+        await emit(.state(.listening))
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    private func end() async {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

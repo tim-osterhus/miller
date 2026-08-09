@@ -19,6 +19,22 @@ public actor SQLiteConversationRepository:
         database = try SQLiteDatabase(path: path)
     }
 
+    public func ensureConversation(conversationID: ConversationID) throws {
+        let timestamp = Self.timestamp()
+        try database.execute(
+            """
+            INSERT OR IGNORE INTO conversations
+                (id, title, state, created_at, updated_at, archived_at)
+            VALUES (?, NULL, 'active', ?, ?, NULL)
+            """,
+            bindings: [
+                .text(conversationID.description),
+                .text(timestamp),
+                .text(timestamp),
+            ]
+        )
+    }
+
     public func accept(
         conversationID: ConversationID,
         turnID: TurnID,

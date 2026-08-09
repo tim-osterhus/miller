@@ -58,11 +58,43 @@ enum LiveAdmissionError: Error, Equatable, Sendable {
     case sessionAlreadyActive
 }
 
-struct LiveAdmission: Sendable {
+private final class LiveAdmissionReleaseState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !released else { return false }
+        released = true
+        return true
+    }
+}
+
+private final class LiveTranscriptCleanupTasks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tasks: [Task<Void, Never>] = []
+
+    func add(_ task: Task<Void, Never>) {
+        lock.lock()
+        tasks.append(task)
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let tasks = self.tasks
+        lock.unlock()
+        tasks.forEach { $0.cancel() }
+    }
+}
+
+final class LiveAdmission: @unchecked Sendable {
     let conversationID: ConversationID
     let activationSource: VoiceActivationSource
 
     private let releaseOperation: @Sendable () async -> Void
+    private let releaseState = LiveAdmissionReleaseState()
 
     init(
         conversationID: ConversationID,
@@ -75,7 +107,14 @@ struct LiveAdmission: Sendable {
     }
 
     func release() async {
+        guard releaseState.claim() else { return }
         await releaseOperation()
+    }
+
+    deinit {
+        guard releaseState.claim() else { return }
+        let releaseOperation = releaseOperation
+        Task { await releaseOperation() }
     }
 }
 
@@ -440,12 +479,18 @@ final class AppPresentationModel: ObservableObject {
     @Published private var liveVoiceAvailability: LiveVoiceState
     private var liveVoiceAvailabilityGeneration: UInt64 = 0
     private var liveVoiceEventGeneration: UInt64 = 0
+    private var liveEventAdmissionActive = false
+    private var liveVoiceCleanupTerminalEventGeneration: UInt64?
     private var pendingVoiceCapabilityPreparation: CapabilityVoicePreparation?
     private var providerSnapshotGeneration: UInt64 = 0
     private var conversationProjectionGeneration: UInt64 = 0
     private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
     private var pendingLiveAdmission: LiveAdmission?
+    private var liveVoiceStartGeneration: UInt64 = 0
+    private var liveVoiceStartProviderInFlight = false
+    private var liveVoiceStartTerminationRequested = false
+    private var liveVoiceStartCancellationRequested = false
     @Published private var voiceHistoryDeletionPending = false
     @Published private var voiceHistoryExportPending = false
     private var capabilitySubscriptions = Set<AnyCancellable>()
@@ -454,6 +499,14 @@ final class AppPresentationModel: ObservableObject {
         let terminalState: LiveVoiceState
         let outcome: VoiceSessionTerminalOutcome
     }
+
+    private enum LiveTranscriptCleanupAttemptResult {
+        case succeeded
+        case failed
+        case timedOut
+    }
+
+    private static let liveTranscriptCleanupTimeout: Duration = .seconds(1)
 
     init(
         dependencies: HostDependencies,
@@ -695,6 +748,7 @@ final class AppPresentationModel: ObservableObject {
     @discardableResult
     private func nextLiveVoiceEventGeneration() -> UInt64 {
         liveVoiceEventGeneration &+= 1
+        liveEventAdmissionActive = false
         return liveVoiceEventGeneration
     }
 
@@ -1349,17 +1403,36 @@ final class AppPresentationModel: ObservableObject {
     ) async {
         guard canStartLiveVoice else { return }
         liveVoiceStartPending = true
+        liveVoiceStartCancellationRequested = false
+        liveVoiceStartTerminationRequested = false
+        liveVoiceStartProviderInFlight = false
+        let startGeneration = nextLiveVoiceStartGeneration()
+        defer {
+            liveVoiceStartPending = false
+            liveVoiceStartProviderInFlight = false
+            if liveVoiceStartGeneration == startGeneration {
+                liveVoiceStartCancellationRequested = false
+                liveVoiceStartTerminationRequested = false
+            }
+        }
         do {
-            pendingLiveAdmission = try await dependencies.admitLive(
+            let admission = try await dependencies.admitLive(
                 conversationID: selectedConversationID,
                 activationSource: activationSource
             )
-            pendingVoiceActivationSource = pendingLiveAdmission?.activationSource
-                ?? activationSource
-            try Task.checkCancellation()
+            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                await abortLiveVoiceStart(startGeneration: startGeneration)
+                await admission.release()
+                return
+            }
+            pendingLiveAdmission = admission
+            pendingVoiceActivationSource = admission.activationSource
         } catch {
+            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                await abortLiveVoiceStart(startGeneration: startGeneration)
+                return
+            }
             await releasePendingLiveAdmission()
-            liveVoiceStartPending = false
             voiceState = .failed
             liveVoiceFailureCode = Self.liveFailureCode(error)
             return
@@ -1367,24 +1440,36 @@ final class AppPresentationModel: ObservableObject {
         if let capabilityController {
             guard let profileID = providerProfiles.first(where: \.isSelected)?.id
             else {
-                liveVoiceStartPending = false
                 await releasePendingLiveAdmission()
                 return
             }
             do {
                 pendingVoiceCapabilityPreparation = try await capabilityController
                     .prepareLiveVoice(providerProfileID: profileID)
+                guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                    await abortLiveVoiceStart(startGeneration: startGeneration)
+                    return
+                }
             } catch {
+                guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                    await abortLiveVoiceStart(startGeneration: startGeneration)
+                    return
+                }
                 pendingVoiceCapabilityPreparation = nil
-                liveVoiceStartPending = false
                 voiceState = .failed
                 liveVoiceFailureCode = "capability_bridge_unavailable"
                 await releasePendingLiveAdmission()
                 return
             }
         }
+        guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+            await abortLiveVoiceStart(startGeneration: startGeneration)
+            return
+        }
         nextLiveVoiceAvailabilityGeneration()
         let eventGeneration = nextLiveVoiceEventGeneration()
+        liveEventAdmissionActive = true
+        liveVoiceCleanupTerminalEventGeneration = nil
         voiceState = .connecting
         liveVoiceFailureCode = nil
         liveVoiceReasoningStatus = nil
@@ -1392,12 +1477,38 @@ final class AppPresentationModel: ObservableObject {
         resetLiveTranscripts()
         liveVoiceMuted = false
         do {
-            try await liveVoice.start { [weak self] event in
-                await self?.applyLiveEvent(event, generation: eventGeneration)
+            liveVoiceStartProviderInFlight = true
+            try await withTaskCancellationHandler {
+                try await liveVoice.start { [weak self] event in
+                    await self?.applyLiveEvent(event, generation: eventGeneration)
+                }
+            } onCancel: { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.cancelLiveVoiceStart(generation: startGeneration)
+                }
+            }
+            liveVoiceStartProviderInFlight = false
+            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                await terminateLiveVoiceProviderIfNeeded()
+                await abortLiveVoiceStart(startGeneration: startGeneration)
+                return
             }
         } catch {
+            liveVoiceStartProviderInFlight = false
+            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled,
+                  !(error is CancellationError)
+            else {
+                await terminateLiveVoiceProviderIfNeeded()
+                await abortLiveVoiceStart(startGeneration: startGeneration)
+                return
+            }
             pendingVoiceCapabilityPreparation = nil
             await capabilityController?.finishLiveVoice()
+            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                await terminateLiveVoiceProviderIfNeeded()
+                await abortLiveVoiceStart(startGeneration: startGeneration)
+                return
+            }
             voiceState = .failed
             liveVoiceFailureCode = Self.liveFailureCode(error)
             if Self.isLiveAdmissionFailure(error) {
@@ -1405,7 +1516,6 @@ final class AppPresentationModel: ObservableObject {
                 liveVoiceAvailability = .unavailable
             }
         }
-        liveVoiceStartPending = false
         if !liveVoiceCleanupPending, !voiceState.isActive {
             let outcome: VoiceSessionTerminalOutcome =
                 voiceState == .failed ? .failed
@@ -1415,8 +1525,97 @@ final class AppPresentationModel: ObservableObject {
                 outcome: outcome
             )
         }
+        guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+            return
+        }
         if !voiceState.isActive, liveVoiceAvailability == .available {
-            await refreshLiveVoiceAvailability()
+            await refreshLiveVoiceAvailability(allowStartPending: true)
+        }
+    }
+
+    @discardableResult
+    private func nextLiveVoiceStartGeneration() -> UInt64 {
+        liveVoiceStartGeneration &+= 1
+        return liveVoiceStartGeneration
+    }
+
+    private func isCurrentLiveVoiceStart(_ generation: UInt64) -> Bool {
+        generation == liveVoiceStartGeneration
+            && !liveVoiceStartCancellationRequested
+    }
+
+    private func abortLiveVoiceStart(startGeneration: UInt64) async {
+        if startGeneration == liveVoiceStartGeneration {
+            liveVoiceStartCancellationRequested = true
+            _ = nextLiveVoiceStartGeneration()
+            nextLiveVoiceEventGeneration()
+        }
+        pendingVoiceCapabilityPreparation = nil
+        await capabilityController?.finishLiveVoice()
+        await releasePendingLiveAdmission()
+        if !liveVoiceCleanupPending, liveTranscriptSessionID != nil {
+            await finishLiveVoiceCleanup(
+                terminalState: .closed,
+                outcome: .abandoned
+            )
+        } else if !liveVoiceCleanupPending, voiceState.isActive {
+            voiceState = .closed
+        }
+    }
+
+    private func cancelLiveVoiceStart(generation: UInt64) async {
+        guard generation == liveVoiceStartGeneration,
+              liveVoiceStartPending
+        else { return }
+        liveVoiceStartCancellationRequested = true
+        _ = nextLiveVoiceStartGeneration()
+        nextLiveVoiceEventGeneration()
+        liveVoiceCleanupTerminalEventGeneration = nil
+        await releasePendingLiveAdmission()
+        if liveVoiceStartProviderInFlight || voiceState.isActive {
+            await terminateLiveVoiceProviderIfNeeded()
+        }
+    }
+
+    private func terminateLiveVoiceProviderIfNeeded() async {
+        guard !liveVoiceStartTerminationRequested else { return }
+        liveVoiceStartTerminationRequested = true
+        await liveVoice.end()
+    }
+
+    func shutdownLiveVoice() async {
+        let hadLiveWork = liveVoiceStartPending || voiceState.isActive
+            || liveVoiceCleanupPending || pendingLiveAdmission != nil
+            || liveTranscriptSessionID != nil
+        if liveVoiceStartPending {
+            await cancelLiveVoiceStart(generation: liveVoiceStartGeneration)
+        } else {
+            nextLiveVoiceEventGeneration()
+            liveVoiceCleanupTerminalEventGeneration = nil
+        }
+        if liveVoiceStartProviderInFlight || voiceState.isActive {
+            await terminateLiveVoiceProviderIfNeeded()
+        }
+        if liveVoiceCleanupPending {
+            if liveVoiceCleanupRetryPending,
+               let cleanup = pendingLiveTranscriptCleanup {
+                await finishLiveVoiceCleanup(
+                    terminalState: cleanup.terminalState,
+                    outcome: cleanup.outcome
+                )
+            } else if pendingLiveTranscriptCleanup == nil {
+                await finishLiveVoiceCleanup(
+                    terminalState: .closed,
+                    outcome: .abandoned
+                )
+            } else {
+                await waitForLiveVoiceCleanup()
+            }
+        } else if hadLiveWork {
+            await finishLiveVoiceCleanup(
+                terminalState: .closed,
+                outcome: .abandoned
+            )
         }
     }
 
@@ -1430,6 +1629,9 @@ final class AppPresentationModel: ObservableObject {
         guard voiceState.isActive, !liveVoiceCleanupPending else { return }
         capabilityController?.declinePendingApprovals(for: .interrupt)
         nextLiveVoiceAvailabilityGeneration()
+        let terminalEventGeneration = liveVoiceEventGeneration
+        nextLiveVoiceEventGeneration()
+        liveVoiceCleanupTerminalEventGeneration = terminalEventGeneration
         liveVoiceCleanupPending = true
         await liveVoice.interrupt()
         await finishLiveVoiceCleanup(
@@ -1457,6 +1659,9 @@ final class AppPresentationModel: ObservableObject {
         }
         capabilityController?.declinePendingApprovals(for: .close)
         nextLiveVoiceAvailabilityGeneration()
+        let terminalEventGeneration = liveVoiceEventGeneration
+        nextLiveVoiceEventGeneration()
+        liveVoiceCleanupTerminalEventGeneration = terminalEventGeneration
         liveVoiceCleanupPending = true
         await liveVoice.end()
         await finishLiveVoiceCleanup(
@@ -1474,6 +1679,7 @@ final class AppPresentationModel: ObservableObject {
         terminalState: LiveVoiceState,
         outcome: VoiceSessionTerminalOutcome
     ) async {
+        nextLiveVoiceEventGeneration()
         let cleanup = pendingLiveTranscriptCleanup
             ?? PendingLiveTranscriptCleanup(
                 terminalState: terminalState,
@@ -1483,14 +1689,18 @@ final class AppPresentationModel: ObservableObject {
         liveVoiceCleanupPending = true
         liveVoiceCleanupRetryPending = false
         var cleanupSucceeded = false
+        var cleanupTimedOut = false
         for attempt in 0..<2 {
-            do {
-                try await liveTranscriptRecorder.finish(outcome: cleanup.outcome)
+            switch await finishRecorderWithinBound(outcome: cleanup.outcome) {
+            case .succeeded:
                 cleanupSucceeded = true
+            case .failed:
+                guard attempt == 0 else { continue }
+            case .timedOut:
+                cleanupTimedOut = true
+            }
+            if cleanupSucceeded || cleanupTimedOut {
                 break
-            } catch {
-                guard attempt == 0, !(error is CancellationError) else { break }
-                await Task.yield()
             }
         }
         if cleanupSucceeded {
@@ -1500,6 +1710,7 @@ final class AppPresentationModel: ObservableObject {
         } else {
             presentTranscriptPersistenceFailure()
             liveVoiceCleanupRetryPending = true
+            await releasePendingLiveAdmission()
         }
         liveVoiceMuted = false
         if voiceState != .failed {
@@ -1510,6 +1721,44 @@ final class AppPresentationModel: ObservableObject {
         for waiter in waiters { waiter.resume() }
         pendingVoiceCapabilityPreparation = nil
         await capabilityController?.finishLiveVoice()
+        liveVoiceCleanupTerminalEventGeneration = nil
+    }
+
+    private func finishRecorderWithinBound(
+        outcome: VoiceSessionTerminalOutcome
+    ) async -> LiveTranscriptCleanupAttemptResult {
+        let (stream, continuation) = AsyncStream<LiveTranscriptCleanupAttemptResult>
+            .makeStream()
+        let tasks = LiveTranscriptCleanupTasks()
+        let cleanupTask = Task.detached { [liveTranscriptRecorder] in
+            do {
+                try await liveTranscriptRecorder.finish(outcome: outcome)
+                continuation.yield(.succeeded)
+            } catch {
+                continuation.yield(.failed)
+            }
+            continuation.finish()
+        }
+        let timeoutTask = Task.detached { [timeout = Self.liveTranscriptCleanupTimeout] in
+            do {
+                try await Task.sleep(for: timeout)
+                continuation.yield(.timedOut)
+                continuation.finish()
+            } catch {
+            }
+        }
+        tasks.add(cleanupTask)
+        tasks.add(timeoutTask)
+        let result = await withTaskCancellationHandler {
+            await stream.first(where: { @Sendable _ in true }) ?? .timedOut
+        } onCancel: {
+            tasks.cancel()
+            continuation.yield(.timedOut)
+            continuation.finish()
+        }
+        tasks.cancel()
+        continuation.finish()
+        return result
     }
 
     private func releasePendingLiveAdmission() async {
@@ -1519,6 +1768,12 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func applyLiveEvent(_ event: LiveVoiceEvent) async {
+        guard liveVoiceEventGeneration == 0 || liveEventAdmissionActive else {
+            return
+        }
+        if liveVoiceEventGeneration == 0 {
+            liveEventAdmissionActive = true
+        }
         await applyLiveEvent(event, generation: liveVoiceEventGeneration)
     }
 
@@ -1526,7 +1781,17 @@ final class AppPresentationModel: ObservableObject {
         _ event: LiveVoiceEvent,
         generation: UInt64
     ) async {
-        guard generation == liveVoiceEventGeneration else { return }
+        let terminalCleanupEvent = switch event {
+        case .state(.closed), .state(.stopped), .state(.failed), .failed:
+            true
+        default:
+            false
+        }
+        guard (generation == liveVoiceEventGeneration && liveEventAdmissionActive)
+                || (liveVoiceCleanupPending
+                    && liveVoiceCleanupTerminalEventGeneration == generation
+                    && terminalCleanupEvent)
+        else { return }
         switch event {
         case let .sessionAdmitted(id):
             do {
@@ -1562,6 +1827,9 @@ final class AppPresentationModel: ObservableObject {
             guard generation == liveVoiceEventGeneration else { return }
             liveTranscriptSessionID = id
         case let .state(state):
+            if state == .closed || state == .stopped || state == .failed {
+                nextLiveVoiceEventGeneration()
+            }
             voiceState = state
         case .transcriptDelta, .transcriptDone:
             var persistenceFailed = false
@@ -1577,6 +1845,7 @@ final class AppPresentationModel: ObservableObject {
         case let .status(status):
             liveVoiceReasoningStatus = status
         case let .failed(code):
+            nextLiveVoiceEventGeneration()
             liveVoiceFailureCode = Self.sanitizedLiveCode(code)
             voiceState = .failed
         }
@@ -1598,6 +1867,11 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func prepareToAbandonLiveVoiceSession() {
+        if liveVoiceStartPending {
+            liveVoiceStartCancellationRequested = true
+            _ = nextLiveVoiceStartGeneration()
+        }
+        nextLiveVoiceEventGeneration()
         liveVoiceCleanupPending = true
     }
 
@@ -2517,22 +2791,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             admitLive: { [repository, liveAdmissionAuthority] conversationID, activationSource in
                 let reservation = try await liveAdmissionAuthority.reserve()
                 do {
-                    let existing = try await repository.conversations()
-                    if !existing.contains(where: { $0.id == conversationID }) {
-                        let marker = TurnID()
-                        try await repository.accept(
-                            conversationID: conversationID,
-                            turnID: marker,
-                            userText: "",
-                            inputMode: .voice,
-                            generation: 1
-                        )
-                        try await repository.stop(
-                            turnID: marker,
-                            targetGeneration: 1,
-                            nextGeneration: 2
-                        )
-                    }
+                    try Task.checkCancellation()
+                    try await repository.ensureConversation(
+                        conversationID: conversationID
+                    )
+                    try Task.checkCancellation()
                     return LiveAdmission(
                         conversationID: conversationID,
                         activationSource: activationSource,
@@ -3108,7 +3371,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             NotificationCenter.default.removeObserver(settingsObserver)
             self.settingsObserver = nil
         }
-        model.prepareToAbandonLiveVoiceSession()
+        await model.shutdownLiveVoice()
         await liveController?.shutdown()
         await capabilityController.shutdown()
         await model.abandonLiveVoiceSession()
