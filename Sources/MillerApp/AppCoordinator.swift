@@ -1687,6 +1687,7 @@ final class AppPresentationModel: ObservableObject {
             )
         pendingLiveTranscriptCleanup = cleanup
         liveVoiceCleanupPending = true
+        let retryingCleanup = liveVoiceCleanupRetryPending
         liveVoiceCleanupRetryPending = false
         var cleanupSucceeded = false
         var cleanupTimedOut = false
@@ -1704,6 +1705,9 @@ final class AppPresentationModel: ObservableObject {
             }
         }
         if cleanupSucceeded {
+            if retryingCleanup {
+                liveTranscriptPersistenceMessage = nil
+            }
             pendingLiveTranscriptCleanup = nil
             liveVoiceCleanupPending = false
             await releasePendingLiveAdmission()

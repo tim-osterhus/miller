@@ -252,6 +252,7 @@ struct GPTLivePresentationTests {
         await model.endLiveVoice()
 
         #expect(model.voiceState == .closed)
+        #expect(model.liveTranscriptPersistenceMessage == "Transcript could not be saved")
         #expect(model.voiceStatusText == "Transcript could not be saved")
         #expect(model.isActiveOperation)
         #expect(!model.canStartLiveVoice)
@@ -262,11 +263,20 @@ struct GPTLivePresentationTests {
         await model.startLiveVoice()
         #expect(await voice.starts == 0)
 
+        await model.endLiveVoice()
+
+        #expect(model.liveTranscriptPersistenceMessage == "Transcript could not be saved")
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        #expect(model.isActiveOperation)
+        #expect(await persistence.failedStageAttempts == 4)
+
         await persistence.allowCleanup()
         await model.endLiveVoice()
 
         #expect(!model.isActiveOperation)
         #expect(model.canStartLiveVoice)
+        #expect(model.liveTranscriptPersistenceMessage == nil)
+        #expect(model.voiceStatusText == "Closed")
         #expect(await persistence.finalizedOutcomes == [.completed])
         #expect(await voice.ends == 1)
 
@@ -919,11 +929,23 @@ struct GPTLivePresentationTests {
         await end.value
 
         #expect(model.liveVoiceFailureCode == nil)
+        #expect(model.liveTranscriptPersistenceMessage == "Transcript could not be saved")
         #expect(model.voiceStatusText == "Transcript could not be saved")
         #expect(await admission.releases == 1)
 
         await cleanup.resumeFinalize()
         await start.value
+
+        let retry = Task { await model.endLiveVoice() }
+        try await waitUntil(timeout: .seconds(2)) {
+            await cleanup.finalizeAttempts == 2
+        }
+        #expect(model.liveTranscriptPersistenceMessage == "Transcript could not be saved")
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        await retry.value
+        #expect(model.liveTranscriptPersistenceMessage == "Transcript could not be saved")
+        #expect(model.voiceStatusText == "Transcript could not be saved")
+        await cleanup.resumeFinalize()
     }
 
     @Test
@@ -3070,6 +3092,7 @@ private actor CancellableProviderStartProbe {
 private actor HungTranscriptCleanupProbe {
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var finalizeEntered = false
+    private(set) var finalizeAttempts = 0
 
     func persistence() -> LiveVoiceTranscriptRecorder.Persistence {
         .init(
@@ -3080,7 +3103,7 @@ private actor HungTranscriptCleanupProbe {
             appendEntry: { _, _, _, _, _, _ in },
             completeEntry: { _, _ in },
             finalizeSession: { [self] _, _ in
-                await suspendFinalize()
+                try await suspendFinalize()
             },
             recoverInterruptedSessions: {}
         )
@@ -3091,9 +3114,11 @@ private actor HungTranscriptCleanupProbe {
         continuation = nil
     }
 
-    private func suspendFinalize() async {
+    private func suspendFinalize() async throws {
+        finalizeAttempts += 1
         finalizeEntered = true
         await withCheckedContinuation { continuation = $0 }
+        throw SyntheticTranscriptPersistenceError.failed
     }
 }
 
