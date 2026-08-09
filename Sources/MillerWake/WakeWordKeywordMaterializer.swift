@@ -7,6 +7,13 @@ public enum WakeWordKeywordMaterializerError: Error, Equatable, Sendable {
     case tokensFileTooLarge
     case unsafePath
     case writeFailed
+    case rollbackFailed
+}
+
+enum WakeWordKeywordMaterializerFaultInjection: Sendable {
+    case none
+    case failAfterInstall
+    case failAfterInstallAndRollback
 }
 
 public struct WakeWordMaterializedPhrase: Equatable, Sendable {
@@ -32,16 +39,34 @@ public struct WakeWordKeywordMaterializer: Sendable {
     private let applicationSupportDirectory: URL
     private let keywordFileName: String
     private let vocabulary: [String]
+    private let faultInjection: WakeWordKeywordMaterializerFaultInjection
 
     public init(
         tokensFile: URL,
         applicationSupportDirectory: URL,
         keywordFileName: String = Self.keywordFileName
     ) throws {
+        try self.init(
+            tokensFile: tokensFile,
+            applicationSupportDirectory: applicationSupportDirectory,
+            keywordFileName: keywordFileName,
+            faultInjection: .none
+        )
+    }
+
+    init(
+        tokensFile: URL,
+        applicationSupportDirectory: URL,
+        keywordFileName: String = Self.keywordFileName,
+        faultInjection: WakeWordKeywordMaterializerFaultInjection
+    ) throws {
         guard tokensFile.isFileURL,
               applicationSupportDirectory.isFileURL,
               !keywordFileName.isEmpty,
-              !keywordFileName.contains("/")
+              !keywordFileName.contains("/"),
+              keywordFileName != ".",
+              keywordFileName != "..",
+              !keywordFileName.contains("\0")
         else { throw WakeWordKeywordMaterializerError.unsafePath }
         self.tokensFile = tokensFile
         self.applicationSupportDirectory = applicationSupportDirectory
@@ -64,6 +89,7 @@ public struct WakeWordKeywordMaterializer: Sendable {
         var ordered = Array(repeating: "", count: maximumID + 1)
         for (token, id) in parsed { ordered[id] = token }
         vocabulary = ordered
+        self.faultInjection = faultInjection
     }
 
     public var url: URL {
@@ -78,9 +104,12 @@ public struct WakeWordKeywordMaterializer: Sendable {
         let normalized = try compiler.normalize(phrase)
         let tokens = try compiler.tokenize(normalized)
         let contents = Data((tokens.joined(separator: " ") + "\n").utf8)
-        try ensurePrivateDirectory()
-        let previousContents = try readExistingFile()
-        try atomicReplace(contents)
+        let directoryDescriptor = try openPrivateDirectory()
+        defer { Darwin.close(directoryDescriptor) }
+        let previousContents = try readExistingFile(
+            in: directoryDescriptor
+        )
+        try atomicReplace(contents, in: directoryDescriptor)
         return WakeWordMaterializedPhrase(
             normalizedPhrase: normalized,
             url: url,
@@ -92,23 +121,33 @@ public struct WakeWordKeywordMaterializer: Sendable {
         guard materialized.url == url else {
             throw WakeWordKeywordMaterializerError.unsafePath
         }
+        let directoryDescriptor = try openPrivateDirectory()
+        defer { Darwin.close(directoryDescriptor) }
         if let previousContents = materialized.previousContents {
-            try atomicReplace(previousContents)
+            try atomicReplace(previousContents, in: directoryDescriptor)
         } else {
-            try remove()
+            try Self.remove(named: keywordFileName, in: directoryDescriptor)
         }
     }
 
     public func remove() throws {
-        guard !isSymbolicLink(url) else {
-            throw WakeWordKeywordMaterializerError.unsafePath
-        }
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        do {
-            try FileManager.default.removeItem(at: url)
-        } catch {
-            throw WakeWordKeywordMaterializerError.writeFailed
-        }
+        let directoryDescriptor = try openPrivateDirectory()
+        defer { Darwin.close(directoryDescriptor) }
+        try Self.remove(
+            named: keywordFileName,
+            in: directoryDescriptor
+        )
+    }
+
+    public static func removeKeywordFile(at fileURL: URL) throws {
+        guard fileURL.isFileURL,
+              fileURL.lastPathComponent == Self.keywordFileName
+        else { throw WakeWordKeywordMaterializerError.unsafePath }
+        let directory = try Self.openPrivateDirectory(
+            at: fileURL.deletingLastPathComponent()
+        )
+        defer { Darwin.close(directory) }
+        try Self.remove(named: Self.keywordFileName, in: directory)
     }
 
     private static func parseVocabulary(_ text: String) throws -> [String: Int] {
@@ -130,16 +169,22 @@ public struct WakeWordKeywordMaterializer: Sendable {
         return result
     }
 
-    private func ensurePrivateDirectory() throws {
+    private func openPrivateDirectory() throws -> Int32 {
+        try Self.openPrivateDirectory(at: applicationSupportDirectory)
+    }
+
+    private static func openPrivateDirectory(at directory: URL) throws -> Int32 {
         let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: applicationSupportDirectory.path) {
-            guard !isSymbolicLink(applicationSupportDirectory),
-                  (try? fileManager.attributesOfItem(atPath: applicationSupportDirectory.path)[.type] as? FileAttributeType) == .typeDirectory
-            else { throw WakeWordKeywordMaterializerError.unsafePath }
+        if let attributes = try? fileManager.attributesOfItem(
+            atPath: directory.path
+        ), let type = attributes[.type] as? FileAttributeType {
+            guard type == .typeDirectory else {
+                throw WakeWordKeywordMaterializerError.unsafePath
+            }
         } else {
             do {
                 try fileManager.createDirectory(
-                    at: applicationSupportDirectory,
+                    at: directory,
                     withIntermediateDirectories: true,
                     attributes: [.posixPermissions: 0o700]
                 )
@@ -147,75 +192,246 @@ public struct WakeWordKeywordMaterializer: Sendable {
                 throw WakeWordKeywordMaterializerError.writeFailed
             }
         }
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: applicationSupportDirectory.path
-        )
-    }
-
-    private func readExistingFile() throws -> Data? {
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        guard !isSymbolicLink(url) else {
-            throw WakeWordKeywordMaterializerError.unsafePath
-        }
-        do { return try Data(contentsOf: url) }
-        catch { throw WakeWordKeywordMaterializerError.writeFailed }
-    }
-
-    private func atomicReplace(_ data: Data) throws {
-        let fileManager = FileManager.default
-        guard !isSymbolicLink(applicationSupportDirectory), !isSymbolicLink(url) else {
-            throw WakeWordKeywordMaterializerError.unsafePath
-        }
-        let temporaryURL = applicationSupportDirectory.appendingPathComponent(
-            ".\(keywordFileName).\(UUID().uuidString).tmp",
-            isDirectory: false
-        )
-        let backupURL = applicationSupportDirectory.appendingPathComponent(
-            ".\(keywordFileName).\(UUID().uuidString).bak",
-            isDirectory: false
-        )
-        var replacementComplete = false
-        var oldFileMovedToBackup = false
-        var newFileInstalled = false
-        defer {
-            if fileManager.fileExists(atPath: temporaryURL.path) {
-                try? fileManager.removeItem(at: temporaryURL)
-            }
-            if replacementComplete {
-                if fileManager.fileExists(atPath: backupURL.path) {
-                    try? fileManager.removeItem(at: backupURL)
-                }
-            } else if oldFileMovedToBackup {
-                if newFileInstalled,
-                   fileManager.fileExists(atPath: url.path),
-                   !isSymbolicLink(url)
-                {
-                    try? fileManager.removeItem(at: url)
-                }
-                _ = rename(backupURL.path, url.path)
-            } else if newFileInstalled,
-                      fileManager.fileExists(atPath: url.path),
-                      !isSymbolicLink(url)
-            {
-                try? fileManager.removeItem(at: url)
-            }
-        }
-
-        guard fileManager.createFile(
-            atPath: temporaryURL.path,
-            contents: nil,
-            attributes: [.posixPermissions: 0o600]
-        ), !isSymbolicLink(temporaryURL) else {
-            throw WakeWordKeywordMaterializerError.writeFailed
-        }
-        let descriptor = temporaryURL.path.withCString {
-            Darwin.open($0, O_WRONLY | O_NOFOLLOW)
+        let descriptor = directory.path.withCString {
+            Darwin.open(
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
         }
         guard descriptor >= 0 else {
+            if errno == ELOOP || errno == ENOTDIR {
+                throw WakeWordKeywordMaterializerError.unsafePath
+            }
             throw WakeWordKeywordMaterializerError.writeFailed
         }
-        var writeSucceeded = true
+        var directoryInfo = stat()
+        guard fstat(descriptor, &directoryInfo) == 0 else {
+            Darwin.close(descriptor)
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+        guard (directoryInfo.st_mode & S_IFMT) == S_IFDIR else {
+            Darwin.close(descriptor)
+            throw WakeWordKeywordMaterializerError.unsafePath
+        }
+        guard fchmod(descriptor, 0o700) == 0 else {
+            Darwin.close(descriptor)
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+        return descriptor
+    }
+
+    private enum EntryKind: Equatable {
+        case absent
+        case regular
+        case symbolicLink
+        case other
+    }
+
+    private static func entryKind(
+        named name: String,
+        in directoryDescriptor: Int32
+    ) throws -> EntryKind {
+        var info = stat()
+        let result = name.withCString {
+            fstatat(
+                directoryDescriptor,
+                $0,
+                &info,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        guard result == 0 else {
+            if errno == ENOENT { return .absent }
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+        switch info.st_mode & S_IFMT {
+        case S_IFREG: return .regular
+        case S_IFLNK: return .symbolicLink
+        default: return .other
+        }
+    }
+
+    private func readExistingFile(in directoryDescriptor: Int32) throws -> Data? {
+        switch try Self.entryKind(named: keywordFileName, in: directoryDescriptor) {
+        case .absent:
+            return nil
+        case .symbolicLink, .other:
+            throw WakeWordKeywordMaterializerError.unsafePath
+        case .regular:
+            let descriptor = keywordFileName.withCString {
+                Darwin.openat(
+                    directoryDescriptor,
+                    $0,
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+                )
+            }
+            guard descriptor >= 0 else {
+                if errno == ELOOP { throw WakeWordKeywordMaterializerError.unsafePath }
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            defer { Darwin.close(descriptor) }
+            return try readData(from: descriptor)
+        }
+    }
+
+    private func readData(from descriptor: Int32) throws -> Data {
+        var result = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            guard count >= 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            guard count > 0 else { return result }
+            result.append(contentsOf: buffer.prefix(count))
+            guard result.count <= 64 * 1_024 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+        }
+    }
+
+    private static func remove(
+        named name: String,
+        in directoryDescriptor: Int32
+    ) throws {
+        switch try Self.entryKind(named: name, in: directoryDescriptor) {
+        case .absent:
+            return
+        case .symbolicLink, .other:
+            throw WakeWordKeywordMaterializerError.unsafePath
+        case .regular:
+            let result = name.withCString {
+                unlinkat(directoryDescriptor, $0, 0)
+            }
+            guard result == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            guard Darwin.fsync(directoryDescriptor) == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+        }
+    }
+
+    private func atomicReplace(
+        _ data: Data,
+        in directoryDescriptor: Int32
+    ) throws {
+        let temporaryName = ".\(keywordFileName).\(UUID().uuidString).tmp"
+        let backupName = ".\(keywordFileName).\(UUID().uuidString).bak"
+        var temporaryDescriptor: Int32 = -1
+        var temporaryCreated = false
+        var oldFileMovedToBackup = false
+        var newFileInstalled = false
+
+        do {
+            temporaryDescriptor = temporaryName.withCString {
+                Darwin.openat(
+                    directoryDescriptor,
+                    $0,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0o600
+                )
+            }
+            guard temporaryDescriptor >= 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            temporaryCreated = true
+            guard fchmod(temporaryDescriptor, 0o600) == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            try writeAndSync(data, to: temporaryDescriptor)
+
+        switch try Self.entryKind(named: keywordFileName, in: directoryDescriptor) {
+            case .absent:
+                break
+            case .symbolicLink, .other:
+                throw WakeWordKeywordMaterializerError.unsafePath
+            case .regular:
+                let result = renameat(
+                    directoryDescriptor,
+                    keywordFileName,
+                    directoryDescriptor,
+                    backupName
+                )
+                guard result == 0 else {
+                    throw WakeWordKeywordMaterializerError.unsafePath
+                }
+                oldFileMovedToBackup = true
+            }
+
+            guard renameat(
+                directoryDescriptor,
+                temporaryName,
+                directoryDescriptor,
+                keywordFileName
+            ) == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            temporaryCreated = false
+            newFileInstalled = true
+            guard Darwin.fsync(temporaryDescriptor) == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            guard try installedFileIsCurrent(
+                descriptor: temporaryDescriptor,
+                in: directoryDescriptor
+            ) else {
+                throw WakeWordKeywordMaterializerError.unsafePath
+            }
+            if faultInjection == .failAfterInstall
+                || faultInjection == .failAfterInstallAndRollback
+            {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            guard Darwin.fsync(directoryDescriptor) == 0 else {
+                throw WakeWordKeywordMaterializerError.writeFailed
+            }
+            if oldFileMovedToBackup {
+                guard unlinkat(directoryDescriptor, backupName, 0) == 0 else {
+                    throw WakeWordKeywordMaterializerError.writeFailed
+                }
+            }
+            Darwin.close(temporaryDescriptor)
+            temporaryDescriptor = -1
+        } catch let error as WakeWordKeywordMaterializerError {
+            if temporaryDescriptor >= 0 {
+                Darwin.close(temporaryDescriptor)
+                temporaryDescriptor = -1
+            }
+            guard rollback(
+                directoryDescriptor: directoryDescriptor,
+                temporaryName: temporaryName,
+                backupName: backupName,
+                temporaryCreated: temporaryCreated,
+                oldFileMovedToBackup: oldFileMovedToBackup,
+                newFileInstalled: newFileInstalled
+            ) else {
+                throw WakeWordKeywordMaterializerError.rollbackFailed
+            }
+            throw error
+        } catch {
+            if temporaryDescriptor >= 0 {
+                Darwin.close(temporaryDescriptor)
+                temporaryDescriptor = -1
+            }
+            guard rollback(
+                directoryDescriptor: directoryDescriptor,
+                temporaryName: temporaryName,
+                backupName: backupName,
+                temporaryCreated: temporaryCreated,
+                oldFileMovedToBackup: oldFileMovedToBackup,
+                newFileInstalled: newFileInstalled
+            ) else {
+                throw WakeWordKeywordMaterializerError.rollbackFailed
+            }
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+    }
+
+    private func writeAndSync(_ data: Data, to descriptor: Int32) throws {
+        var succeeded = true
         data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
@@ -225,48 +441,79 @@ public struct WakeWordKeywordMaterializer: Sendable {
                     bytes.count - offset
                 )
                 guard written > 0 else {
-                    writeSucceeded = false
+                    succeeded = false
                     return
                 }
                 offset += written
             }
         }
-        if Darwin.fsync(descriptor) != 0 { writeSucceeded = false }
-        Darwin.close(descriptor)
-        guard writeSucceeded else { throw WakeWordKeywordMaterializerError.writeFailed }
-
-        if fileManager.fileExists(atPath: url.path) {
-            guard !isSymbolicLink(url), rename(url.path, backupURL.path) == 0 else {
-                throw WakeWordKeywordMaterializerError.unsafePath
-            }
-            oldFileMovedToBackup = true
-        }
-        guard rename(temporaryURL.path, url.path) == 0 else {
+        guard succeeded, Darwin.fsync(descriptor) == 0 else {
             throw WakeWordKeywordMaterializerError.writeFailed
         }
-        newFileInstalled = true
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: url.path
-        )
-        let directoryDescriptor = applicationSupportDirectory.path.withCString {
-            Darwin.open($0, O_RDONLY | O_DIRECTORY)
-        }
-        guard directoryDescriptor >= 0 else {
-            throw WakeWordKeywordMaterializerError.writeFailed
-        }
-        let directorySyncSucceeded = Darwin.fsync(directoryDescriptor) == 0
-        Darwin.close(directoryDescriptor)
-        guard directorySyncSucceeded else {
-            throw WakeWordKeywordMaterializerError.writeFailed
-        }
-        replacementComplete = true
     }
 
-    private func isSymbolicLink(_ url: URL) -> Bool {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let type = attributes[.type] as? FileAttributeType
-        else { return false }
-        return type == .typeSymbolicLink
+    private func installedFileIsCurrent(
+        descriptor: Int32,
+        in directoryDescriptor: Int32
+    ) throws -> Bool {
+        var installed = stat()
+        guard fstat(descriptor, &installed) == 0 else {
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+        var current = stat()
+        guard keywordFileName.withCString({
+            fstatat(
+                directoryDescriptor,
+                $0,
+                &current,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }) == 0 else {
+            throw WakeWordKeywordMaterializerError.writeFailed
+        }
+        return installed.st_dev == current.st_dev
+            && installed.st_ino == current.st_ino
+    }
+
+    private func rollback(
+        directoryDescriptor: Int32,
+        temporaryName: String,
+        backupName: String,
+        temporaryCreated: Bool,
+        oldFileMovedToBackup: Bool,
+        newFileInstalled: Bool
+    ) -> Bool {
+        if faultInjection == .failAfterInstallAndRollback {
+            return false
+        }
+        var succeeded = true
+        if temporaryCreated {
+            let result = temporaryName.withCString {
+                unlinkat(directoryDescriptor, $0, 0)
+            }
+            if result != 0, errno != ENOENT { succeeded = false }
+        }
+        if oldFileMovedToBackup {
+            guard renameat(
+                directoryDescriptor,
+                backupName,
+                directoryDescriptor,
+                keywordFileName
+            ) == 0 else { return false }
+        } else if newFileInstalled {
+            do {
+                guard try Self.entryKind(
+                    named: keywordFileName,
+                    in: directoryDescriptor
+                ) == .regular else { return false }
+                guard keywordFileName.withCString({
+                    unlinkat(directoryDescriptor, $0, 0)
+                }) == 0 else { return false }
+            } catch {
+                return false
+            }
+        }
+        if Darwin.fsync(directoryDescriptor) != 0 { succeeded = false }
+        return succeeded
     }
 }

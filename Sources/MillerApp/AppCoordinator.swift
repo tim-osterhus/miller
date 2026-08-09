@@ -59,6 +59,26 @@ enum LiveAdmissionError: Error, Equatable, Sendable {
     case sessionAlreadyActive
 }
 
+enum WakeWordPrivacyResetError: Error, Equatable, Sendable {
+    case captureDidNotStop
+}
+
+enum WakeWordPrivacyReset {
+    static func run(
+        disableCapture: @escaping @Sendable () async -> WakeWordState,
+        removeKeywordFile: @escaping @Sendable () throws -> Void,
+        restorePreferences: @escaping @Sendable () async throws -> Void,
+        refreshUI: @escaping @MainActor @Sendable () async -> Void
+    ) async throws {
+        guard await disableCapture() == .disabled else {
+            throw WakeWordPrivacyResetError.captureDidNotStop
+        }
+        try removeKeywordFile()
+        try await restorePreferences()
+        await refreshUI()
+    }
+}
+
 private final class LiveAdmissionReleaseState: @unchecked Sendable {
     private let lock = NSLock()
     private var released = false
@@ -496,6 +516,7 @@ final class AppPresentationModel: ObservableObject {
     private var liveVoiceStartProviderInFlight = false
     private var liveVoiceStartTerminationRequested = false
     private var liveVoiceStartCancellationRequested = false
+    private var liveVoiceFinishedDelivered = true
     @Published private var voiceHistoryDeletionPending = false
     @Published private var voiceHistoryExportPending = false
     private var capabilitySubscriptions = Set<AnyCancellable>()
@@ -1414,12 +1435,18 @@ final class AppPresentationModel: ObservableObject {
         preparedAudio: WakeWordPreparedCommandAudio? = nil
     ) async {
         guard canStartLiveVoice else {
-            if activationSource == .wakeword { await liveVoiceFinished() }
+            if activationSource == .wakeword {
+                liveVoiceFinishedDelivered = false
+                await deliverLiveVoiceFinishedIfNeeded()
+            }
             return
         }
         await prepareLiveStart(activationSource)
+        liveVoiceFinishedDelivered = activationSource != .wakeword
         guard canStartLiveVoice else {
-            if activationSource == .wakeword { await liveVoiceFinished() }
+            if activationSource == .wakeword {
+                await deliverLiveVoiceFinishedIfNeeded()
+            }
             return
         }
         liveVoiceStartPending = true
@@ -1455,12 +1482,21 @@ final class AppPresentationModel: ObservableObject {
             await releasePendingLiveAdmission()
             voiceState = .failed
             liveVoiceFailureCode = Self.liveFailureCode(error)
+            await finishLiveVoiceCleanup(
+                terminalState: .failed,
+                outcome: .failed
+            )
             return
         }
         if let capabilityController {
             guard let profileID = providerProfiles.first(where: \.isSelected)?.id
             else {
-                await releasePendingLiveAdmission()
+                voiceState = .failed
+                liveVoiceFailureCode = "provider_unavailable"
+                await finishLiveVoiceCleanup(
+                    terminalState: .failed,
+                    outcome: .failed
+                )
                 return
             }
             do {
@@ -1478,7 +1514,10 @@ final class AppPresentationModel: ObservableObject {
                 pendingVoiceCapabilityPreparation = nil
                 voiceState = .failed
                 liveVoiceFailureCode = "capability_bridge_unavailable"
-                await releasePendingLiveAdmission()
+                await finishLiveVoiceCleanup(
+                    terminalState: .failed,
+                    outcome: .failed
+                )
                 return
             }
         }
@@ -1579,13 +1618,11 @@ final class AppPresentationModel: ObservableObject {
         pendingVoiceCapabilityPreparation = nil
         await capabilityController?.finishLiveVoice()
         await releasePendingLiveAdmission()
-        if !liveVoiceCleanupPending, liveTranscriptSessionID != nil {
+        if !liveVoiceCleanupPending {
             await finishLiveVoiceCleanup(
                 terminalState: .closed,
                 outcome: .abandoned
             )
-        } else if !liveVoiceCleanupPending, voiceState.isActive {
-            voiceState = .closed
         }
     }
 
@@ -1753,7 +1790,7 @@ final class AppPresentationModel: ObservableObject {
         await capabilityController?.finishLiveVoice()
         liveVoiceCleanupTerminalEventGeneration = nil
         if cleanupSucceeded {
-            await liveVoiceFinished()
+            await deliverLiveVoiceFinishedIfNeeded()
         }
     }
 
@@ -1782,13 +1819,7 @@ final class AppPresentationModel: ObservableObject {
         }
         tasks.add(cleanupTask)
         tasks.add(timeoutTask)
-        let result = await withTaskCancellationHandler {
-            await stream.first(where: { @Sendable _ in true }) ?? .timedOut
-        } onCancel: {
-            tasks.cancel()
-            continuation.yield(.timedOut)
-            continuation.finish()
-        }
+        let result = await stream.first(where: { @Sendable _ in true }) ?? .timedOut
         tasks.cancel()
         continuation.finish()
         return result
@@ -1798,6 +1829,12 @@ final class AppPresentationModel: ObservableObject {
         guard let admission = pendingLiveAdmission else { return }
         pendingLiveAdmission = nil
         await admission.release()
+    }
+
+    private func deliverLiveVoiceFinishedIfNeeded() async {
+        guard !liveVoiceFinishedDelivered else { return }
+        liveVoiceFinishedDelivered = true
+        await liveVoiceFinished()
     }
 
     func applyLiveEvent(_ event: LiveVoiceEvent) async {
@@ -2533,6 +2570,13 @@ actor ProviderRoutingGateway: ReasoningGateway {
 final class AppCoordinator: NSObject, NSMenuDelegate {
     let model: AppPresentationModel
 
+    static func wireWakeIntegrationOpener(
+        _ integration: WakeWordLiveIntegration,
+        opener: @escaping @MainActor @Sendable () -> Void
+    ) {
+        integration.openMiller = opener
+    }
+
     private let repository: SQLiteConversationRepository
     private let core: MillerCoordinator
     private let supervisor: GatewaySupervisor
@@ -2974,6 +3018,17 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         } else {
             wakeMaterializer = nil
         }
+        let wakeKeywordURL = wakeModelPaths?.keywords
+            ?? FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent(
+                "ai.millrace.miller",
+                isDirectory: true
+            ).appendingPathComponent(
+                WakeWordKeywordMaterializer.keywordFileName,
+                isDirectory: false
+            )
         let wakeRecorder = WakeWordAVAudioCaptureAdapter(
             ownership: microphoneOwnership
         )
@@ -3404,14 +3459,46 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         return result
                     }
                 },
-                resetWakePreferences: { [preferenceRepository] in
-                    try await preferenceRepository.set(false, for: .wakewordEnabled)
-                    try await preferenceRepository.set("Hey Miller", for: .wakePhrase)
-                    try await preferenceRepository.set("", for: .wakeMicrophoneID)
-                    try await preferenceRepository.set(
-                        0.5, for: .wakeDetectionThreshold
+                resetWakePreferences: {
+                    [preferenceRepository, wakeProduction, wakeMaterializer,
+                     wakeSettings] in
+                    try await WakeWordPrivacyReset.run(
+                        disableCapture: {
+                            await wakeProduction.disableFromSettings()
+                        },
+                        removeKeywordFile: {
+                            if let wakeMaterializer {
+                                try wakeMaterializer.remove()
+                            } else {
+                                try WakeWordKeywordMaterializer.removeKeywordFile(
+                                    at: wakeKeywordURL
+                                )
+                            }
+                        },
+                        restorePreferences: {
+                            try await preferenceRepository.set(
+                                false, for: .wakewordEnabled
+                            )
+                            try await preferenceRepository.set(
+                                "Hey Miller", for: .wakePhrase
+                            )
+                            try await preferenceRepository.set(
+                                "", for: .wakeMicrophoneID
+                            )
+                            try await preferenceRepository.set(
+                                0.5, for: .wakeDetectionThreshold
+                            )
+                            try await preferenceRepository.set(
+                                0.0, for: .wakeKeywordScore
+                            )
+                        },
+                        refreshUI: {
+                            await wakeSettings.restorePersistedPreferences(
+                                enabled: false,
+                                phrase: "Hey Miller"
+                            )
+                        }
                     )
-                    try await preferenceRepository.set(0.0, for: .wakeKeywordScore)
                 }
             )
         )
@@ -3492,6 +3579,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         activationService = GlobalActivationService()
         shortcutPreferences = GlobalShortcutPreferences()
         super.init()
+        Self.wireWakeIntegrationOpener(wakeIntegration) { [weak self] in
+            self?.overlayController.show()
+        }
         settingsObserver = NotificationCenter.default.addObserver(
             forName: .millerOpenSettings,
             object: nil,
@@ -3508,7 +3598,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    await self?.wakeProduction.suspend(.inactiveSession)
+                    await self?.wakeProduction.setApplicationActive(false)
                 }
             }
         )
@@ -3519,10 +3609,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self,
-                          !self.wakeIntegration.liveSessionActive,
-                          case .suspended(.inactiveSession) = self.wakeProduction.state
-                    else { return }
+                    guard let self else { return }
+                    await self.wakeProduction.setApplicationActive(true)
+                    guard !self.wakeIntegration.liveSessionActive else { return }
                     await self.wakeProduction.resumeAfterLiveCleanup()
                 }
             }
@@ -3534,7 +3623,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    await self?.wakeProduction.suspend(.sleep)
+                    await self?.wakeProduction.setSystemAwake(false)
                 }
             }
         )
@@ -3545,10 +3634,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self,
-                          !self.wakeIntegration.liveSessionActive,
-                          case .suspended(.sleep) = self.wakeProduction.state
-                    else { return }
+                    guard let self else { return }
+                    await self.wakeProduction.setSystemAwake(true)
+                    guard !self.wakeIntegration.liveSessionActive else { return }
                     await self.wakeProduction.resumeAfterLiveCleanup()
                 }
             }

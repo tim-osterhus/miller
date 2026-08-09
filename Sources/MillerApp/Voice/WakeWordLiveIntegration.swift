@@ -32,6 +32,7 @@ final class WakeWordLiveIntegration {
     }
 
     func liveVoiceFinished() async {
+        guard liveSessionActive else { return }
         liveSessionActive = false
         await production?.resumeAfterLiveCleanup()
     }

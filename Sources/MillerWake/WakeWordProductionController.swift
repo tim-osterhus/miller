@@ -49,6 +49,8 @@ public final class WakeWordProductionController: ObservableObject {
     private var startupEpoch: UInt64?
     private var startupWaiters = [CheckedContinuation<Void, Never>]()
     private var isEnabled = false
+    private var applicationIsActive = true
+    private var systemIsAwake = true
     private let onWakeDetected: WakeWordDetectedHandler
     private let onCommandAudio: WakeWordCommandAudioHandler
 
@@ -159,16 +161,17 @@ public final class WakeWordProductionController: ObservableObject {
 
     public func suspend(_ reason: WakeWordSuspensionReason) async {
         guard isEnabled else { return }
+        switch reason {
+        case .inactiveSession:
+            applicationIsActive = false
+        case .sleep:
+            systemIsAwake = false
+        default:
+            break
+        }
         if case .suspended(let currentReason) = state {
-            switch (currentReason, reason) {
-            case (.foregroundSession, _), (.inactiveSession, _), (.sleep, _),
-                 (.deviceTransition, _):
-                return
-            case (.processing, .inactiveSession), (.processing, .sleep):
-                break
-            default:
-                return
-            }
+            guard Self.suspensionPriority(reason)
+                > Self.suspensionPriority(currentReason) else { return }
         }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
@@ -209,15 +212,24 @@ public final class WakeWordProductionController: ObservableObject {
         return !recorder.isWakeMonitoring
     }
 
+    public func setApplicationActive(_ active: Bool) async {
+        applicationIsActive = active
+        if !active {
+            await suspend(.inactiveSession)
+        }
+    }
+
+    public func setSystemAwake(_ awake: Bool) async {
+        systemIsAwake = awake
+        if !awake {
+            await suspend(.sleep)
+        }
+    }
+
     /// Releases the wake lease before Live starts and begins a fresh detector
     /// generation only after the caller has completed Live cleanup.
     public func resumeAfterLiveCleanup() async {
-        guard isEnabled else { return }
-        if case .suspended(let reason) = state,
-           reason == .inactiveSession || reason == .sleep
-        {
-            return
-        }
+        guard isEnabled, applicationIsActive, systemIsAwake else { return }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
         await waitForEarlierLifecycleOperations(operationEpoch)
@@ -228,6 +240,8 @@ public final class WakeWordProductionController: ObservableObject {
     private func startMonitoringIfEligible(operationEpoch: UInt64) async {
         guard acceptsLifecycleOperation(operationEpoch),
               isEnabled,
+              applicationIsActive,
+              systemIsAwake,
               monitoringSessionID == nil,
               !recorder.isWakeMonitoring,
               beginStartup(operationEpoch: operationEpoch) else {
@@ -599,6 +613,21 @@ public final class WakeWordProductionController: ObservableObject {
         case nil: .capture
         }
         return reason
+    }
+
+    private static func suspensionPriority(
+        _ reason: WakeWordSuspensionReason
+    ) -> Int {
+        switch reason {
+        case .processing, .speaking, .foregroundSession:
+            1
+        case .deviceTransition:
+            2
+        case .inactiveSession:
+            3
+        case .sleep:
+            4
+        }
     }
 }
 

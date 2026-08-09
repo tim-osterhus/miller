@@ -21,6 +21,92 @@ struct WakeWordProductionHandoffTests {
     }
 
     @Test @MainActor
+    func sleepSupersedesAnEarlierInactiveSuspension() async {
+        let recorder = HandoffRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.suspend(.inactiveSession)
+        await controller.suspend(.sleep)
+
+        #expect(controller.state == .suspended(.sleep))
+        #expect(!recorder.isWakeMonitoring)
+    }
+
+    @Test @MainActor
+    func activeWakeWaitsForBothLifecycleGatesBeforeRearming() async {
+        let recorder = HandoffRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.setApplicationActive(false)
+        await controller.setSystemAwake(false)
+        await controller.setSystemAwake(true)
+        await controller.resumeAfterLiveCleanup()
+
+        #expect(controller.state == .suspended(.sleep))
+        #expect(recorder.startCount == 1)
+
+        await controller.setApplicationActive(true)
+        await controller.resumeAfterLiveCleanup()
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.startCount == 2)
+    }
+
+    @Test @MainActor
+    func liveCleanupCannotRestartCaptureWhileInactiveOrAsleep() async {
+        let recorder = HandoffRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.setApplicationActive(false)
+        await controller.setSystemAwake(false)
+        await controller.resumeAfterLiveCleanup()
+        await controller.setSystemAwake(true)
+        await controller.resumeAfterLiveCleanup()
+
+        #expect(controller.state == .suspended(.sleep))
+        #expect(recorder.startCount == 1)
+
+        await controller.setApplicationActive(true)
+        await controller.resumeAfterLiveCleanup()
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.startCount == 2)
+    }
+
+    @Test @MainActor
+    func enablingWhileInactiveDefersCaptureUntilTheActiveWakeEvent() async {
+        let recorder = HandoffRecorderProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() }
+        )
+
+        await controller.setApplicationActive(false)
+        await controller.setEnabled(true)
+
+        #expect(controller.state == .disabled)
+        #expect(recorder.startCount == 0)
+
+        await controller.setApplicationActive(true)
+        await controller.resumeAfterLiveCleanup()
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.startCount == 1)
+    }
+
+    @Test @MainActor
     func commandAudioIsDeliveredOnceAfterWakeDetection() async {
         let recorder = HandoffRecorderProbe()
         let detector = HandoffDetectorProbe()

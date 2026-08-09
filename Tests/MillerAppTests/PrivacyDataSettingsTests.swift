@@ -1,4 +1,6 @@
 import Foundation
+import MillerStorage
+import MillerWake
 import Testing
 @testable import MillerApp
 
@@ -192,6 +194,88 @@ struct PrivacyDataSettingsTests {
             .init(root: "preferences.wake.reset", succeeded: false),
         ])
     }
+
+    @Test @MainActor
+    func wakePrivacyResetStopsCaptureReleasesLeaseRemovesFileAndRestoresDefaults() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("miller-wake-reset-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let preferences = try SQLitePreferenceRepository(path: database.path)
+        try await preferences.set(true, for: .wakewordEnabled)
+        try await preferences.set("Custom Miller", for: .wakePhrase)
+        try await preferences.set("device", for: .wakeMicrophoneID)
+        try await preferences.set(0.8, for: .wakeDetectionThreshold)
+        try await preferences.set(0.4, for: .wakeKeywordScore)
+
+        let tokens = root.appendingPathComponent("tokens.txt")
+        try "<blk> 0\n▁hey 1\n▁miller 2\n".write(
+            to: tokens,
+            atomically: true,
+            encoding: .utf8
+        )
+        let materializer = try WakeWordKeywordMaterializer(
+            tokensFile: tokens,
+            applicationSupportDirectory: root.appendingPathComponent(
+                "Support", isDirectory: true
+            )
+        )
+        _ = try materializer.materialize("Hey Miller")
+
+        let ownership = MicrophoneOwnership()
+        let recorder = ResetWakeRecorder(ownership: ownership)
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { ResetWakeDetector() }
+        )
+        await controller.setEnabled(true)
+        #expect(controller.state == .monitoring)
+
+        let settings = WakeWordSettingsController(
+            initialEnabled: true,
+            initialPhrase: "Custom Miller",
+            initialState: .monitoring,
+            enable: { .monitoring },
+            disable: { .disabled }
+        )
+        try await WakeWordPrivacyReset.run(
+            disableCapture: { await controller.disableFromSettings() },
+            removeKeywordFile: { try materializer.remove() },
+            restorePreferences: {
+                try await preferences.set(false, for: .wakewordEnabled)
+                try await preferences.set("Hey Miller", for: .wakePhrase)
+                try await preferences.set("", for: .wakeMicrophoneID)
+                try await preferences.set(0.5, for: .wakeDetectionThreshold)
+                try await preferences.set(0.0, for: .wakeKeywordScore)
+            },
+            refreshUI: {
+                await settings.restorePersistedPreferences(
+                    enabled: false,
+                    phrase: "Hey Miller"
+                )
+            }
+        )
+
+        #expect(controller.state == .disabled)
+        #expect(!recorder.isWakeMonitoring)
+        let liveLease = try ownership.acquire(.live)
+        liveLease.release()
+        #expect(!FileManager.default.fileExists(atPath: materializer.url.path))
+        #expect(try await preferences.value(for: .wakewordEnabled) == false)
+        #expect(try await preferences.value(for: .wakePhrase) == "Hey Miller")
+        #expect(try await preferences.value(for: .wakeMicrophoneID) == "")
+        #expect(try await preferences.value(for: .wakeDetectionThreshold) == 0.5)
+        #expect(try await preferences.value(for: .wakeKeywordScore) == 0.0)
+        #expect(!settings.isEnabled)
+        #expect(settings.phrase == "Hey Miller")
+        #expect(settings.state == .disabled)
+        await preferences.close()
+    }
 }
 
 private final class MetadataFailureFileManager: FileManager, @unchecked Sendable {
@@ -260,4 +344,37 @@ private actor PrivacySettingsRecorder {
         wakePreferenceResets += 1
         if !wakeResetSucceeds { throw CocoaError(.fileWriteUnknown) }
     }
+}
+
+@MainActor
+private final class ResetWakeRecorder: WakeWordCaptureOwning {
+    var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    private(set) var isWakeMonitoring = false
+    private let ownership: MicrophoneOwnership
+    private var lease: MicrophoneOwnership.Lease?
+
+    init(ownership: MicrophoneOwnership) {
+        self.ownership = ownership
+    }
+
+    func startWakeMonitoring() async throws -> UUID {
+        lease = try ownership.acquire(.wake)
+        isWakeMonitoring = true
+        return UUID()
+    }
+
+    func stopWakeMonitoring() async {
+        isWakeMonitoring = false
+        lease?.release()
+        lease = nil
+    }
+}
+
+private final class ResetWakeDetector: WakeWordDetecting, @unchecked Sendable {
+    let requiredSampleRate = 16_000
+    let requiredFrameLength = 480
+
+    func process(frame: ContiguousArray<Int16>) throws -> Bool { false }
+    func reset() throws {}
+    func shutdown() {}
 }

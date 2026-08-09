@@ -235,22 +235,18 @@ final class PrivacyDataSettingsModel: ObservableObject {
         isBusy = true
         status = ""
         defer { isBusy = false }
-        let result = await dependencies.reset()
-        resetResults = result.roots
         var wakeResetSucceeded = false
         do {
             try await dependencies.resetWakePreferences()
             wakeResetSucceeded = true
-            resetResults.append(.init(
-                root: "preferences.wake.reset",
-                succeeded: true
-            ))
         } catch {
-            resetResults.append(.init(
-                root: "preferences.wake.reset",
-                succeeded: false
-            ))
         }
+        let result = await dependencies.reset()
+        resetResults = result.roots
+        resetResults.append(.init(
+            root: "preferences.wake.reset",
+            succeeded: wakeResetSucceeded
+        ))
         guard result.failures.isEmpty, wakeResetSucceeded else {
             status = "Reset incomplete; review Diagnostics."
             return

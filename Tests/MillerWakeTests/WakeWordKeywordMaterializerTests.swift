@@ -73,6 +73,89 @@ struct WakeWordKeywordMaterializerTests {
         )
     }
 
+    @Test
+    func symlinkReplacementIsRejectedWithoutTouchingTheOutsideFile() throws {
+        let root = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = try makeMaterializer(root: root)
+        _ = try materializer.materialize("Hey Miller")
+        let outside = root.appendingPathComponent("outside.txt")
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.removeItem(at: materializer.url)
+        try FileManager.default.createSymbolicLink(
+            at: materializer.url,
+            withDestinationURL: outside
+        )
+
+        #expect(throws: WakeWordKeywordMaterializerError.unsafePath) {
+            try materializer.materialize("Hey")
+        }
+        #expect(String(data: try Data(contentsOf: outside), encoding: .utf8) == "outside")
+    }
+
+    @Test
+    func directorySymlinkCreatedAfterInitializationIsRejected() throws {
+        let root = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        let materializer = try makeMaterializer(root: root)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(
+            at: support,
+            withDestinationURL: outside
+        )
+
+        #expect(throws: WakeWordKeywordMaterializerError.unsafePath) {
+            try materializer.materialize("Hey Miller")
+        }
+        #expect(!FileManager.default.fileExists(
+            atPath: outside.appendingPathComponent("wake-keywords.txt").path
+        ))
+    }
+
+    @Test
+    func injectedInstallFailureRollsBackAndPreservesLastWorkingPhrase() throws {
+        let root = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = try makeMaterializer(root: root)
+        _ = try materializer.materialize("Hey Miller")
+        let failing = try WakeWordKeywordMaterializer(
+            tokensFile: root.appendingPathComponent("tokens.txt"),
+            applicationSupportDirectory: root.appendingPathComponent(
+                "Support", isDirectory: true
+            ),
+            faultInjection: .failAfterInstall
+        )
+
+        #expect(throws: WakeWordKeywordMaterializerError.writeFailed) {
+            try failing.materialize("Hey")
+        }
+        #expect(
+            try String(contentsOf: materializer.url, encoding: .utf8)
+                == "▁hey ▁miller\n"
+        )
+    }
+
+    @Test
+    func injectedRollbackFailureIsReportedInsteadOfSuppressed() throws {
+        let root = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = try makeMaterializer(root: root)
+        _ = try materializer.materialize("Hey Miller")
+        let failing = try WakeWordKeywordMaterializer(
+            tokensFile: root.appendingPathComponent("tokens.txt"),
+            applicationSupportDirectory: root.appendingPathComponent(
+                "Support", isDirectory: true
+            ),
+            faultInjection: .failAfterInstallAndRollback
+        )
+
+        #expect(throws: WakeWordKeywordMaterializerError.rollbackFailed) {
+            try failing.materialize("Hey")
+        }
+    }
+
     private func makeFixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("miller-wake-\(UUID().uuidString)", isDirectory: true)
