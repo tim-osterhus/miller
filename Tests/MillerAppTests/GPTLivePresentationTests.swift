@@ -738,6 +738,216 @@ struct GPTLivePresentationTests {
         #expect(await probe.credentialLoads == 1)
     }
 
+    @Test
+    func liveVoiceAssociatesTranscriptWithSelectedConversation() async {
+        let probe = LiveAssociationProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: { true },
+                nextSessionSavingEnabled: { true },
+                restoreNextSessionSavingDefault: {},
+                startSession: { _, conversationID, _, _ in
+                    await probe.record(conversationID)
+                },
+                appendEntry: { _, _, _, _, _, _ in },
+                completeEntry: { _, _ in },
+                finalizeSession: { _, _ in },
+                recoverInterruptedSessions: {}
+            )
+        )
+        let model = AppPresentationModel(
+            dependencies: dependencies(),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { emit in
+                    await emit(.sessionAdmitted(id: UUID()))
+                    await emit(.state(.listening))
+                },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            ),
+            liveTranscriptRecorder: recorder
+        )
+        let conversationID = ConversationID()
+
+        await model.selectConversation(conversationID)
+        await model.startLiveVoice()
+
+        #expect(await probe.conversationIDs == [conversationID])
+    }
+
+    @Test
+    func blankSelectedConversationIsDurableBeforeRecorderAssociation() async {
+        let probe = LiveAdmissionOrderProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: { true },
+                nextSessionSavingEnabled: { true },
+                restoreNextSessionSavingDefault: {},
+                startSession: { _, conversationID, _, _ in
+                    await probe.record("recorder:\(conversationID?.description ?? "nil")")
+                },
+                appendEntry: { _, _, _, _, _, _ in },
+                completeEntry: { _, _ in },
+                finalizeSession: { _, _ in },
+                recoverInterruptedSessions: {}
+            )
+        )
+        let conversationID = ConversationID()
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                await probe.record("durable:\(id.description)")
+                return LiveAdmission(
+                    conversationID: id,
+                    activationSource: source
+                )
+            }),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { emit in
+                    await probe.record("provider")
+                    await emit(.sessionAdmitted(id: UUID()))
+                    await emit(.state(.listening))
+                },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            ),
+            liveTranscriptRecorder: recorder
+        )
+
+        await model.selectConversation(conversationID)
+        await model.startLiveVoice(activationSource: .wakeword)
+
+        #expect(await probe.events == [
+            "durable:\(conversationID.description)",
+            "provider",
+            "recorder:\(conversationID.description)",
+        ])
+    }
+
+    @Test
+    func manualAndWakeAdmissionsCannotHoldTwoReservations() async throws {
+        let authority = LiveAdmissionAuthority()
+        let dependencies = dependencies(admitLive: { id, source in
+            let reservation = try await authority.reserve()
+            return LiveAdmission(
+                conversationID: id,
+                activationSource: source,
+                release: reservation.release
+            )
+        })
+        let conversationID = ConversationID()
+        let manual = try await dependencies.admitLive(
+            conversationID: conversationID,
+            activationSource: .manual
+        )
+
+        await #expect(throws: LiveAdmissionError.sessionAlreadyActive) {
+            try await dependencies.admitLive(
+                conversationID: conversationID,
+                activationSource: .wakeword
+            )
+        }
+
+        await manual.release()
+        let wake = try await dependencies.admitLive(
+            conversationID: conversationID,
+            activationSource: .wakeword
+        )
+        #expect(wake.activationSource == .wakeword)
+        await wake.release()
+    }
+
+    @Test
+    func staleAdmissionReleaseCannotReleaseCurrentGeneration() async throws {
+        let authority = LiveAdmissionAuthority()
+        let first = try await authority.reserve()
+        await first.release()
+        let current = try await authority.reserve()
+
+        await first.release()
+        await #expect(throws: LiveAdmissionError.sessionAlreadyActive) {
+            try await authority.reserve()
+        }
+
+        await current.release()
+        _ = try await authority.reserve()
+    }
+
+    @Test
+    func terminalCleanupWritesOneResultAndReleasesAdmissionOnce() async {
+        let probe = LiveAssociationProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: .init(
+                savingEnabled: { true },
+                nextSessionSavingEnabled: { true },
+                restoreNextSessionSavingDefault: {},
+                startSession: { _, conversationID, _, _ in
+                    await probe.record(conversationID)
+                },
+                appendEntry: { _, _, _, _, _, _ in },
+                completeEntry: { _, _ in },
+                finalizeSession: { _, outcome in
+                    await probe.recordTerminal(outcome)
+                },
+                recoverInterruptedSessions: {}
+            )
+        )
+        let model = AppPresentationModel(
+            dependencies: dependencies(admitLive: { id, source in
+                LiveAdmission(
+                    conversationID: id,
+                    activationSource: source,
+                    release: { await probe.release() }
+                )
+            }),
+            liveVoice: LiveVoiceDependencies(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { emit in
+                    await emit(.sessionAdmitted(id: UUID()))
+                    await emit(.state(.listening))
+                },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            ),
+            liveTranscriptRecorder: recorder
+        )
+
+        await model.startLiveVoice()
+        await model.endLiveVoice()
+        await model.endLiveVoice()
+
+        #expect(await probe.terminalOutcomes == [.completed])
+        #expect(await probe.releaseCount == 1)
+    }
+
+    @Test
+    func liveAdmissionSurfaceExposesOnlyMillerAssociationData() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MillerApp/AppCoordinator.swift")
+        let source = try String(contentsOf: path, encoding: .utf8)
+        let start = try #require(source.range(of: "enum LiveAdmissionError"))
+        let end = try #require(source.range(of: "struct VoiceHistoryDependencies"))
+        let surface = String(source[start.lowerBound..<end.lowerBound])
+
+        #expect(surface.contains("admitLive"))
+        for forbidden in [
+            "threadID", "helperURL", "credentialReference", "WebRTC",
+            "rawAudio", "realtimeSessionID"
+        ] {
+            #expect(!surface.contains(forbidden), "Leaked provider detail: \(forbidden)")
+        }
+    }
+
     @Test(arguments: LiveTerminalOutcome.allCases)
     fileprivate func liveTerminalCleanupRechecksInvalidatedCredentialBeforeRestart(
         outcome: LiveTerminalOutcome
@@ -2096,7 +2306,16 @@ struct GPTLivePresentationTests {
 
     private func dependencies(
         submits: SubmitProbe? = nil,
-        loadTurn: @escaping @Sendable (TurnID) async throws -> Turn? = { _ in nil }
+        loadTurn: @escaping @Sendable (TurnID) async throws -> Turn? = { _ in nil },
+        admitLive: @escaping @Sendable (
+            ConversationID,
+            VoiceActivationSource
+        ) async throws -> LiveAdmission = { conversationID, activationSource in
+            LiveAdmission(
+                conversationID: conversationID,
+                activationSource: activationSource
+            )
+        }
     ) -> HostDependencies {
         HostDependencies(
             submit: { _, _ in
@@ -2104,7 +2323,7 @@ struct GPTLivePresentationTests {
                 return TurnID()
             }, stop: {}, loadTurn: loadTurn,
             loadConversations: { [] }, loadTurns: { _ in [] }, archive: { _ in },
-            unarchive: { _ in }, delete: { _ in }
+            unarchive: { _ in }, delete: { _ in }, admitLive: admitLive
         )
     }
 
@@ -2528,6 +2747,32 @@ private actor VoiceProbe {
     private func recordMute(_ value: Bool) { mutes.append(value) }
     private func recordInterrupt() { interrupts += 1 }
     private func recordEnd() { ends += 1 }
+}
+
+private actor LiveAssociationProbe {
+    private(set) var conversationIDs: [ConversationID?] = []
+    private(set) var terminalOutcomes: [VoiceSessionTerminalOutcome] = []
+    private(set) var releaseCount = 0
+
+    func record(_ conversationID: ConversationID?) {
+        conversationIDs.append(conversationID)
+    }
+
+    func recordTerminal(_ outcome: VoiceSessionTerminalOutcome) {
+        terminalOutcomes.append(outcome)
+    }
+
+    func release() {
+        releaseCount += 1
+    }
+}
+
+private actor LiveAdmissionOrderProbe {
+    private(set) var events: [String] = []
+
+    func record(_ event: String) {
+        events.append(event)
+    }
 }
 
 private actor StaleLiveSessionEventProbe {

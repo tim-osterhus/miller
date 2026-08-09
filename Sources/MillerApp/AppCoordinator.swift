@@ -54,6 +54,65 @@ enum VoiceHistoryMutationError: Error, Equatable {
     case busy
 }
 
+enum LiveAdmissionError: Error, Equatable, Sendable {
+    case sessionAlreadyActive
+}
+
+struct LiveAdmission: Sendable {
+    let conversationID: ConversationID
+    let activationSource: VoiceActivationSource
+
+    private let releaseOperation: @Sendable () async -> Void
+
+    init(
+        conversationID: ConversationID,
+        activationSource: VoiceActivationSource,
+        release: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.conversationID = conversationID
+        self.activationSource = activationSource
+        releaseOperation = release
+    }
+
+    func release() async {
+        await releaseOperation()
+    }
+}
+
+struct LiveAdmissionReservation: Sendable {
+    private let releaseOperation: @Sendable () async -> Void
+
+    init(release: @escaping @Sendable () async -> Void) {
+        releaseOperation = release
+    }
+
+    func release() async {
+        await releaseOperation()
+    }
+}
+
+actor LiveAdmissionAuthority {
+    private var nextGeneration: UInt64 = 0
+    private var activeGeneration: UInt64?
+
+    func reserve() throws -> LiveAdmissionReservation {
+        guard activeGeneration == nil else {
+            throw LiveAdmissionError.sessionAlreadyActive
+        }
+        nextGeneration &+= 1
+        let generation = nextGeneration
+        activeGeneration = generation
+        return LiveAdmissionReservation { [self] in
+            await release(generation: generation)
+        }
+    }
+
+    private func release(generation: UInt64) {
+        guard activeGeneration == generation else { return }
+        activeGeneration = nil
+    }
+}
+
 struct MenuState: Equatable {
     let canCreateConversation: Bool
     let canStop: Bool
@@ -107,6 +166,10 @@ struct ConversationListItem: Identifiable, Equatable, Sendable {
 struct HostDependencies: Sendable {
     private let submitOperation:
         @Sendable (String, ConversationID, VoiceHistoryAttachment?) async throws -> TurnID
+    private let admitLiveOperation: @Sendable (
+        ConversationID,
+        VoiceActivationSource
+    ) async throws -> LiveAdmission
     let stop: @Sendable () async throws -> Void
     let loadTurn: @Sendable (TurnID) async throws -> Turn?
     let loadConversations: @Sendable () async throws -> [Conversation]
@@ -125,11 +188,21 @@ struct HostDependencies: Sendable {
         archive: @escaping @Sendable (ConversationID) async throws -> Void,
         unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
         delete: @escaping @Sendable (ConversationID) async throws -> Void,
-        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil }
+        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil },
+        admitLive: @escaping @Sendable (
+            ConversationID,
+            VoiceActivationSource
+        ) async throws -> LiveAdmission = { conversationID, activationSource in
+            LiveAdmission(
+                conversationID: conversationID,
+                activationSource: activationSource
+            )
+        }
     ) {
         submitOperation = { text, conversationID, _ in
             try await submit(text, conversationID)
         }
+        admitLiveOperation = admitLive
         self.stop = stop
         self.loadTurn = loadTurn
         self.loadConversations = loadConversations
@@ -153,9 +226,19 @@ struct HostDependencies: Sendable {
         archive: @escaping @Sendable (ConversationID) async throws -> Void,
         unarchive: @escaping @Sendable (ConversationID) async throws -> Void,
         delete: @escaping @Sendable (ConversationID) async throws -> Void,
-        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil }
+        reasoningStatus: @escaping @Sendable () async -> ReasoningStatus? = { nil },
+        admitLive: @escaping @Sendable (
+            ConversationID,
+            VoiceActivationSource
+        ) async throws -> LiveAdmission = { conversationID, activationSource in
+            LiveAdmission(
+                conversationID: conversationID,
+                activationSource: activationSource
+            )
+        }
     ) {
         submitOperation = submit
+        admitLiveOperation = admitLive
         self.stop = stop
         self.loadTurn = loadTurn
         self.loadConversations = loadConversations
@@ -172,6 +255,13 @@ struct HostDependencies: Sendable {
         _ voiceHistoryAttachment: VoiceHistoryAttachment? = nil
     ) async throws -> TurnID {
         try await submitOperation(text, conversationID, voiceHistoryAttachment)
+    }
+
+    func admitLive(
+        conversationID: ConversationID,
+        activationSource: VoiceActivationSource
+    ) async throws -> LiveAdmission {
+        try await admitLiveOperation(conversationID, activationSource)
     }
 }
 
@@ -355,6 +445,7 @@ final class AppPresentationModel: ObservableObject {
     private var conversationProjectionGeneration: UInt64 = 0
     private var voiceHistoryGeneration: UInt64 = 0
     private var pendingVoiceActivationSource: VoiceActivationSource = .manual
+    private var pendingLiveAdmission: LiveAdmission?
     @Published private var voiceHistoryDeletionPending = false
     @Published private var voiceHistoryExportPending = false
     private var capabilitySubscriptions = Set<AnyCancellable>()
@@ -1258,10 +1349,26 @@ final class AppPresentationModel: ObservableObject {
     ) async {
         guard canStartLiveVoice else { return }
         liveVoiceStartPending = true
+        do {
+            pendingLiveAdmission = try await dependencies.admitLive(
+                conversationID: selectedConversationID,
+                activationSource: activationSource
+            )
+            pendingVoiceActivationSource = pendingLiveAdmission?.activationSource
+                ?? activationSource
+            try Task.checkCancellation()
+        } catch {
+            await releasePendingLiveAdmission()
+            liveVoiceStartPending = false
+            voiceState = .failed
+            liveVoiceFailureCode = Self.liveFailureCode(error)
+            return
+        }
         if let capabilityController {
             guard let profileID = providerProfiles.first(where: \.isSelected)?.id
             else {
                 liveVoiceStartPending = false
+                await releasePendingLiveAdmission()
                 return
             }
             do {
@@ -1272,6 +1379,7 @@ final class AppPresentationModel: ObservableObject {
                 liveVoiceStartPending = false
                 voiceState = .failed
                 liveVoiceFailureCode = "capability_bridge_unavailable"
+                await releasePendingLiveAdmission()
                 return
             }
         }
@@ -1283,7 +1391,6 @@ final class AppPresentationModel: ObservableObject {
         liveTranscriptPersistenceMessage = nil
         resetLiveTranscripts()
         liveVoiceMuted = false
-        pendingVoiceActivationSource = activationSource
         do {
             try await liveVoice.start { [weak self] event in
                 await self?.applyLiveEvent(event, generation: eventGeneration)
@@ -1389,6 +1496,7 @@ final class AppPresentationModel: ObservableObject {
         if cleanupSucceeded {
             pendingLiveTranscriptCleanup = nil
             liveVoiceCleanupPending = false
+            await releasePendingLiveAdmission()
         } else {
             presentTranscriptPersistenceFailure()
             liveVoiceCleanupRetryPending = true
@@ -1402,6 +1510,12 @@ final class AppPresentationModel: ObservableObject {
         for waiter in waiters { waiter.resume() }
         pendingVoiceCapabilityPreparation = nil
         await capabilityController?.finishLiveVoice()
+    }
+
+    private func releasePendingLiveAdmission() async {
+        guard let admission = pendingLiveAdmission else { return }
+        pendingLiveAdmission = nil
+        await admission.release()
     }
 
     func applyLiveEvent(_ event: LiveVoiceEvent) async {
@@ -1437,8 +1551,9 @@ final class AppPresentationModel: ObservableObject {
             do {
                 try await liveTranscriptRecorder.begin(
                     sessionID: id,
-                    conversationID: nil,
-                    activationSource: pendingVoiceActivationSource
+                    conversationID: pendingLiveAdmission?.conversationID,
+                    activationSource: pendingLiveAdmission?.activationSource
+                        ?? pendingVoiceActivationSource
                 )
             } catch {
                 guard generation == liveVoiceEventGeneration else { return }
@@ -1792,6 +1907,7 @@ final class AppPresentationModel: ObservableObject {
         if (error as? GPTLiveSkillProjectionError) == .cleanupPending {
             return "cleanup_pending"
         }
+        if error is LiveAdmissionError { return "voice_unavailable" }
         if error is GPTLiveCredentialError { return "voice_unavailable" }
         if let audio = error as? LiveAudioError {
             switch audio {
@@ -2376,6 +2492,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             controller: capabilityController
         )
         core = MillerCoordinator(repository: repository, gateway: gateway)
+        let liveAdmissionAuthority = LiveAdmissionAuthority()
 
         let dependencies = HostDependencies(
             submit: { [core] text, conversationID, voiceHistoryAttachment in
@@ -2396,7 +2513,36 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             archive: { [core] id in try await core.archive(conversationID: id) },
             unarchive: { [core] id in try await core.unarchive(conversationID: id) },
             delete: { [core] id in try await core.delete(conversationID: id) },
-            reasoningStatus: { [core] in await core.activeReasoningStatus }
+            reasoningStatus: { [core] in await core.activeReasoningStatus },
+            admitLive: { [repository, liveAdmissionAuthority] conversationID, activationSource in
+                let reservation = try await liveAdmissionAuthority.reserve()
+                do {
+                    let existing = try await repository.conversations()
+                    if !existing.contains(where: { $0.id == conversationID }) {
+                        let marker = TurnID()
+                        try await repository.accept(
+                            conversationID: conversationID,
+                            turnID: marker,
+                            userText: "",
+                            inputMode: .voice,
+                            generation: 1
+                        )
+                        try await repository.stop(
+                            turnID: marker,
+                            targetGeneration: 1,
+                            nextGeneration: 2
+                        )
+                    }
+                    return LiveAdmission(
+                        conversationID: conversationID,
+                        activationSource: activationSource,
+                        release: reservation.release
+                    )
+                } catch {
+                    await reservation.release()
+                    throw error
+                }
+            }
         )
         providerController = ProviderSettingsController(
             repository: repository,

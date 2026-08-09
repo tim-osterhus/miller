@@ -29,6 +29,24 @@ struct LiveVoiceTranscriptRecorderTests {
     }
 
     @Test
+    func beginPreservesStableMillerConversationAssociation() async throws {
+        let probe = RecorderPersistenceProbe()
+        let recorder = LiveVoiceTranscriptRecorder(
+            persistence: await probe.persistence()
+        )
+        let conversationID = ConversationID()
+
+        try await recorder.begin(
+            sessionID: UUID(),
+            conversationID: conversationID,
+            activationSource: .manual
+        )
+        try await recorder.finish(outcome: .completed)
+
+        #expect(await probe.sessions.map(\.conversationID) == [conversationID])
+    }
+
+    @Test
     func nextSessionOptOutIsConsumedAndRestored() async throws {
         let probe = RecorderPersistenceProbe(nextSessionSavingEnabled: false)
         let recorder = LiveVoiceTranscriptRecorder(
