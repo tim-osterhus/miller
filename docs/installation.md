@@ -41,5 +41,9 @@ permission is requested only after **Start Live Voice**.
 Before packaging from a clean checkout, network access is required once for the
 bounded, explicit `./scripts/bootstrap-gateway-dependencies.sh` lockfile
 bootstrap. It verifies the exact Node and npm dependency closure. Headless
-qualification does not call that bootstrap. Wakeword dependencies and models
-remain source-only for v0.1.2 and are not packaged.
+qualification does not call that bootstrap. To package Wake Listening, first
+run the explicit `./scripts/bootstrap-wakeword-dependencies.sh` after its
+storage forecast passes, then run `./scripts/verify-wakeword-dependencies.sh`.
+Wake remains off by default and ships only the verified runtime model/token
+files plus linked native code; private generated keyword files stay in
+Application Support.

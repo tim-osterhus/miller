@@ -1,5 +1,3 @@
-// Adapted from owner-authored Cortana wakeword source at commit
-// 8f4af867c575c089f45a8df4768663a521f88203.
 import Combine
 import Foundation
 
@@ -7,40 +5,39 @@ import Foundation
 public final class WakeWordSettingsController: ObservableObject {
     public typealias Operation =
         @MainActor @Sendable () async throws -> WakeWordState
-
-    public nonisolated static let enabledDefaultsKey = "WakeWordEnabled"
+    public typealias PhraseOperation =
+        @MainActor @Sendable (String) async throws -> String
 
     @Published public private(set) var isEnabled: Bool
+    @Published public private(set) var phrase: String
     @Published public private(set) var state: WakeWordState
     @Published public private(set) var isWorking = false
     @Published public private(set) var errorMessage: String?
-    @Published public private(set) var keywordScore: Double
-    @Published public private(set) var keywordThreshold: Double
 
-    private let defaults: UserDefaults
     private let enableOperation: Operation
     private let disableOperation: Operation
-    private let applyTuningOperation: Operation
+    private let retryOperation: Operation
+    private let savePhraseOperation: PhraseOperation
     private var operationTask: Task<Void, Never>?
     private var pendingEnabled: Bool?
     private var stateProjection: AnyCancellable?
 
     public init(
-        defaults: UserDefaults = .standard,
+        initialEnabled: Bool = false,
+        initialPhrase: String = "Hey Miller",
         initialState: WakeWordState = .disabled,
         enable: @escaping Operation,
         disable: @escaping Operation,
-        applyTuning: @escaping Operation = { .disabled }
+        retry: @escaping Operation = { .disabled },
+        savePhrase: @escaping PhraseOperation = { $0 }
     ) {
-        self.defaults = defaults
+        isEnabled = initialEnabled
+        phrase = initialPhrase
         state = initialState
         enableOperation = enable
         disableOperation = disable
-        applyTuningOperation = applyTuning
-        isEnabled = defaults.bool(forKey: Self.enabledDefaultsKey)
-        let tuning = SherpaWakeWordTuning.load(from: defaults)
-        keywordScore = tuning.keywordScore
-        keywordThreshold = tuning.keywordThreshold
+        retryOperation = retry
+        savePhraseOperation = savePhrase
     }
 
     deinit {
@@ -53,113 +50,97 @@ public final class WakeWordSettingsController: ObservableObject {
                 ? "Starting wake listening"
                 : "Stopping wake listening"
         }
-
         return Self.statusText(for: state)
-    }
-
-    public var isTuningEditable: Bool {
-        switch state {
-        case .starting, .handoff, .capturingCommand, .stopping:
-            false
-        default:
-            true
-        }
     }
 
     public func setEnabled(_ requestedEnabled: Bool) {
         guard !isWorking, requestedEnabled != isEnabled else { return }
-
         pendingEnabled = requestedEnabled
         isWorking = true
         errorMessage = nil
         let operation = requestedEnabled ? enableOperation : disableOperation
-        let defaults = defaults
-
-        if !requestedEnabled {
-            // An explicit off request must survive relaunch even if teardown
-            // reports a failure.
-            isEnabled = false
-            defaults.set(false, forKey: Self.enabledDefaultsKey)
-        }
-
         operationTask = Task { @MainActor [weak self] in
             do {
                 let nextState = try await operation()
                 guard !Task.isCancelled, let self else { return }
-                defer {
-                    self.pendingEnabled = nil
-                    self.isWorking = false
-                }
                 self.state = nextState
-                if requestedEnabled {
-                    self.isEnabled = true
-                    defaults.set(true, forKey: Self.enabledDefaultsKey)
-                }
+                self.isEnabled = requestedEnabled
+                self.pendingEnabled = nil
+                self.isWorking = false
             } catch {
                 guard !Task.isCancelled, let self else { return }
-                defer {
-                    self.pendingEnabled = nil
-                    self.isWorking = false
-                }
-                if requestedEnabled {
-                    self.isEnabled = false
-                    defaults.set(false, forKey: Self.enabledDefaultsKey)
-                } else {
-                    self.state = .unavailable(.capture)
-                }
-                self.errorMessage = (error as? LocalizedError)?.errorDescription
-                    ?? "Miller could not update wake listening."
+                self.pendingEnabled = nil
+                self.isWorking = false
+                if requestedEnabled { self.isEnabled = false }
+                self.errorMessage = Self.message(for: error)
             }
         }
     }
 
-    public func applyTuning(
-        keywordScore requestedScore: Double,
-        keywordThreshold requestedThreshold: Double
-    ) {
-        guard !isWorking else { return }
-        guard isTuningEditable else {
-            errorMessage =
-                "Wait for the current wake request to finish before changing sensitivity."
-            return
-        }
-        guard let tuning = SherpaWakeWordTuning(
-            keywordScore: requestedScore,
-            keywordThreshold: requestedThreshold
-        ) else {
-            errorMessage =
-                "Keyword score must be greater than 0, and threshold must be between 0 and 1."
-            return
-        }
-
-        keywordScore = tuning.keywordScore
-        keywordThreshold = tuning.keywordThreshold
-        defaults.set(
-            tuning.keywordScore,
-            forKey: SherpaWakeWordTuning.keywordScoreDefaultsKey
-        )
-        defaults.set(
-            tuning.keywordThreshold,
-            forKey: SherpaWakeWordTuning.keywordThresholdDefaultsKey
-        )
-        errorMessage = nil
-
-        guard isEnabled else { return }
+    public func updatePhrase(_ requestedPhrase: String) {
+        guard !isWorking, requestedPhrase != phrase else { return }
         isWorking = true
-        let operation = applyTuningOperation
+        errorMessage = nil
+        let operation = savePhraseOperation
         operationTask = Task { @MainActor [weak self] in
             do {
-                let state = try await operation()
+                let normalized = try await operation(requestedPhrase)
                 guard !Task.isCancelled, let self else { return }
-                self.state = state
+                self.phrase = normalized
                 self.isWorking = false
             } catch {
                 guard !Task.isCancelled, let self else { return }
-                self.errorMessage = (error as? LocalizedError)?
-                    .errorDescription
-                    ?? "Miller could not apply wake sensitivity."
                 self.isWorking = false
+                self.errorMessage = Self.message(for: error)
             }
+        }
+    }
+
+    public func retry() {
+        guard !isWorking else { return }
+        isWorking = true
+        errorMessage = nil
+        let operation = retryOperation
+        operationTask = Task { @MainActor [weak self] in
+            do {
+                let nextState = try await operation()
+                guard !Task.isCancelled, let self else { return }
+                self.state = nextState
+                self.isEnabled = nextState != .disabled
+                self.isWorking = false
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.isWorking = false
+                self.errorMessage = Self.message(for: error)
+            }
+        }
+    }
+
+    public func restorePersistedPreferences(
+        enabled: Bool,
+        phrase: String
+    ) async {
+        operationTask?.cancel()
+        operationTask = nil
+        pendingEnabled = nil
+        errorMessage = nil
+        self.phrase = phrase
+        guard enabled else {
+            isEnabled = false
+            state = .disabled
+            isWorking = false
+            return
+        }
+        isWorking = true
+        do {
+            let nextState = try await enableOperation()
+            state = nextState
+            isEnabled = nextState != .disabled
+            isWorking = false
+        } catch {
+            isEnabled = false
+            isWorking = false
+            errorMessage = Self.message(for: error)
         }
     }
 
@@ -167,14 +148,6 @@ public final class WakeWordSettingsController: ObservableObject {
         stateProjection = production.$state.sink { [weak self] state in
             self?.project(state: state)
         }
-    }
-
-    public func startPersistedPreference() {
-        guard isEnabled, !isWorking else { return }
-        // The stored preference describes intent; production capture still
-        // starts only after the app's launch-reset fence.
-        isEnabled = false
-        setEnabled(true)
     }
 
     public func project(state: WakeWordState) {
@@ -219,6 +192,22 @@ public final class WakeWordSettingsController: ObservableObject {
             case .sleep, .inactiveSession:
                 "Wake listening paused"
             }
+        }
+    }
+
+    private static func message(for error: Error) -> String {
+        switch error {
+        case WakeWordPhraseError.empty:
+            "Enter a wake phrase."
+        case WakeWordPhraseError.tooLong:
+            "Wake phrase is too long."
+        case WakeWordPhraseError.tooManyTokens:
+            "Wake phrase has too many tokens."
+        case WakeWordPhraseError.unsupportedToken(let token):
+            "Wake phrase contains unsupported input: \(token)."
+        default:
+            (error as? LocalizedError)?.errorDescription
+                ?? "Miller could not update wake listening."
         }
     }
 }

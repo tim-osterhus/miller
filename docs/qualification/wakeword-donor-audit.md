@@ -43,7 +43,18 @@ application, generated artifact, or metadata was consulted.
 Miller recreates only the approved owner-authored behavior, with names and
 integration points adapted narrowly to Miller. Existing ownership/provenance
 comments are preserved. The import does not include Cortana settings UI,
-audio, models, binary libraries, build products, or tests.
+donor audio, build products, or tests. Miller's Packet 5 adapters own
+production AVAudioEngine capture, private keyword materialization, WebKit PCM
+handoff, and settings composition.
+
+## Packet 5 packaging boundary
+
+The explicit verified bootstrap retains only the pinned arm64 static libraries
+and the five model/token files needed by `MillerWake`. Packaging verifies that
+root and copies only those model/token files into
+`Contents/Resources/WakeWord/model`; linked native code remains in Miller.
+Archives, headers, compiler inputs, extraction roots, and private generated
+keyword files are excluded.
 
 ## Fetched dependency boundary
 

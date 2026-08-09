@@ -6,12 +6,7 @@ import Testing
 struct WakeWordDonorParityTests {
     @Test @MainActor
     func wakeListeningDefaultsDisabled() {
-        let suite = "WakeWordDonorParityTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-
         let settings = WakeWordSettingsController(
-            defaults: defaults,
             enable: { .monitoring },
             disable: { .disabled }
         )
@@ -409,12 +404,8 @@ struct WakeWordDonorParityTests {
 
     @Test @MainActor
     func settingsControllerDoesNotRetainItselfAcrossAnOperationAwait() async {
-        let suite = "WakeWordSettingsLifetime-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
         let gate = StateOperationGate()
         var controller: WakeWordSettingsController? = WakeWordSettingsController(
-            defaults: defaults,
             enable: { await gate.run() },
             disable: { .disabled }
         )

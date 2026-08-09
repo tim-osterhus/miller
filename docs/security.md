@@ -22,14 +22,23 @@ reference/evidence only, not a runtime support claim. Packaging requires the
 explicit lockfile-integrity dependency bootstrap and never calls it implicitly.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
 
-## v0.1.1 package refusal boundary
+## Package refusal boundary
 
-The release verifier fails closed on wake bridges, wake/model assets, Sherpa or
-ONNX payloads, Codex or Rust build artifacts, fake helpers, fixtures,
-transcripts, runtime logs, sockets, and credential material. The application
-SBOM and runtime inventory list only the MCP SDK, capability bridge, Node,
-Pi overlay, and shipped JavaScript dependencies. Wake foundation inputs are
-source-only for v0.1.2.
+The release verifier fails closed on wake archives, headers, compiler inputs,
+private keyword files, Codex or Rust build artifacts, fake helpers, fixtures,
+transcripts, runtime logs, sockets, and credential material. It allows only
+the five exact verified model/token files under `WakeWord/model` and the
+linked native wake code in Miller. The application SBOM and runtime inventory
+name Sherpa-ONNX, ONNX Runtime, and those exact assets.
+
+## Wake capture boundary
+
+Wake uses one AVAudioEngine capture owner and a process-local microphone lease.
+The lease is released before Live starts. Permission failure, input-device
+loss, inactive/sleep state, disable, or shutdown stops the engine and clears
+callbacks. Generation checks reject stale samples and late callbacks.
+Prepared command PCM is bounded and can be injected into the existing WebKit
+outbound track once; no second process or speech backend is created.
 
 Live Voice depends on an owner-installed official Codex App Server. Missing or
 incompatible Codex, denied permission, unsupported model, provider refusal,

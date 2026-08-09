@@ -39,6 +39,22 @@ gateway_bundle="$staging_root/Miller.app/Contents/Resources/Gateway"
 gateway_app="$gateway_bundle/app"
 gateway_runtime="$gateway_bundle/runtime"
 gateway_dependencies="$gateway_root/node_modules"
+wakeword_locked_root="$repo_root/.build/vendor/wakeword/locked"
+wakeword_model_root="$wakeword_locked_root/model"
+typeset -A wakeword_model_hashes=(
+  encoder.onnx 1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678
+  decoder.onnx f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3
+  joiner.onnx eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c
+  bpe.model c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24
+  tokens.txt fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53
+)
+baseline_app_bytes="unavailable"
+if [[ -d "$artifacts_root/release/Miller.app" &&
+      ! -L "$artifacts_root/release/Miller.app" ]]; then
+  baseline_app_bytes="$(du -sk "$artifacts_root/release/Miller.app" | awk '{ print $1 * 1024 }')"
+fi
+previous_bundle=""
+replacement_installed=0
 resource_bundle_matches=()
 resource_bundle=""
 bin_path=""
@@ -68,6 +84,14 @@ require_storage_headroom() {
 }
 
 cleanup_staging() {
+  if (( replacement_installed == 1 )) && [[ -e "$bundle_root" ]]; then
+    [[ ! -L "$bundle_root" ]] || exit 1
+    find -P "$bundle_root" -depth -delete
+  fi
+  if [[ -n "$previous_bundle" && -e "$previous_bundle" ]]; then
+    [[ ! -L "$previous_bundle" ]] || exit 1
+    mv "$previous_bundle" "$bundle_root"
+  fi
   if [[ -n "$node_stage" && -L "$node_stage" ]]; then
     print -u2 "refusing symbolic-link Node staging root"
     exit 1
@@ -96,6 +120,8 @@ require_storage_headroom "gateway-dependencies" 524288
 test -d "$gateway_dependencies"
 test ! -L "$gateway_dependencies"
 "$repo_root/scripts/verify-provenance.sh" --development-bundle-inventory
+require_storage_headroom "wakeword-package" 131072
+"$repo_root/scripts/verify-wakeword-dependencies.sh"
 test "$("$node_path" --version)" = "v22.22.0"
 test -x "$node_path"
 test -x "$npm_path"
@@ -149,7 +175,9 @@ case "$bundle_root" in
       print -u2 "refusing symbolic-link package output root"
       exit 1
     }
-    [[ ! -e "$bundle_root" ]] || find -P "$bundle_root" -depth -delete
+    if [[ "$package_mode" == "development" && -e "$bundle_root" ]]; then
+      find -P "$bundle_root" -depth -delete
+    fi
     ;;
   *)
     exit 1
@@ -160,6 +188,7 @@ cleanup_staging
 mkdir -p \
   "$staging_root/Miller.app/Contents/MacOS" \
   "$staging_root/Miller.app/Contents/Helpers" \
+  "$staging_root/Miller.app/Contents/Resources/WakeWord/model" \
   "$gateway_app/node_modules/@miller" \
   "$gateway_runtime"
 
@@ -174,6 +203,23 @@ cp "$binary_path" "$staging_root/Miller.app/Contents/MacOS/Miller"
 cp "$bridge_binary_path" \
   "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 cp -R "$resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
+for wakeword_model in \
+  encoder.onnx \
+  decoder.onnx \
+  joiner.onnx \
+  bpe.model \
+  tokens.txt
+do
+  test -f "$wakeword_model_root/$wakeword_model"
+  test ! -L "$wakeword_model_root/$wakeword_model"
+  cp "$wakeword_model_root/$wakeword_model" \
+    "$staging_root/Miller.app/Contents/Resources/WakeWord/model/$wakeword_model"
+done
+for wakeword_model expected in ${(kv)wakeword_model_hashes}; do
+  test "$(shasum -a 256 \
+    "$staging_root/Miller.app/Contents/Resources/WakeWord/model/$wakeword_model" \
+    | awk '{print $1}')" = "$expected"
+done
 
 scrub_private_build_paths() {
   local binary="$1"
@@ -201,8 +247,8 @@ if [[ "$package_mode" == "release" ]]; then
   cp "$repo_root/NOTICE" "$legal_root/NOTICE"
   {
     printf '# Miller v0.1.1 packaged provenance\n\n'
-    printf 'This unsigned release candidate contains the Miller application, the statically linked capability bridge, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
-    printf 'The application inventory excludes optional speech, wake, and model build inputs. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
+    printf 'This unsigned release candidate contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
+    printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
     printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
   } > "$legal_root/PROVENANCE.md"
   {
@@ -210,7 +256,7 @@ if [[ "$package_mode" == "release" ]]; then
     printf -- '- Model Context Protocol Swift SDK 0.12.1: Apache-2.0/MIT transition terms; https://github.com/modelcontextprotocol/swift-sdk.git\n'
     printf -- '- Node.js 22.22.0: MIT and bundled upstream notices; see LICENSE.node-22.22.0.\n'
     printf -- '- @miller/pi-mvp-overlay 0.82.0-a3, openai 6.26.0, and partial-json 0.1.7: notices reviewed in this repository.\n'
-    printf -- '- Optional speech and wake build inputs are source-only for a later release and are not shipped here.\n'
+    printf -- '- Sherpa-ONNX 1.13.2 and ONNX Runtime 1.24.4: linked native wake runtime; verified model/token files are shipped under WakeWord/model. Bootstrap archives, headers, and compiler inputs are not shipped.\n'
   } > "$legal_root/THIRD_PARTY_NOTICES.md"
   cp "$repo_root/Gateway/vendor/LICENSES/mcp-swift-sdk-LICENSE.txt" \
     "$legal_root/mcp-swift-sdk-LICENSE.txt"
@@ -332,6 +378,25 @@ test -z "$(find "$gateway_bundle" -mindepth 1 -maxdepth 1 -type f -print -quit)"
 test -f "$gateway_app/node_modules/@miller/pi-mvp-overlay/package.json"
 test -f "$gateway_app/node_modules/openai/package.json"
 test -f "$gateway_app/node_modules/partial-json/package.json"
+wakeword_bundle_model_root="$staging_root/Miller.app/Contents/Resources/WakeWord/model"
+test "$(
+  find -P "$wakeword_bundle_model_root" -mindepth 1 -maxdepth 1 -type f \
+    -print | wc -l | tr -d ' '
+)" = "5"
+test -z "$(find -P "$wakeword_bundle_model_root" -type l -print -quit)"
+for wakeword_model in \
+  encoder.onnx \
+  decoder.onnx \
+  joiner.onnx \
+  bpe.model \
+  tokens.txt
+do
+  test -f "$wakeword_bundle_model_root/$wakeword_model"
+done
+for wakeword_model expected in ${(kv)wakeword_model_hashes}; do
+  test "$(shasum -a 256 "$wakeword_bundle_model_root/$wakeword_model" \
+    | awk '{print $1}')" = "$expected"
+done
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$staging_root/Miller.app/Contents/Info.plist")" = "ai.millrace.miller"
 if [[ "$package_mode" == "development" ]]; then
   test "$(/usr/libexec/PlistBuddy -c 'Print :MillerGPTLiveHarnessCapability' "$staging_root/Miller.app/Contents/Info.plist")" = "miller-gpt-live-webrtc-harness-v1"
@@ -349,7 +414,7 @@ test -z "$(find "$staging_root/Miller.app" \
   -type f \( -name codex -o -name cargo -o -name rustc \) -o \
   -iname '*cortana*' -o -iname '*voiceink*' -o -iname '*codex-rs*' -o \
   -iname '*MillerWakeBridge*' -o -iname '*MillerWake*' -o \
-  -iname '*sherpa*' -o -iname '*onnx*' -o -iname '*gigaspeech*' -o \
+  -iname '*sherpa*' -o -iname '*gigaspeech*' -o \
   -iname '*wake-model*' -o -iname '*webrtc*' -o -iname '*fake*helper*' -o \
   -iname '*fixture*' -o -iname '*credential*.json' -o \
   -iname '*credential*.plist' -o -iname '*credential*.db' -o \
@@ -358,7 +423,7 @@ test -z "$(find "$staging_root/Miller.app" \
   -iname '*transcript*.md' -o -iname '*transcript*.sqlite*' -o \
   -iname '*socket-token*' -o -iname '*unix-socket*' -o \
   -iname '*.sock' -o -iname '*.socket' -o -iname '*token*.json' -o \
-  -iname '*token*.txt' -o -iname '*.token' -o -iname '*.log' \
+  -iname '*.token' -o -iname '*.log' \
 \) -print -quit)"
 test "$("$gateway_runtime/node" --version)" = "v22.22.0"
 test "$(
@@ -376,9 +441,32 @@ test "$(
 openai
 partial-json"
 
+codesign --force --deep --sign - "$staging_root/Miller.app"
+codesign --verify --deep --strict "$staging_root/Miller.app"
+codesign --verify --strict \
+  "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
+test "$(codesign -dvvv "$staging_root/Miller.app/Contents/MacOS/Miller" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)" = \
+  "$(codesign -dvvv "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge" 2>&1 \
+  | sed -n 's/^Signature=//p' | head -1)"
+if [[ "$package_mode" == "development" ]]; then
+  test "$("$staging_root/Miller.app/Contents/MacOS/Miller" \
+    --gpt-live-harness-smoke-test)" = "GPT_LIVE_HARNESS_SMOKE_TEXT_ONLY"
+fi
+
 mkdir -p "${bundle_root:h}"
-mv "$staging_root/Miller.app" "$bundle_root"
-codesign --force --deep --sign - "$bundle_root"
+if [[ "$package_mode" == "release" && -e "$bundle_root" ]]; then
+  previous_bundle="$release_root/.Miller.app.previous.$$"
+  [[ ! -e "$previous_bundle" && ! -L "$previous_bundle" ]] || {
+    print -u2 "refusing an existing release replacement backup"
+    exit 1
+  }
+  mv "$bundle_root" "$previous_bundle"
+fi
+if ! mv "$staging_root/Miller.app" "$bundle_root"; then
+  exit 1
+fi
+replacement_installed=1
 codesign --verify --deep --strict "$bundle_root"
 codesign --verify --strict \
   "$bundle_root/Contents/Helpers/MillerCapabilityBridge"
@@ -386,9 +474,21 @@ test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
   | sed -n 's/^Signature=//p' | head -1)" = \
   "$(codesign -dvvv "$bundle_root/Contents/Helpers/MillerCapabilityBridge" 2>&1 \
   | sed -n 's/^Signature=//p' | head -1)"
-if [[ "$package_mode" == "development" ]]; then
-  test "$("$bundle_root/Contents/MacOS/Miller" --gpt-live-harness-smoke-test)" = "GPT_LIVE_HARNESS_SMOKE_TEXT_ONLY"
+final_app_bytes="$(du -sk "$bundle_root" | awk '{ print $1 * 1024 }')"
+printf 'MILLER_WAKEWORD_FINAL_APP_SIZE_BYTES=%s\n' "$final_app_bytes"
+printf 'MILLER_WAKEWORD_BASELINE_APP_SIZE_BYTES=%s\n' "$baseline_app_bytes"
+if [[ "$baseline_app_bytes" != "unavailable" ]]; then
+  printf 'MILLER_WAKEWORD_FINAL_APP_SIZE_DELTA_BYTES=%s\n' \
+    "$((final_app_bytes - baseline_app_bytes))"
+else
+  printf 'MILLER_WAKEWORD_FINAL_APP_SIZE_DELTA_BYTES=unavailable\n'
 fi
+if [[ -n "$previous_bundle" && -e "$previous_bundle" ]]; then
+  [[ ! -L "$previous_bundle" ]] || exit 1
+  find -P "$previous_bundle" -depth -delete
+  previous_bundle=""
+fi
+replacement_installed=0
 cleanup_staging
 if [[ "$package_mode" == "development" ]]; then
   printf 'MILLER_DEV_APP_READY=1\n'

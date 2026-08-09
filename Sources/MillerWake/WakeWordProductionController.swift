@@ -7,16 +7,29 @@ typealias WakeWordEventScheduler = @Sendable (
     @escaping @MainActor @Sendable () async -> Void
 ) -> Void
 
-/// Narrow capture boundary retained as source-only Task 16 groundwork.
-/// Runtime vocabulary, persistence, and audio integration are deferred to
-/// Miller v0.1.2; no wake runtime integration is claimed here.
+public typealias WakeWordDetectedHandler =
+    @MainActor @Sendable () async -> Void
+public typealias WakeWordCommandAudioHandler =
+    @MainActor @Sendable (WakeWordPreparedCommandAudio, WakeCommandEndpointEvent) async -> Void
+
+/// Coordinates the detector, the exclusive capture owner, and one bounded
+/// post-keyword handoff into the Live voice authority.
 @MainActor
 public protocol WakeWordCaptureOwning: AnyObject {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)? { get set }
     var isWakeMonitoring: Bool { get }
 
+    func setFailureHandler(
+        _ handler: @escaping @Sendable (WakeWordUnavailableReason) -> Void
+    )
     func startWakeMonitoring() async throws -> UUID
     func stopWakeMonitoring() async
+}
+
+public extension WakeWordCaptureOwning {
+    func setFailureHandler(
+        _ handler: @escaping @Sendable (WakeWordUnavailableReason) -> Void
+    ) {}
 }
 
 @MainActor
@@ -28,6 +41,7 @@ public final class WakeWordProductionController: ObservableObject {
     private let eventScheduler: WakeWordEventScheduler
     private var coordinator: WakeWordCoordinator?
     private var monitoringSessionID: UUID?
+    private var pendingHandoff: WakeWordCaptureHandoff?
     private var sampleCallbackEpoch: UInt64?
     private var lifecycleEpoch: UInt64 = 0
     private var activeLifecycleEpochs = Set<UInt64>()
@@ -35,14 +49,20 @@ public final class WakeWordProductionController: ObservableObject {
     private var startupEpoch: UInt64?
     private var startupWaiters = [CheckedContinuation<Void, Never>]()
     private var isEnabled = false
+    private let onWakeDetected: WakeWordDetectedHandler
+    private let onCommandAudio: WakeWordCommandAudioHandler
 
     public convenience init(
         recorder: any WakeWordCaptureOwning,
-        detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting
+        detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
+        onWakeDetected: @escaping WakeWordDetectedHandler = {},
+        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in }
     ) {
         self.init(
             recorder: recorder,
             detectorFactory: detectorFactory,
+            onWakeDetected: onWakeDetected,
+            onCommandAudio: onCommandAudio,
             eventScheduler: { operation in
                 Task { @MainActor in await operation() }
             }
@@ -52,10 +72,14 @@ public final class WakeWordProductionController: ObservableObject {
     init(
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
+        onWakeDetected: @escaping WakeWordDetectedHandler = {},
+        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in },
         eventScheduler: @escaping WakeWordEventScheduler
     ) {
         self.recorder = recorder
         self.detectorFactory = detectorFactory
+        self.onWakeDetected = onWakeDetected
+        self.onCommandAudio = onCommandAudio
         self.eventScheduler = eventScheduler
     }
 
@@ -107,7 +131,7 @@ public final class WakeWordProductionController: ObservableObject {
         return state
     }
 
-    public func applyDetectorTuningFromSettings() async throws -> WakeWordState {
+    public func reloadDetector() async throws -> WakeWordState {
         guard isEnabled else { return state }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
@@ -128,8 +152,24 @@ public final class WakeWordProductionController: ObservableObject {
         return state
     }
 
+    @available(*, deprecated, message: "Use reloadDetector()")
+    public func applyDetectorTuningFromSettings() async throws -> WakeWordState {
+        try await reloadDetector()
+    }
+
     public func suspend(_ reason: WakeWordSuspensionReason) async {
         guard isEnabled else { return }
+        if case .suspended(let currentReason) = state {
+            switch (currentReason, reason) {
+            case (.foregroundSession, _), (.inactiveSession, _), (.sleep, _),
+                 (.deviceTransition, _):
+                return
+            case (.processing, .inactiveSession), (.processing, .sleep):
+                break
+            default:
+                return
+            }
+        }
         let operationEpoch = beginLifecycleOperation()
         defer { finishLifecycleOperation(operationEpoch) }
         await waitForEarlierLifecycleOperations(operationEpoch)
@@ -167,6 +207,22 @@ public final class WakeWordProductionController: ObservableObject {
             operationEpoch: operationEpoch
         )
         return !recorder.isWakeMonitoring
+    }
+
+    /// Releases the wake lease before Live starts and begins a fresh detector
+    /// generation only after the caller has completed Live cleanup.
+    public func resumeAfterLiveCleanup() async {
+        guard isEnabled else { return }
+        if case .suspended(let reason) = state,
+           reason == .inactiveSession || reason == .sleep
+        {
+            return
+        }
+        let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
+        await startMonitoringIfEligible(operationEpoch: operationEpoch)
     }
 
     private func startMonitoringIfEligible(operationEpoch: UInt64) async {
@@ -215,6 +271,14 @@ public final class WakeWordProductionController: ObservableObject {
                 }
             }
             sampleCallbackEpoch = operationEpoch
+            recorder.setFailureHandler { [weak self] reason in
+                Task { @MainActor [weak self] in
+                    await self?.handleCaptureFailure(
+                        reason,
+                        callbackEpoch: operationEpoch
+                    )
+                }
+            }
 
             let sessionID = try await recorder.startWakeMonitoring()
             guard acceptsLifecycleOperation(operationEpoch),
@@ -251,9 +315,30 @@ public final class WakeWordProductionController: ObservableObject {
                 guard acceptsLifecycleOperation(operationEpoch) else { return }
             }
             guard acceptsLifecycleOperation(operationEpoch) else { return }
-            coordinator?.markUnavailable(.capture)
-            state = .unavailable(.capture)
+            let reason = Self.unavailableReason(for: error)
+            coordinator?.markUnavailable(reason)
+            state = .unavailable(reason)
         }
+    }
+
+    private func handleCaptureFailure(
+        _ reason: WakeWordUnavailableReason,
+        callbackEpoch: UInt64
+    ) async {
+        guard acceptsLifecycleOperation(callbackEpoch) else { return }
+        let operationEpoch = beginLifecycleOperation()
+        defer { finishLifecycleOperation(operationEpoch) }
+        await waitForEarlierLifecycleOperations(operationEpoch)
+        guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
+        clearSampleCallback(ifOwnedBy: callbackEpoch)
+        monitoringSessionID = nil
+        pendingHandoff = nil
+        coordinator?.markUnavailable(reason)
+        if recorder.isWakeMonitoring {
+            await recorder.stopWakeMonitoring()
+        }
+        guard acceptsLifecycleOperation(operationEpoch) else { return }
+        state = .unavailable(reason)
     }
 
     private func handle(
@@ -275,10 +360,23 @@ public final class WakeWordProductionController: ObservableObject {
             case .wakeDetected(let generation):
                 guard eventCoordinator.accepts(generation) else { continue }
                 state = .handoff
-            case .commandEndpoint(let generation, _):
+                if let monitoringSessionID {
+                    pendingHandoff = WakeWordCaptureHandoff(
+                        monitoringSessionID: monitoringSessionID,
+                        generation: generation,
+                        coordinator: eventCoordinator
+                    )
+                }
+                await onWakeDetected()
+            case .commandEndpoint(let generation, let reason):
                 guard eventCoordinator.accepts(generation) else { continue }
-                eventCoordinator.suspend(.processing)
-                state = .suspended(.processing)
+                await finishCommandEndpoint(
+                    eventCoordinator: eventCoordinator,
+                    generation: generation,
+                    reason: reason,
+                    operationEpoch: operationEpoch
+                )
+                return
             case .detectorUnavailable(let generation):
                 guard eventCoordinator.accepts(generation) else { continue }
                 await handleDetectorRuntimeFailure(
@@ -287,6 +385,39 @@ public final class WakeWordProductionController: ObservableObject {
                 )
                 return
             }
+        }
+    }
+
+    private func finishCommandEndpoint(
+        eventCoordinator: WakeWordCoordinator,
+        generation: UInt64,
+        reason: WakeCommandEndpointEvent,
+        operationEpoch: UInt64
+    ) async {
+        guard acceptsLifecycleOperation(operationEpoch),
+              eventCoordinator.accepts(generation) else { return }
+        let preparedAudio: WakeWordPreparedCommandAudio?
+        switch reason {
+        case .emptyWakeTimeout:
+            preparedAudio = nil
+        case .continueListening:
+            return
+        case .silence, .hardLimit:
+            preparedAudio = pendingHandoff?.consume()
+        }
+        pendingHandoff = nil
+        eventCoordinator.suspend(.processing)
+        state = .suspended(.processing)
+        await stop(
+            disable: false,
+            shutDownDetector: false,
+            operationEpoch: operationEpoch
+        )
+        guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
+        if let preparedAudio {
+            await onCommandAudio(preparedAudio, reason)
+        } else {
+            await startMonitoringIfEligible(operationEpoch: operationEpoch)
         }
     }
 
@@ -326,6 +457,7 @@ public final class WakeWordProductionController: ObservableObject {
         guard acceptsLifecycleOperation(operationEpoch) else { return }
         clearSampleCallback()
         monitoringSessionID = nil
+        pendingHandoff = nil
         if disable, coordinator != nil {
             coordinator?.beginStopping()
             state = .stopping
@@ -434,6 +566,7 @@ public final class WakeWordProductionController: ObservableObject {
             return
         }
         recorder.onSamples = nil
+        recorder.setFailureHandler { _ in }
         sampleCallbackEpoch = nil
     }
 
@@ -451,6 +584,21 @@ public final class WakeWordProductionController: ObservableObject {
     ) {
         guard eventCoordinator.currentState() == .starting else { return }
         eventCoordinator.suspend(.foregroundSession)
+    }
+
+    private static func unavailableReason(
+        for error: Error
+    ) -> WakeWordUnavailableReason {
+        if error is WakeWordDetectorError || error is WakeWordKeywordMaterializerError {
+            return .model
+        }
+        let reason: WakeWordUnavailableReason = switch error as? WakeWordCaptureStartError {
+        case .permissionDenied: .microphonePermission
+        case .inputDeviceUnavailable, .microphoneBusy: .inputDevice
+        case .captureFailed: .capture
+        case nil: .capture
+        }
+        return reason
     }
 }
 

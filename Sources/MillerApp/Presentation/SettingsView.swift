@@ -1,10 +1,12 @@
 import SwiftUI
+import MillerWake
 
 struct SettingsView: View {
     @ObservedObject var model: AppPresentationModel
     @ObservedObject var capabilitySettings: MCPServerEditorModel
     @ObservedObject var privacySettings: PrivacyDataSettingsModel
     @ObservedObject var diagnosticsSettings: DiagnosticsSettingsModel
+    @ObservedObject var wakeSettings: WakeWordSettingsController
     @AppStorage(SettingsSelectionPreferences.key)
     private var selectedSectionRawValue = SettingsSection.general.rawValue
 
@@ -12,12 +14,17 @@ struct SettingsView: View {
         model: AppPresentationModel,
         capabilitySettings: MCPServerEditorModel = .init(),
         privacySettings: PrivacyDataSettingsModel = .init(),
-        diagnosticsSettings: DiagnosticsSettingsModel = .init()
+        diagnosticsSettings: DiagnosticsSettingsModel = .init(),
+        wakeSettings: WakeWordSettingsController = .init(
+            enable: { .disabled },
+            disable: { .disabled }
+        )
     ) {
         self.model = model
         self.capabilitySettings = capabilitySettings
         self.privacySettings = privacySettings
         self.diagnosticsSettings = diagnosticsSettings
+        self.wakeSettings = wakeSettings
     }
 
     var body: some View {
@@ -76,7 +83,7 @@ struct SettingsView: View {
         case .providers:
             ProvidersSettingsTab(model: model)
         case .voice:
-            VoiceSettingsTab(model: model)
+            VoiceSettingsTab(model: model, wakeSettings: wakeSettings)
         case .toolsIntegrations:
             ToolsIntegrationsSettingsTab(editor: capabilitySettings)
         case .privacyData:

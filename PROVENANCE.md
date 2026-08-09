@@ -73,17 +73,19 @@ and provenance review before incorporation.
 official repository, revision, and complete SwiftPM resolution. The Swift
 capability broker consumes the SDK through the Miller bridge.
 
-### v0.1.1 application boundary
+### Application boundary
 
-The shipped application contains only the Miller executable, the statically
-linked capability bridge and MCP SDK, the reviewed Node.js 22.22.0 runtime, the
-Pi-derived gateway overlay, and the existing openai and partial-json gateway
-packages. Packaging/Miller.spdx.json and the generated runtime inventory
-enumerate those components exactly.
+The shipped application contains the Miller executable with linked Sherpa-ONNX
+and ONNX Runtime wake code, five verified wake model/token files under
+`Contents/Resources/WakeWord/model`, the capability bridge and MCP SDK, the
+reviewed Node.js 22.22.0 runtime, the Pi-derived gateway overlay, and the
+existing openai and partial-json gateway packages. Packaging/Miller.spdx.json
+and the generated runtime inventory enumerate those components exactly.
 
-Codex is an external prerequisite for Live Voice and is not bundled. Optional
-speech, wake, model, donor, and test inputs are source-only and are excluded
-from the v0.1.1 application SBOM, runtime inventory, and legal payload.
+Codex is an external prerequisite for Live Voice and is not bundled. Wake
+archives, headers, compiler inputs, extraction roots, private generated
+keyword files, donor test inputs, and audio are excluded from the application
+payload.
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
 the v0.1.1 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
@@ -104,14 +106,17 @@ boundary adaptations. The Cortana settings view, tests, probes, installed app,
 and current working tree were not source donors. VoiceInk was neither inspected
 nor used.
 
-### Fetched-and-verified wakeword build inputs (v0.1.2 source-only)
+### Fetched-and-verified wakeword build inputs
 
-These are optional build inputs for the wakeword subsystem. They are never
-committed or shipped in v0.1.1. `scripts/bootstrap-wakeword-dependencies.sh`
-fetches the exact
+`scripts/bootstrap-wakeword-dependencies.sh` fetches the exact
 official archives into a bounded generated directory, verifies each archive
 before extraction, stages only the required arm64 inputs, deletes the archives
 and extraction trees, and verifies the retained bytes again.
+
+Packaging verifies that retained root and copies only the five model/token
+files into the app. Headers, static archives, compiler inputs, transient
+archives, extraction roots, and private generated keyword files are never
+packaged or committed.
 
 - Sherpa-ONNX 1.13.2 static macOS XCFramework archive:
   `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-macos-xcframework-static.tar.bz2`
@@ -122,7 +127,7 @@ and extraction trees, and verifies the retained bytes again.
     `437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4`
   - Retained C++ API header SHA-256:
     `431170d7c34bf154761f0d151984a3b8973342444d4f93c7037ea7405313aede`
-  - Planned retained library SHA-256:
+  - Retained linked library SHA-256:
     `cd6f73e84bb78d5041a085fb388f43d6c66107e6f12e97a39cda6c7ce534b8a6`
   - License: Apache-2.0.
 - ONNX Runtime 1.24.4 arm64 static library archive:
@@ -130,7 +135,7 @@ and extraction trees, and verifies the retained bytes again.
   - Archive SHA-256:
     `4752fa848d9d36143e3942537ff71736d2e581ce192a528482f7edd8d02c9ebf`
   - Exact archive size: `17,358,514` bytes.
-  - Planned retained library SHA-256:
+  - Retained linked library SHA-256:
     `9f3e92dd112cd39aa495aec55352f9daaac756c3879bc1b4b3586105c1e85e34`
   - License: MIT.
 - Sherpa-ONNX GigaSpeech 3.3M keyword model, dated 2024-01-01:
@@ -138,15 +143,15 @@ and extraction trees, and verifies the retained bytes again.
   - Archive SHA-256:
     `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`
   - Exact archive size: `17,626,723` bytes.
-  - Planned encoder SHA-256:
+  - Packaged encoder SHA-256:
     `1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678`
-  - Planned decoder SHA-256:
+  - Packaged decoder SHA-256:
     `f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3`
-  - Planned joiner SHA-256:
+  - Packaged joiner SHA-256:
     `eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c`
-  - Planned BPE SHA-256:
+  - Packaged BPE SHA-256:
     `c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24`
-  - Planned tokens SHA-256:
+  - Packaged tokens SHA-256:
     `fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53`
   - License: Apache-2.0.
 

@@ -1,5 +1,6 @@
 import AppKit
 import MillerLiveAudio
+import MillerWake
 import WebKit
 
 enum WebKitLivePeerMediaRequest: Equatable, Sendable {
@@ -127,7 +128,20 @@ protocol WebKitLivePeerScriptEvaluating: AnyObject, Sendable {
 }
 
 @MainActor
-final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
+protocol WebKitLivePeerPreparedAudioEvaluating: AnyObject, Sendable {
+    func injectPreparedAudio(_ audio: WakeWordPreparedCommandAudio) async throws
+}
+
+@MainActor
+protocol PreparedCommandAudioLivePeer: AnyObject {
+    func preparePreparedCommandAudio(
+        _ audio: WakeWordPreparedCommandAudio
+    ) async throws
+}
+
+@MainActor
+final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
+    PreparedCommandAudioLivePeer {
     static let baseOrigin = URL(string: "https://miller.invalid/")!
     static let maximumSDPBytes = 65_536
     private static let maximumResultBytes = 65_536
@@ -145,6 +159,8 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
     private let evaluator: any WebKitLivePeerScriptEvaluating
     private let operationTimeout: Duration
     private var state: State = .idle
+    private var pendingPreparedAudio: WakeWordPreparedCommandAudio?
+    private var preparedAudioInjected = false
 
     init(
         evaluator: any WebKitLivePeerScriptEvaluating,
@@ -195,12 +211,15 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
                 throw LiveAudioPeerError.connectionFailed
             }
             state = .connected
+            try await injectPreparedAudioIfNeeded()
         } catch is CancellationError {
             await close()
             throw CancellationError()
         } catch let error as LiveAudioPeerError {
+            await close()
             throw error
         } catch {
+            await close()
             throw LiveAudioPeerError.connectionFailed
         }
     }
@@ -246,7 +265,42 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
     func close() async {
         guard state != .closed else { return }
         state = .closed
+        pendingPreparedAudio = nil
         _ = try? await call(.close)
+    }
+
+    func preparePreparedCommandAudio(
+        _ audio: WakeWordPreparedCommandAudio
+    ) async throws {
+        guard state != .closed,
+              !preparedAudioInjected,
+              pendingPreparedAudio == nil,
+              audio.sampleRate == 16_000,
+              !audio.samples.isEmpty,
+              audio.samples.count <= 32_000
+        else { throw LiveAudioPeerError.invalidState }
+        pendingPreparedAudio = audio
+        if state == .connected {
+            try await injectPreparedAudioIfNeeded()
+        }
+    }
+
+    private func injectPreparedAudioIfNeeded() async throws {
+        guard let audio = pendingPreparedAudio else { return }
+        guard let evaluator = evaluator as? any WebKitLivePeerPreparedAudioEvaluating else {
+            throw LiveAudioPeerError.unavailable
+        }
+        do {
+            try await evaluator.injectPreparedAudio(audio)
+            preparedAudioInjected = true
+            pendingPreparedAudio = nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as LiveAudioPeerError {
+            throw error
+        } catch {
+            throw LiveAudioPeerError.connectionFailed
+        }
     }
 
     static func mediaPermissionDecision(
@@ -325,10 +379,15 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
     (() => {
       let pc = null;
       let localStream = null;
+      let outboundStream = null;
+      let audioContext = null;
+      let microphoneSource = null;
+      let destination = null;
       let remoteStream = null;
       let channel = null;
       let audio = null;
       let closed = false;
+      let preparedAudioInjected = false;
       const connected = () => pc && pc.connectionState === "connected";
       const waitForConnected = () => new Promise((resolve, reject) => {
         if (connected()) { resolve(); return; }
@@ -343,9 +402,15 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
       window.millerLive = Object.freeze({
         async prepareOffer() {
           if (pc || closed) throw new Error("invalid state");
-          pc = new RTCPeerConnection();
-          localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-          for (const track of localStream.getAudioTracks()) pc.addTrack(track, localStream);
+        pc = new RTCPeerConnection();
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        await audioContext.resume();
+        microphoneSource = audioContext.createMediaStreamSource(localStream);
+        destination = audioContext.createMediaStreamDestination();
+        microphoneSource.connect(destination);
+        outboundStream = destination.stream;
+        for (const track of outboundStream.getAudioTracks()) pc.addTrack(track, outboundStream);
           remoteStream = new MediaStream();
           audio = document.createElement("audio");
           audio.autoplay = true;
@@ -367,8 +432,33 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
           return "connected";
         },
         async setMuted(muted) {
-          if (!localStream || closed) throw new Error("invalid state");
-          for (const track of localStream.getAudioTracks()) track.enabled = !muted;
+          if (!outboundStream || closed) throw new Error("invalid state");
+          for (const track of outboundStream.getAudioTracks()) track.enabled = !muted;
+          return "ok";
+        },
+        async injectPreparedCommandAudio(pcmBase64, sampleRate) {
+          if (!audioContext || !destination || closed || preparedAudioInjected || sampleRate !== 16000) {
+            throw new Error("invalid state");
+          }
+          const encoded = atob(pcmBase64);
+          if (!encoded.length || encoded.length > 64000 || encoded.length % 2 !== 0) {
+            throw new Error("invalid audio");
+          }
+          const buffer = audioContext.createBuffer(1, encoded.length / 2, sampleRate);
+          const samples = buffer.getChannelData(0);
+          for (let index = 0; index < samples.length; index++) {
+            const low = encoded.charCodeAt(index * 2);
+            const high = encoded.charCodeAt(index * 2 + 1);
+            let value = (high << 8) | low;
+            if (value & 0x8000) value -= 0x10000;
+            samples[index] = value / 32768;
+          }
+          const source = audioContext.createBufferSource();
+          source.buffer = buffer;
+          source.connect(destination);
+          await audioContext.resume();
+          source.start();
+          preparedAudioInjected = true;
           return "ok";
         },
         connectionState() {
@@ -379,6 +469,9 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
           if (closed) return "ok";
           closed = true;
           if (localStream) for (const track of localStream.getTracks()) track.stop();
+          if (outboundStream) for (const track of outboundStream.getTracks()) track.stop();
+          if (microphoneSource) microphoneSource.disconnect();
+          if (audioContext) { try { await audioContext.close(); } catch (_) {} }
           if (remoteStream) for (const track of remoteStream.getTracks()) track.stop();
           if (audio) { audio.pause(); audio.srcObject = null; audio.removeAttribute("src"); audio.load(); }
           if (channel) channel.close();
@@ -420,7 +513,7 @@ private final class WebKitLivePeerCallRace<Value: Sendable>: @unchecked Sendable
 }
 
 @MainActor
-private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScriptEvaluating {
+private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScriptEvaluating, WebKitLivePeerPreparedAudioEvaluating {
     let view: WKWebView
     private let nativeMicrophoneAuthorized: @MainActor @Sendable () -> Bool
     private let pageReadiness: WebKitLivePeerPageReadiness
@@ -478,6 +571,38 @@ private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScrip
         )
         guard let result = result as? String else { throw LiveAudioPeerError.connectionFailed }
         return result
+    }
+
+    func injectPreparedAudio(_ audio: WakeWordPreparedCommandAudio) async throws {
+        try await pageReadiness.waitUntilReady()
+        let payload = try Self.base64PCM(audio)
+        let result = try await view.callAsyncJavaScript(
+            "return await window.millerLive.injectPreparedCommandAudio(pcmBase64, sampleRate)",
+            arguments: [
+                "pcmBase64": payload,
+                "sampleRate": audio.sampleRate,
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard result as? String == "ok" else {
+            throw LiveAudioPeerError.connectionFailed
+        }
+    }
+
+    private static func base64PCM(
+        _ audio: WakeWordPreparedCommandAudio
+    ) throws -> String {
+        guard audio.sampleRate == 16_000,
+              !audio.samples.isEmpty,
+              audio.samples.count <= 32_000
+        else { throw LiveAudioPeerError.invalidState }
+        var data = Data(capacity: audio.samples.count * MemoryLayout<Int16>.size)
+        for sample in audio.samples {
+            var value = UInt16(bitPattern: sample).littleEndian
+            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        }
+        return data.base64EncodedString()
     }
 }
 

@@ -42,6 +42,39 @@
       "packageFileName": "Contents/Helpers/MillerCapabilityBridge (statically linked)"
     },
     {
+      "name": "Sherpa-ONNX",
+      "SPDXID": "SPDXRef-Package-SherpaONNX",
+      "versionInfo": "1.13.2",
+      "downloadLocation": "https://github.com/k2-fsa/sherpa-onnx",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/MacOS/Miller (statically linked)"
+    },
+    {
+      "name": "ONNX Runtime",
+      "SPDXID": "SPDXRef-Package-ONNXRuntime",
+      "versionInfo": "1.24.4",
+      "downloadLocation": "https://github.com/microsoft/onnxruntime",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/MacOS/Miller (statically linked)"
+    },
+    {
+      "name": "Miller wake model assets",
+      "SPDXID": "SPDXRef-Package-MillerWakeModel",
+      "versionInfo": "pinned",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/Resources/WakeWord/model"
+    },
+    {
       "name": "MCP Swift SDK",
       "SPDXID": "SPDXRef-Package-MCPSwiftSDK",
       "versionInfo": "0.12.1",
@@ -115,6 +148,21 @@
       "spdxElementId": "SPDXRef-Package-Miller",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-MillerCapabilities"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-SherpaONNX"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-ONNXRuntime"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-Package-MillerWakeModel"
     },
     {
       "spdxElementId": "SPDXRef-Package-Miller",

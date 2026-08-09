@@ -12,6 +12,12 @@ This distribution includes Node.js 22.22.0, a reviewed derivative of Pi AI
 and license texts are retained in THIRD_PARTY_NOTICES.md, Gateway/vendor/, and
 the bundled Gateway runtime directory.
 
+The optional wake listening runtime links Sherpa-ONNX 1.13.2 under its
+Apache-2.0 terms and ONNX Runtime 1.24.4 under its MIT terms. The shipped
+runtime model/token files are verified against the pinned hashes recorded in
+PROVENANCE.md. Bootstrap archives, headers, compiler inputs, and generated
+keyword files are not distributed.
+
 OpenClaw GPT-Live wire adaptation
 ---------------------------------
 Miller contains a modified adaptation of bounded GPT-Live behavior from

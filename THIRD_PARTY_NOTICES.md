@@ -15,11 +15,12 @@ license text is packaged at
 
 ## v0.1.1 application inventory
 
-The application ships only the Miller executable, the statically linked MCP
-Swift SDK and capability bridge, Node.js 22.22.0, the Pi overlay
-`@miller/pi-mvp-overlay@0.82.0-a3`, `openai@6.26.0`, and
+The application ships the Miller executable with statically linked MCP and
+wake native code, the verified wake model/token files under
+`Contents/Resources/WakeWord/model`, the capability bridge, Node.js 22.22.0,
+the Pi overlay `@miller/pi-mvp-overlay@0.82.0-a3`, `openai@6.26.0`, and
 `partial-json@0.1.7`. The SPDX document and generated runtime inventory are
-the authoritative v0.1.1 list.
+authoritative for the exact packaged files.
 
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; that
 is the v0.1.1 minimum tested/support boundary. `0.145.0` is protocol
@@ -31,19 +32,20 @@ From a clean checkout, packaging requires the explicit online
 It uses bounded npm timeouts and an isolated cache; packaging and headless
 qualification do not invoke it implicitly.
 
-## Optional wakeword build inputs (v0.1.2 source-only)
+## Wakeword runtime
 
-Miller's optional wakeword bootstrap fetches and verifies Sherpa-ONNX 1.13.2
-and the Apache-2.0 GigaSpeech keyword model from the official releases, plus
-ONNX Runtime 1.24.4 static libraries licensed under MIT. Exact source URLs and
-approved hashes are recorded in `PROVENANCE.md`. These inputs are not
-downloaded, compiled, packaged, or listed in the v0.1.1 application SBOM or
-runtime inventory.
+Miller's explicit wakeword bootstrap fetches and verifies Sherpa-ONNX 1.13.2
+and its Apache-2.0 keyword model from the official releases, plus ONNX Runtime
+1.24.4 static libraries licensed under MIT. Exact source URLs, sizes, and
+approved hashes are recorded in `PROVENANCE.md`. Packaging verifies the
+retained inputs and ships only the five required model/token files and linked
+native code.
 
-The archives, binaries, and model files are generated build inputs and are not
-committed. The bootstrap deletes archives and extraction trees after retaining
-the minimum verified arm64 inputs. Required upstream license files and notices
-must accompany any distribution that includes those retained inputs.
+Archives, extraction trees, headers, compiler inputs, and private generated
+keyword files are never shipped. The bootstrap deletes archives and extraction
+trees after retaining the minimum verified arm64 inputs. The app materializes
+one owner-only keyword file under Application Support only when wake listening
+is enabled or a phrase is changed; it is not part of the package.
 
 The owner-authored Cortana donor commit is not third-party material. Its
 file-level scope and immutable-source review are recorded in

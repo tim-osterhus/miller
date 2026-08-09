@@ -35,6 +35,33 @@ test -f "$gateway/app/server.mjs"
 test -f "$gateway/app/node_modules/@miller/pi-mvp-overlay/package.json"
 test -f "$gateway/app/node_modules/openai/package.json"
 test -f "$gateway/app/node_modules/partial-json/package.json"
+wake_model_root="$bundle_root/Contents/Resources/WakeWord/model"
+typeset -A wakeword_model_hashes=(
+  encoder.onnx 1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678
+  decoder.onnx f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3
+  joiner.onnx eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c
+  bpe.model c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24
+  tokens.txt fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53
+)
+test -d "$wake_model_root"
+test "$(
+  find -P "$wake_model_root" -mindepth 1 -maxdepth 1 -type f \
+    -print | wc -l | tr -d ' '
+)" = "5"
+test -z "$(find -P "$wake_model_root" -type l -print -quit)"
+for wakeword_model in \
+  encoder.onnx \
+  decoder.onnx \
+  joiner.onnx \
+  bpe.model \
+  tokens.txt
+do
+  test -f "$wake_model_root/$wakeword_model"
+done
+for wakeword_model expected in ${(kv)wakeword_model_hashes}; do
+  test "$(shasum -a 256 "$wake_model_root/$wakeword_model" \
+    | awk '{print $1}')" = "$expected"
+done
 test -f "$inventory"
 test ! -L "$inventory"
 for document in LICENSE NOTICE PROVENANCE.md THIRD_PARTY_NOTICES.md Miller.spdx.json; do
@@ -64,7 +91,7 @@ test -z "$(find "$bundle_root" \( \
   -type f \( -name codex -o -name cargo -o -name rustc \) -o \
   -iname '*cortana*' -o -iname '*voiceink*' -o -iname '*codex-rs*' -o \
   -iname '*MillerWakeBridge*' -o -iname '*MillerWake*' -o \
-  -iname '*sherpa*' -o -iname '*onnx*' -o -iname '*gigaspeech*' -o \
+  -iname '*sherpa*' -o -iname '*gigaspeech*' -o \
   -iname '*wake-model*' -o -iname '*.vrm' -o -iname '*avatar*renderer*' -o \
   -iname '*fake*helper*' -o -iname '*fixture*' -o \
   -iname '*credential*.json' -o -iname '*credential*.plist' -o \
@@ -73,7 +100,7 @@ test -z "$(find "$bundle_root" \( \
   -iname '*transcript*.txt' -o -iname '*transcript*.md' -o \
   -iname '*transcript*.sqlite*' -o -iname '*socket-token*' -o \
   -iname '*unix-socket*' -o -iname '*.sock' -o -iname '*.socket' -o \
-  -iname '*token*.json' -o -iname '*token*.txt' -o -iname '*.token' -o \
+  -iname '*token*.json' -o -iname '*.token' -o \
   -iname '*.log' -o \
   -iname '*webrtc*.dylib' \
 \) -print -quit)"
@@ -116,15 +143,17 @@ assert.deepEqual(
     "MillerCapabilityBridge@0.1.1",
     "MillerCapabilities@0.1.1",
     "Node.js@22.22.0",
+    "ONNX Runtime@1.24.4",
+    "Sherpa-ONNX@1.13.2",
+    "Miller wake model assets@pinned",
     "openai@6.26.0",
     "partial-json@0.1.7",
   ].sort(),
 );
 assert.equal(sbom.packages.some((entry) => /codex|avatar|cortana/i.test(entry.name)), false);
-assert.equal(
-  sbom.packages.some((entry) => /wake|sherpa|onnx|gigaspeech/i.test(entry.name)),
-  false
-);
+assert.equal(sbom.packages.some((entry) => entry.name === "Sherpa-ONNX"), true);
+assert.equal(sbom.packages.some((entry) => entry.name === "ONNX Runtime"), true);
+assert.equal(sbom.packages.some((entry) => entry.name === "Miller wake model assets"), true);
 assert.equal(
   sbom.packages.some((entry) => entry.name === "Miller"
     && entry.SPDXID === "SPDXRef-Package-Miller"),
@@ -188,13 +217,20 @@ assert.deepEqual(
     "MCP Swift SDK@0.12.1",
     "MillerCapabilityBridge@0.1.1",
     "Node.js@22.22.0",
+    "ONNX Runtime wake runtime@1.24.4",
+    "Sherpa-ONNX wake runtime@1.13.2",
+    "Miller wake BPE vocabulary@pinned",
+    "Miller wake decoder@pinned",
+    "Miller wake encoder@pinned",
+    "Miller wake joiner@pinned",
+    "Miller wake token vocabulary@pinned",
     "openai@6.26.0",
     "partial-json@0.1.7",
   ].sort(),
 );
 assert.equal(
   inventory.runtime_inventory.some((entry) =>
-    /wake|sherpa|onnx|gigaspeech|codex|cortana/i.test(entry.name)),
+    /codex|cortana|avatar/i.test(entry.name)),
   false,
 );
 EOF

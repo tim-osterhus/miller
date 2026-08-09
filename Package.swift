@@ -97,7 +97,7 @@ let package = Package(
             name: "MillerApp",
             dependencies: [
                 "MillerCore", "MillerStorage", "MillerGateway", "MillerLive",
-                "MillerLiveAudio", "MillerCapabilities",
+                "MillerLiveAudio", "MillerCapabilities", "MillerWake",
             ],
             resources: [.process("Resources")],
             swiftSettings: [

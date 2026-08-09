@@ -328,6 +328,18 @@ timeout, or helper exit produce a bounded unavailable or failed state. The
 typed conversation, local history, and non-live provider routes remain
 independent of those failures.
 
-Wake-word foundation inputs remain source-only for v0.1.2. The v0.1.1 app
-target, package scripts, SBOM, and runtime inventory do not bootstrap,
-download, compile, or ship wake inputs.
+## Wake Listening
+
+Wake Listening is composed through the MillerWake coordinator and the existing
+HostDependencies.admitLive authority. It is disabled by default and uses the
+system-default microphone through one AVAudioEngine owner at 16 kHz mono
+Int16. The first valid phrase is Hey Miller; the owner may save one bounded
+English phrase. SQLite wake preferences are the sole preference authority.
+
+After a match, the coordinator owns a bounded post-keyword PCM buffer. An empty
+timeout rearms without opening Live. Silence or the hard limit transfers that
+buffer once to the existing WebKit Live peer, then wake capture remains
+suspended until provider, WebKit, transcript, and admission cleanup completes.
+Manual Live suspends wake first. Disable, shutdown, sleep, inactive state,
+device loss, and permission failure release capture and publish a truthful
+state. No audio is persisted or logged.

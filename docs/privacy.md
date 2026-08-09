@@ -72,3 +72,14 @@ and exported text should be handled as user data.
 Headless qualification uses synthetic fixtures and reports only pass/fail
 status and bounded measurements. It does not use a real provider, microphone,
 audio device, browser, clipboard, or owner account.
+
+## Wake Listening
+
+Wake Listening is off until the owner enables it. It reads the system-default
+microphone only while enabled, performs detection locally with the verified
+bundled model, and keeps PCM in a bounded in-process buffer. The buffer is
+transferred once to the existing Live interaction after a match and is never
+written to SQLite, Application Support, logs, diagnostics, or package
+artifacts. The generated keyword file contains token IDs only, is owner-only
+(`0700` directory and `0600` file), and is removed with wake preferences.
+SQLite is the sole authority for the enabled flag and phrase.

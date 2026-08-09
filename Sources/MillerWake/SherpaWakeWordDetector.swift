@@ -4,10 +4,6 @@ import Foundation
 import MillerWakeBridge
 
 public struct SherpaWakeWordTuning: Equatable, Sendable {
-    nonisolated static let keywordScoreDefaultsKey =
-        "WakeWordSherpaKeywordScore"
-    nonisolated static let keywordThresholdDefaultsKey =
-        "WakeWordSherpaKeywordThreshold"
     nonisolated static let defaultKeywordScore = 5.0
     nonisolated static let defaultKeywordThreshold = 0.05
 
@@ -31,21 +27,6 @@ public struct SherpaWakeWordTuning: Equatable, Sendable {
         keywordThreshold: defaultKeywordThreshold
     )!
 
-    public nonisolated static func load(
-        from defaults: UserDefaults = .standard
-    ) -> SherpaWakeWordTuning {
-        let score = defaults.object(forKey: keywordScoreDefaultsKey) == nil
-            ? defaultKeywordScore
-            : defaults.double(forKey: keywordScoreDefaultsKey)
-        let threshold =
-            defaults.object(forKey: keywordThresholdDefaultsKey) == nil
-            ? defaultKeywordThreshold
-            : defaults.double(forKey: keywordThresholdDefaultsKey)
-        return SherpaWakeWordTuning(
-            keywordScore: score,
-            keywordThreshold: threshold
-        ) ?? .default
-    }
 }
 
 /// Swift-owned operations for the pinned Sherpa C bridge. Production

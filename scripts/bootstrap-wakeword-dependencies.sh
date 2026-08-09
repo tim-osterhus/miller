@@ -258,6 +258,24 @@ typeset -A archive_sizes=(
   model.tar.bz2 17626723
   onnx.zip 17358514
 )
+archive_total_bytes=$((8941262 + 17626723 + 17358514))
+minimum_free_kib=$((6 * 1024 * 1024))
+forecast_peak_generated_bytes=$((1024 * 1024 * 1024))
+
+measure_bytes() {
+  local root="$1"
+  du -sk "$root" | awk '{ print $1 * 1024 }'
+}
+
+assert_free_floor() {
+  local label="$1"
+  local free_kib="$(df -Pk "$repo_root" | awk 'NR == 2 { print $4 }')"
+  printf 'MILLER_WAKEWORD_FREE_KIB label=%s value=%s\n' "$label" "$free_kib"
+  (( free_kib >= minimum_free_kib )) || {
+    print -u2 "wakeword bootstrap would reduce free space below 6 GiB"
+    exit 75
+  }
+}
 
 if [[ "$vendor_root" == "$canonical_vendor_root" ]]; then
   reject_symlink_paths \
@@ -273,12 +291,16 @@ reject_tree_symlinks "$staging" || exit 1
 
 # The three compressed archives total less than 45 MiB. Extraction, staging,
 # and Swift compilation remain under a conservative 1 GiB peak allowance.
+printf 'MILLER_WAKEWORD_FORECAST_ARCHIVE_BYTES=%s\n' "$archive_total_bytes"
+printf 'MILLER_WAKEWORD_FORECAST_PEAK_GENERATED_BYTES=%s\n' \
+  "$forecast_peak_generated_bytes"
 available_kib=$(df -Pk "$repo_root" | awk 'NR == 2 { print $4 }')
 required_kib=$((1024 * 1024))
 if (( available_kib < required_kib )); then
   print -u2 "wakeword bootstrap requires at least 1 GiB free"
   exit 1
 fi
+assert_free_floor "pre-bootstrap"
 
 mkdir -p "$downloads" "$extracted" "$locked"
 chmod 700 "$vendor_root" "$downloads" "$extracted" "$locked"
@@ -301,6 +323,13 @@ fetch \
 fetch \
   "$onnx_url" "$downloads/onnx.zip" \
   "$archive_hashes[onnx.zip]" "$archive_sizes[onnx.zip]"
+
+downloaded_archive_bytes=0
+for archive in "$downloads/sherpa.tar.bz2" "$downloads/model.tar.bz2" "$downloads/onnx.zip"; do
+  downloaded_archive_bytes=$((downloaded_archive_bytes + $(stat -f '%z' "$archive")))
+done
+printf 'MILLER_WAKEWORD_MEASURED_ARCHIVE_BYTES=%s\n' "$downloaded_archive_bytes"
+assert_free_floor "after-download"
 
 safe_tar_extract() {
   local archive="$1"
@@ -354,6 +383,9 @@ mkdir -p "$extracted"
 safe_tar_extract "$downloads/sherpa.tar.bz2" "$extracted/sherpa"
 safe_tar_extract "$downloads/model.tar.bz2" "$extracted/model"
 safe_zip_extract "$downloads/onnx.zip" "$extracted/onnx"
+extracted_bytes="$(measure_bytes "$extracted")"
+printf 'MILLER_WAKEWORD_MEASURED_EXTRACTED_BYTES=%s\n' "$extracted_bytes"
+assert_free_floor "after-extraction"
 
 one_file() {
   local root="$1"
@@ -392,10 +424,19 @@ cp "$joiner" "$staging/model/joiner.onnx"
 cp "$bpe" "$staging/model/bpe.model"
 cp "$tokens" "$staging/model/tokens.txt"
 
+staged_bytes="$(measure_bytes "$staging")"
+peak_generated_bytes="$extracted_bytes"
+(( staged_bytes > peak_generated_bytes )) && peak_generated_bytes="$staged_bytes"
+printf 'MILLER_WAKEWORD_MEASURED_PEAK_GENERATED_BYTES=%s\n' "$peak_generated_bytes"
+assert_free_floor "after-staging"
+
 reject_tree_symlinks "$locked" || exit 1
 find -P "$locked" -depth -delete 2>/dev/null || true
 mv "$staging" "$locked"
 chmod -R u=rwX,go=rX "$locked"
+retained_bytes="$(measure_bytes "$locked")"
+printf 'MILLER_WAKEWORD_MEASURED_RETAINED_INPUT_BYTES=%s\n' "$retained_bytes"
+assert_free_floor "after-retain"
 
 # Archives and full extraction trees are transient qualification inputs. Only
 # the explicitly staged arm64 build inputs survive a successful bootstrap.
@@ -403,6 +444,10 @@ reject_tree_symlinks "$downloads" || exit 1
 reject_tree_symlinks "$extracted" || exit 1
 find -P "$downloads" -depth -delete
 find -P "$extracted" -depth -delete
+
+printf 'MILLER_WAKEWORD_MEASURED_RETAINED_INPUT_BYTES_FINAL=%s\n' \
+  "$(measure_bytes "$locked")"
+assert_free_floor "post-bootstrap"
 
 "$repo_root/scripts/verify-wakeword-dependencies.sh"
 print "wakeword dependencies staged and verified"

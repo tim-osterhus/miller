@@ -38,6 +38,29 @@ install dependencies implicitly.
 The resulting app is ad-hoc signed for structural verification. It is not
 Developer ID signed or notarized.
 
+## Wake Listening
+
+Wake Listening is off by default. A verified package enables the existing
+Voice settings section with the first valid phrase **Hey Miller**. The owner
+may replace it with one bounded English phrase; invalid input leaves the last
+working phrase and keyword file unchanged. Wake uses only the system-default
+microphone, never saves or logs audio, and yields the microphone to manual
+Live Voice before reopening it after Live cleanup.
+
+The wake runtime is prepared explicitly, after checking the printed storage
+forecast and retaining at least 6 GiB free:
+
+```bash
+./scripts/bootstrap-wakeword-dependencies.sh
+./scripts/verify-wakeword-dependencies.sh
+./scripts/package-release-app.sh
+```
+
+Packaging verifies the retained pinned inputs and ships only the linked native
+runtime plus the required model/token files. It does not bootstrap, and it
+does not ship archives, headers, compiler inputs, or private generated
+keyword files.
+
 ## The conversation loop
 
 Miller provides:

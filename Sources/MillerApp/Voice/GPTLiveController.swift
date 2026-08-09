@@ -3,6 +3,7 @@ import MillerCapabilities
 import MillerCore
 import MillerLive
 import MillerLiveAudio
+import MillerWake
 
 enum LiveVoiceState: String, Equatable, Sendable {
     case available
@@ -41,21 +42,49 @@ enum LiveVoiceEvent: Equatable, Sendable {
     case failed(code: String)
 }
 
+typealias LiveVoiceStartOperation = @Sendable (
+    @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+) async throws -> Void
+
+typealias LiveVoicePreparedStartOperation = @Sendable (
+    WakeWordPreparedCommandAudio,
+    @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+) async throws -> Void
+
 struct LiveVoiceDependencies: Sendable {
     let initialAvailability: LiveVoiceState
     let availability: @Sendable () async -> LiveVoiceState
-    let start: @Sendable (
-        @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
-    ) async throws -> Void
+    let start: LiveVoiceStartOperation
+    let startPrepared: LiveVoicePreparedStartOperation
     let mute: @Sendable (Bool) async -> Void
     let interrupt: @Sendable () async -> Void
     let end: @Sendable () async -> Void
 
+    init(
+        initialAvailability: LiveVoiceState,
+        availability: @escaping @Sendable () async -> LiveVoiceState,
+        start: @escaping LiveVoiceStartOperation,
+        mute: @escaping @Sendable (Bool) async -> Void,
+        interrupt: @escaping @Sendable () async -> Void,
+        end: @escaping @Sendable () async -> Void,
+        startPrepared: LiveVoicePreparedStartOperation? = nil
+    ) {
+        self.initialAvailability = initialAvailability
+        self.availability = availability
+        self.start = start
+        self.startPrepared = startPrepared ?? { _, receive in
+            try await start(receive)
+        }
+        self.mute = mute
+        self.interrupt = interrupt
+        self.end = end
+    }
+
     static let unavailable = Self(
         initialAvailability: .unavailable,
-        availability: { .unavailable },
-        start: { _ in throw GPTLiveCredentialError.unavailable },
-        mute: { _ in },
+            availability: { .unavailable },
+            start: { _ in throw GPTLiveCredentialError.unavailable },
+            mute: { _ in },
         interrupt: {},
         end: {}
     )
@@ -81,6 +110,7 @@ actor GPTLiveController {
     private let makeSession: @Sendable (CodexAppServerClient) -> LiveAudioSession
     private let makePeer: (@Sendable () async throws -> any LiveAudioPeer)?
     private let makeDirectSession: (@Sendable (any LiveAudioPeer) -> DirectGPTLiveSession)?
+    private let microphoneOwnership: MicrophoneOwnership?
     private let releasePeer: @Sendable () async -> Void
     private let helperVerifier: @Sendable (URL) throws -> Void
     private let spawnedProcessVerifier: @Sendable (pid_t) throws -> Void
@@ -130,6 +160,7 @@ actor GPTLiveController {
         },
         makePeer: (@Sendable () async throws -> any LiveAudioPeer)? = nil,
         makeDirectSession: (@Sendable (any LiveAudioPeer) -> DirectGPTLiveSession)? = nil,
+        microphoneOwnership: MicrophoneOwnership? = nil,
         releasePeer: @escaping @Sendable () async -> Void = {},
         helperVerifier: @escaping @Sendable (URL) throws -> Void = {
             try CodexAppServerHelperVerifier().verify($0)
@@ -175,6 +206,7 @@ actor GPTLiveController {
         self.makeSession = makeSession
         self.makePeer = makePeer
         self.makeDirectSession = makeDirectSession
+        self.microphoneOwnership = microphoneOwnership
         self.releasePeer = releasePeer
         self.helperVerifier = helperVerifier
         self.spawnedProcessVerifier = spawnedProcessVerifier
@@ -205,7 +237,12 @@ actor GPTLiveController {
         LiveVoiceDependencies(
             initialAvailability: .unavailable,
             availability: { [self] in await availability() },
-            start: { [self] receive in try await start(receive: receive) },
+            start: { [self] receive in
+                try await startWithMicrophoneOwnership(
+                    receive: receive,
+                    preparedAudio: nil
+                )
+            },
             mute: { [self] muted in
                 if let directSession = await directSession {
                     await directSession.setMuted(muted)
@@ -214,8 +251,28 @@ actor GPTLiveController {
                 }
             },
             interrupt: { [self] in await stop(interrupting: true) },
-            end: { [self] in await stop(interrupting: false) }
+            end: { [self] in await stop(interrupting: false) },
+            startPrepared: { [self] audio, receive in
+                try await startWithMicrophoneOwnership(
+                    receive: receive,
+                    preparedAudio: audio
+                )
+            }
         )
+    }
+
+    private func startWithMicrophoneOwnership(
+        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void,
+        preparedAudio: WakeWordPreparedCommandAudio?
+    ) async throws {
+        let lease: MicrophoneOwnership.Lease?
+        do {
+            lease = try microphoneOwnership?.acquire(.live)
+        } catch {
+            throw LiveAudioError.microphoneUnavailable
+        }
+        defer { lease?.release() }
+        try await start(receive: receive, preparedAudio: preparedAudio)
     }
 
     func availability() async -> LiveVoiceState {
@@ -248,7 +305,8 @@ actor GPTLiveController {
     }
 
     func start(
-        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
+        receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void,
+        preparedAudio: WakeWordPreparedCommandAudio? = nil
     ) async throws {
         guard session == nil, !startInProgress else {
             throw GPTLiveCredentialError.unavailable
@@ -342,6 +400,20 @@ actor GPTLiveController {
         }
         let peer = try await makePeer?()
         hasAttachedPeer = peer != nil
+        if let preparedAudio {
+            guard let preparedPeer = peer as? any PreparedCommandAudioLivePeer else {
+                await peer?.close()
+                await releaseAttachedPeerIfNeeded()
+                throw GPTLiveCredentialError.unavailable
+            }
+            do {
+                try await preparedPeer.preparePreparedCommandAudio(preparedAudio)
+            } catch {
+                await peer?.close()
+                await releaseAttachedPeerIfNeeded()
+                throw error
+            }
+        }
         let admittedReference = refreshedProfile.credentialReference
         if let makeDirectSession {
             guard let peer else {

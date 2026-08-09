@@ -87,10 +87,19 @@ caches, installed Gateway dependencies, sockets, wake inputs, and helper/test
 processes with `./scripts/clean.sh --preserve-release`, retaining only the
 release app and sanitized qualification evidence.
 
-The v0.1.1 app never bootstraps, downloads, compiles, or packages wake inputs.
-Wake foundation work is source-only for v0.1.2. Human microphone, audio,
-clipboard, browser, credential, and real-provider rows are not inferred from
-the deterministic checks.
+Wake Listening is an explicit Packet 5 integration. Ordinary tests run
+`./scripts/verify-wakeword-dependencies.sh --if-present` and never download.
+Only the explicit `./scripts/bootstrap-wakeword-dependencies.sh` may fetch the
+pinned archives; it forecasts archive bytes, checks 1 GiB bootstrap headroom,
+and refuses to continue below the 6 GiB free-space floor. Packaging verifies
+the retained root and copies only the required model/token files and linked
+native code.
+
+The deterministic wake suite covers phrase bounds, atomic file replacement and
+rollback, permission/device failure, one microphone owner, lifecycle races,
+stale callbacks, one Live admission, one handoff, cleanup, and rearm. Human
+microphone, permission, custom-phrase, and audible-audio checks remain
+`LIVE_NOT_RUN`; no deterministic result implies those observations.
 
 ## GPT-Live deterministic check
 

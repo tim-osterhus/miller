@@ -17,6 +17,13 @@ public enum WakeWordDetectorError: Error, Equatable, Sendable {
     case runtimeFailure
 }
 
+public enum WakeWordCaptureStartError: Error, Equatable, Sendable {
+    case permissionDenied
+    case inputDeviceUnavailable
+    case captureFailed
+    case microphoneBusy
+}
+
 public enum WakeWordDetectorStatus: Equatable, Sendable {
     case ready
     case shutDown
@@ -91,6 +98,18 @@ public struct WakeWordPreparedCommandAudio: Equatable, Sendable {
     public let generation: UInt64
     public let samples: ContiguousArray<Int16>
     public let sampleRate: Int
+
+    public init(
+        id: UUID,
+        generation: UInt64,
+        samples: ContiguousArray<Int16>,
+        sampleRate: Int
+    ) {
+        self.id = id
+        self.generation = generation
+        self.samples = samples
+        self.sampleRate = sampleRate
+    }
 }
 
 /// One-shot bridge from detector-owned post-keyword audio to Miller's audio
@@ -123,9 +142,8 @@ public enum WakeWordPhraseError: Error, Equatable, Sendable {
 }
 
 /// Deterministic bounded compiler for the token vocabulary consumed by the
-/// Sherpa keyword file. This is source-only Task 16 groundwork; runtime
-/// vocabulary, persistence, and audio integration are deferred to Miller
-/// v0.1.2.
+/// Sherpa keyword file. Runtime persistence and audio ownership stay outside
+/// this value type.
 public struct WakeWordPhraseCompiler: Sendable {
     public let maximumUTF8Bytes: Int
     public let maximumTokens: Int
@@ -146,26 +164,41 @@ public struct WakeWordPhraseCompiler: Sendable {
     }
 
     public func compile(_ phrase: String) throws -> [Int] {
+        try tokenize(phrase).compactMap { tokenIDs[$0] }
+    }
+
+    public func normalize(_ phrase: String) throws -> String {
         let normalized = phrase
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
         guard !normalized.isEmpty else { throw WakeWordPhraseError.empty }
         guard normalized.utf8.count <= maximumUTF8Bytes else {
             throw WakeWordPhraseError.tooLong
         }
+        for scalar in normalized.unicodeScalars {
+            guard scalar == " " || (scalar.value >= 0x61 && scalar.value <= 0x7A) else {
+                throw WakeWordPhraseError.unsupportedToken(String(scalar))
+            }
+        }
+        return normalized
+    }
 
-        var result = [Int]()
-        for word in normalized.split(whereSeparator: { $0.isWhitespace }) {
+    public func tokenize(_ phrase: String) throws -> [String] {
+        let normalized = try normalize(phrase)
+        var result = [String]()
+        for word in normalized.split(separator: " ") {
             let wholeToken = "▁\(word)"
-            if let id = tokenIDs[wholeToken] {
-                result.append(id)
+            if tokenIDs[wholeToken] != nil {
+                result.append(wholeToken)
             } else {
                 for (index, character) in word.enumerated() {
                     let token = index == 0 ? "▁\(character)" : String(character)
-                    guard let id = tokenIDs[token] ?? tokenIDs[String(character)] else {
+                    guard tokenIDs[token] != nil || tokenIDs[String(character)] != nil else {
                         throw WakeWordPhraseError.unsupportedToken(String(character))
                     }
-                    result.append(id)
+                    result.append(tokenIDs[token] != nil ? token : String(character))
                 }
             }
             guard result.count <= maximumTokens else {

@@ -596,8 +596,8 @@ write_report() {
     printf '\n## Package and provenance\n\n'
     printf 'Application version: 0.1.1\nApplication SBOM version: 0.1.1\n'
     printf 'Signing: ad-hoc structural verification only\nNotarization: NOT_RUN\n'
-    printf 'Runtime inventory: MCP Swift SDK, Miller capability bridge, Node.js, Pi overlay, openai, and partial-json only\n'
-    printf 'Wake foundation: source-only for v0.1.2 and excluded from the application SBOM/runtime inventory\n\n'
+    printf 'Runtime inventory: MCP Swift SDK, Miller capability bridge, linked Sherpa-ONNX and ONNX Runtime wake code, five verified wake model/token files, Node.js, Pi overlay, openai, and partial-json\n'
+    printf 'Wake Listening: deterministic integration evidence is included; owner-visible microphone, permission, custom-phrase, and audible-audio checks remain LIVE_NOT_RUN\n\n'
     printf 'Nonblocking follow-up boundary: exhaustive transitive Swift SBOM expansion, opaque canonical-data provenance binding, broader ancestor-symlink hardening beyond the introduced proof paths, official Node upstream build-path removal, and generalized process-group redesign are deferred beyond this bounded Task 18 closure.\n\n'
     printf 'Baseline process identities preserved: Miller PIDs %s; Gateway PIDs %s; helper/test baseline PIDs %s. UID, executable path hash, parent, and start time were unchanged.\n' \
       "$baseline_miller_pid_record" "$baseline_gateway_pid_record" "$baseline_helper_pid_record"

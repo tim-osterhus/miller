@@ -7,6 +7,7 @@ import MillerGateway
 import MillerLive
 import MillerLiveAudio
 import MillerStorage
+import MillerWake
 import SwiftUI
 
 enum AccessibilityLabel {
@@ -463,6 +464,10 @@ final class AppPresentationModel: ObservableObject {
     private let liveTranscriptRecorder: LiveVoiceTranscriptRecorder
     private let voiceHistory: VoiceHistoryDependencies
     private let capabilityController: CapabilityController?
+    private let prepareLiveStart: @MainActor @Sendable (
+        VoiceActivationSource
+    ) async -> Void
+    private let liveVoiceFinished: @MainActor @Sendable () async -> Void
     private let voiceHistoryAttachmentBuilder = VoiceHistoryAttachmentBuilder()
     private var turnObservation: Task<Void, Never>?
     private var shortcutRegistration: ((GlobalShortcut) -> Bool)?
@@ -514,7 +519,11 @@ final class AppPresentationModel: ObservableObject {
         liveVoice: LiveVoiceDependencies = .unavailable,
         liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init(),
         voiceHistory: VoiceHistoryDependencies = .unavailable,
-        capabilityController: CapabilityController? = nil
+        capabilityController: CapabilityController? = nil,
+        prepareLiveStart: @escaping @MainActor @Sendable (
+            VoiceActivationSource
+        ) async -> Void = { _ in },
+        liveVoiceFinished: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.dependencies = dependencies
         self.providerSettings = providerSettings
@@ -522,6 +531,8 @@ final class AppPresentationModel: ObservableObject {
         self.liveTranscriptRecorder = liveTranscriptRecorder
         self.voiceHistory = voiceHistory
         self.capabilityController = capabilityController
+        self.prepareLiveStart = prepareLiveStart
+        self.liveVoiceFinished = liveVoiceFinished
         voiceState = liveVoice.initialAvailability
         liveVoiceAvailability = liveVoice.initialAvailability
         if let capabilityController {
@@ -1399,9 +1410,18 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func startLiveVoice(
-        activationSource: VoiceActivationSource = .manual
+        activationSource: VoiceActivationSource = .manual,
+        preparedAudio: WakeWordPreparedCommandAudio? = nil
     ) async {
-        guard canStartLiveVoice else { return }
+        guard canStartLiveVoice else {
+            if activationSource == .wakeword { await liveVoiceFinished() }
+            return
+        }
+        await prepareLiveStart(activationSource)
+        guard canStartLiveVoice else {
+            if activationSource == .wakeword { await liveVoiceFinished() }
+            return
+        }
         liveVoiceStartPending = true
         liveVoiceStartCancellationRequested = false
         liveVoiceStartTerminationRequested = false
@@ -1479,8 +1499,14 @@ final class AppPresentationModel: ObservableObject {
         do {
             liveVoiceStartProviderInFlight = true
             try await withTaskCancellationHandler {
-                try await liveVoice.start { [weak self] event in
+                let receive: @MainActor @Sendable (LiveVoiceEvent) async -> Void = {
+                    [weak self] event in
                     await self?.applyLiveEvent(event, generation: eventGeneration)
+                }
+                if let preparedAudio {
+                    try await liveVoice.startPrepared(preparedAudio, receive)
+                } else {
+                    try await liveVoice.start(receive)
                 }
             } onCancel: { [weak self] in
                 Task { @MainActor [weak self] in
@@ -1726,6 +1752,9 @@ final class AppPresentationModel: ObservableObject {
         pendingVoiceCapabilityPreparation = nil
         await capabilityController?.finishLiveVoice()
         liveVoiceCleanupTerminalEventGeneration = nil
+        if cleanupSucceeded {
+            await liveVoiceFinished()
+        }
     }
 
     private func finishRecorderWithinBound(
@@ -2517,6 +2546,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private let providerController: ProviderSettingsController
     private let liveController: GPTLiveController?
     private let capabilityController: CapabilityController
+    private let preferenceRepository: SQLitePreferenceRepository
+    private let wakeProduction: WakeWordProductionController
+    private let wakeSettings: WakeWordSettingsController
+    private let wakeIntegration: WakeWordLiveIntegration
+    private var wakeLifecycleObservers = [NSObjectProtocol]()
 
     init(
         environment: [String: String],
@@ -2921,6 +2955,126 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 await providerController.reset()
             }
         )
+        let preferenceRepository = try SQLitePreferenceRepository(
+            path: databasePath
+        )
+        self.preferenceRepository = preferenceRepository
+        let microphoneOwnership = MicrophoneOwnership()
+        let wakeIntegration = WakeWordLiveIntegration()
+        let wakeModelPaths = try? WakeWordRuntimeResources.resolve(
+            environment: environment
+        )
+        let wakeMaterializer: WakeWordKeywordMaterializer?
+        if let wakeModelPaths {
+            wakeMaterializer = try? WakeWordKeywordMaterializer(
+                tokensFile: wakeModelPaths.tokens,
+                applicationSupportDirectory: wakeModelPaths.keywords
+                    .deletingLastPathComponent()
+            )
+        } else {
+            wakeMaterializer = nil
+        }
+        let wakeRecorder = WakeWordAVAudioCaptureAdapter(
+            ownership: microphoneOwnership
+        )
+        let wakeProduction = WakeWordProductionController(
+            recorder: wakeRecorder,
+            detectorFactory: {
+                guard let wakeModelPaths else {
+                    throw WakeWordDetectorError.unavailable
+                }
+                return try SherpaWakeWordDetector(
+                    paths: wakeModelPaths,
+                    tuning: .default
+                )
+            },
+            onWakeDetected: { [weak wakeIntegration] in
+                wakeIntegration?.wakeDetected()
+            },
+            onCommandAudio: { [weak wakeIntegration] audio, _ in
+                await wakeIntegration?.commandAudio(audio)
+            }
+        )
+        let wakeSettings = WakeWordSettingsController(
+            enable: { [preferenceRepository, wakeMaterializer, wakeProduction] in
+                guard let wakeMaterializer else {
+                    throw WakeWordDetectorError.unavailable
+                }
+                let phrase = try await preferenceRepository.value(for: .wakePhrase)
+                let materialized = try wakeMaterializer.materialize(phrase)
+                do {
+                    let state = try await wakeProduction.enableFromSettings()
+                    do {
+                        try await preferenceRepository.set(true, for: .wakewordEnabled)
+                    } catch {
+                        _ = await wakeProduction.disableFromSettings()
+                        try? wakeMaterializer.restore(materialized)
+                        throw error
+                    }
+                    return state
+                } catch {
+                    try? wakeMaterializer.restore(materialized)
+                    throw error
+                }
+            },
+            disable: { [preferenceRepository, wakeProduction] in
+                try await preferenceRepository.set(false, for: .wakewordEnabled)
+                return await wakeProduction.disableFromSettings()
+            },
+            retry: { [preferenceRepository, wakeMaterializer, wakeProduction] in
+                guard let wakeMaterializer else {
+                    throw WakeWordDetectorError.unavailable
+                }
+                let phrase = try await preferenceRepository.value(for: .wakePhrase)
+                let materialized = try wakeMaterializer.materialize(phrase)
+                do {
+                    let state: WakeWordState
+                    if wakeProduction.state == .disabled
+                        || wakeProduction.state == .unavailable(.model)
+                    {
+                        state = try await wakeProduction.enableFromSettings()
+                    } else {
+                        state = try await wakeProduction.reloadDetector()
+                    }
+                    return state
+                } catch {
+                    try? wakeMaterializer.restore(materialized)
+                    throw error
+                }
+            },
+            savePhrase: { [preferenceRepository, wakeMaterializer, wakeProduction] phrase in
+                guard let wakeMaterializer else {
+                    throw WakeWordDetectorError.unavailable
+                }
+                let previousPhrase = try await preferenceRepository.value(
+                    for: .wakePhrase
+                )
+                let materialized = try wakeMaterializer.materialize(phrase)
+                do {
+                    try await preferenceRepository.set(
+                        materialized.normalizedPhrase,
+                        for: .wakePhrase
+                    )
+                    if try await preferenceRepository.value(for: .wakewordEnabled) {
+                        _ = try await wakeProduction.reloadDetector()
+                    }
+                    return materialized.normalizedPhrase
+                } catch {
+                    try? wakeMaterializer.restore(materialized)
+                    try? await preferenceRepository.set(
+                        previousPhrase,
+                        for: .wakePhrase
+                    )
+                    throw error
+                }
+            }
+        )
+        wakeSettings.bind(to: wakeProduction)
+        wakeIntegration.production = wakeProduction
+        self.wakeProduction = wakeProduction
+        self.wakeSettings = wakeSettings
+        self.wakeIntegration = wakeIntegration
+
         let livePeerHost = OverlayLiveVoicePeerHost(makePeer: {
             WebKitLivePeer(nativeMicrophoneAuthorized: {
                 SystemMicrophonePermission.current() == .authorized
@@ -2973,6 +3127,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 makePeer: { [livePeerHost] in
                     try await MainActor.run { try livePeerHost.makePeer() }
                 },
+                microphoneOwnership: microphoneOwnership,
                 releasePeer: { [livePeerHost] in
                     await MainActor.run { livePeerHost.removePeer() }
                 },
@@ -2990,9 +3145,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             liveVoice = .unavailable
         }
         let voiceHistoryRepository = try SQLiteVoiceHistoryRepository(
-            path: databasePath
-        )
-        let preferenceRepository = try SQLitePreferenceRepository(
             path: databasePath
         )
         let liveTranscriptRecorder = LiveVoiceTranscriptRecorder(
@@ -3095,8 +3247,15 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             liveVoice: liveVoice,
             liveTranscriptRecorder: liveTranscriptRecorder,
             voiceHistory: voiceHistory,
-            capabilityController: capabilityController
+            capabilityController: capabilityController,
+            prepareLiveStart: { [weak wakeIntegration] source in
+                await wakeIntegration?.prepareLiveStart(source)
+            },
+            liveVoiceFinished: { [weak wakeIntegration] in
+                await wakeIntegration?.liveVoiceFinished()
+            }
         )
+        wakeIntegration.model = model
         let providerNames: @Sendable () async throws -> [UUID: String] = {
             [repository] in
             Dictionary(uniqueKeysWithValues: try await repository
@@ -3326,7 +3485,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 model: model,
                 capabilitySettings: capabilitySettings,
                 privacySettings: privacySettings,
-                diagnosticsSettings: diagnosticsSettings
+                diagnosticsSettings: diagnosticsSettings,
+                wakeSettings: wakeSettings
             ))
         )
         activationService = GlobalActivationService()
@@ -3341,6 +3501,58 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 self?.openSettings()
             }
         }
+        wakeLifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.wakeProduction.suspend(.inactiveSession)
+                }
+            }
+        )
+        wakeLifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          !self.wakeIntegration.liveSessionActive,
+                          case .suspended(.inactiveSession) = self.wakeProduction.state
+                    else { return }
+                    await self.wakeProduction.resumeAfterLiveCleanup()
+                }
+            }
+        )
+        wakeLifecycleObservers.append(
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.wakeProduction.suspend(.sleep)
+                }
+            }
+        )
+        wakeLifecycleObservers.append(
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          !self.wakeIntegration.liveSessionActive,
+                          case .suspended(.sleep) = self.wakeProduction.state
+                    else { return }
+                    await self.wakeProduction.resumeAfterLiveCleanup()
+                }
+            }
+        )
     }
 
     func start() {
@@ -3366,6 +3578,16 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             await model.refresh()
             await model.refreshProviderSettings()
             await model.refreshLiveVoiceAvailability()
+            let wakeEnabled = (try? await preferenceRepository.value(
+                for: .wakewordEnabled
+            )) ?? false
+            let wakePhrase = (try? await preferenceRepository.value(
+                for: .wakePhrase
+            )) ?? "Hey Miller"
+            await wakeSettings.restorePersistedPreferences(
+                enabled: wakeEnabled,
+                phrase: wakePhrase
+            )
         }
     }
 
@@ -3375,6 +3597,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             NotificationCenter.default.removeObserver(settingsObserver)
             self.settingsObserver = nil
         }
+        wakeLifecycleObservers.forEach {
+            NotificationCenter.default.removeObserver($0)
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+        wakeLifecycleObservers.removeAll()
+        _ = await wakeProduction.shutdown()
         await model.shutdownLiveVoice()
         await liveController?.shutdown()
         await capabilityController.shutdown()

@@ -37,6 +37,23 @@ helper.
 Allow Miller under **System Settings → Privacy & Security → Microphone**, then
 start a new Live Voice session. Miller must not request camera access.
 
+## Wake Listening is unavailable
+
+Wake Listening is off by default and uses the system-default microphone only.
+In Settings → Voice → Wake Listening, enable it or choose Retry after fixing
+the displayed state. `Waiting for microphone permission` requires allowing
+Miller in System Settings. `Input device unavailable` means the system-default
+input disappeared; reconnect it and retry. `Wake model unavailable` means the
+verified local model is absent, so reinstall a package built after the explicit
+wake bootstrap.
+
+An invalid custom phrase does not replace the working phrase or keyword file.
+Enter one bounded English phrase and save it again. Wake capture stops while
+manual Live Voice is active and rearms only after provider, WebKit, transcript,
+and admission cleanup. A sleep, inactive transition, device loss, or shutdown
+therefore shows a paused/unavailable state instead of pretending that capture
+continues.
+
 ## A reasoning request fails
 
 Check the selected profile, model identifier, endpoint, network, and provider

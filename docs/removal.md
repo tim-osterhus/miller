@@ -32,6 +32,13 @@ separately after reset if they remain.
 macOS may retain effects in backups, APFS snapshots, unified logs, browser
 history/cache, temporary storage, Keychain metadata, or crash infrastructure.
 
+Wake reset also disables capture, releases the microphone lease, removes the
+SQLite wake preferences, and removes Miller's generated
+`~/Library/Application Support/ai.millrace.miller/wake-keywords.txt` file and
+its owner-only wake directory. The packaged model/token files are part of the
+app bundle and disappear when the app is removed; bootstrap archives and
+extraction roots are temporary and are deleted by their scripts.
+
 An externally installed Codex CLI is owned by the user or its package manager.
 Miller reset, repository cleanup, and app removal never remove or modify that
 installation.
@@ -62,8 +69,8 @@ remove an owner-installed Codex runtime or provider account.
 
 ## Repository qualification cleanup
 
-The v0.1.1 release cleanup removes `.build`, `.cache`,
-`Gateway/node_modules`, staging roots, wake inputs, sockets, and
-helper/test processes. `.artifacts/release/Miller.app` and the sanitized
-qualification report are retained for inspection. Wake foundation work remains
-source-only for v0.1.2.
+The release cleanup removes `.build`, `.cache`, `Gateway/node_modules`,
+staging roots, unretained wake inputs, sockets, and helper/test processes.
+`.artifacts/release/Miller.app` and the sanitized qualification report are
+retained for inspection. The verified release app is not removed unless a
+newly verified artifact intentionally replaces it.

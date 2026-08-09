@@ -328,7 +328,7 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func applicationAndSBOMDeclareOnlyTheV011ShippedRuntimeComponents() throws {
+    func applicationAndSBOMDeclareTheVerifiedWakeRuntimeComponents() throws {
         let plist = try String(
             contentsOf: repositoryRoot.appendingPathComponent("Packaging/Info.plist"),
             encoding: .utf8
@@ -354,14 +354,15 @@ struct ReleasePackagingPolicyTests {
             "MillerCapabilityBridge@0.1.1",
             "MillerCapabilities@0.1.1",
             "Node.js@22.22.0",
+            "ONNX Runtime@1.24.4",
+            "Sherpa-ONNX@1.13.2",
+            "Miller wake model assets@pinned",
             "openai@6.26.0",
             "partial-json@0.1.7",
         ].sorted())
-        #expect(packageNames.allSatisfy {
-            !$0.localizedCaseInsensitiveContains("sherpa")
-                && !$0.localizedCaseInsensitiveContains("onnx")
-                && !$0.localizedCaseInsensitiveContains("wake")
-        })
+        #expect(packageNames.contains("Sherpa-ONNX@1.13.2"))
+        #expect(packageNames.contains("ONNX Runtime@1.24.4"))
+        #expect(packageNames.contains("Miller wake model assets@pinned"))
     }
 
     @Test
