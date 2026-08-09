@@ -67,33 +67,6 @@ private final class ApprovalSuspensionProbe: @unchecked Sendable {
     }
 }
 
-private final class BlockingClientSpawnVerifier: @unchecked Sendable {
-    private let condition = NSCondition()
-    private var entered = false
-    private var released = false
-
-    var isEntered: Bool {
-        condition.lock(); defer { condition.unlock() }
-        return entered
-    }
-
-    func verify(pid: pid_t) throws {
-        _ = pid
-        condition.lock()
-        entered = true
-        condition.broadcast()
-        while !released { condition.wait() }
-        condition.unlock()
-    }
-
-    func release() {
-        condition.lock()
-        released = true
-        condition.broadcast()
-        condition.unlock()
-    }
-}
-
 private let syntheticSHA256Fingerprint = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
 
 private let syntheticWebRTCOffer = """
@@ -214,13 +187,8 @@ struct CodexAppServerClientTests {
 
     @Test
     func inventoryRejectsCatalogThatArrivesAfterItsAbsoluteDeadline() async throws {
-        let verifier = BlockingClientSpawnVerifier()
-        let process = CodexAppServerProcess(configuration: try .init(
-            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
-            arguments: [fixture.path, "typed-capability-inventory"],
-            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
-            terminationGrace: .milliseconds(100),
-            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) }
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "typed-capability-inventory-late"
         ))
         let client = CodexAppServerClient(process: process)
         let inventory = Task {
@@ -232,9 +200,6 @@ struct CodexAppServerClientTests {
                 timeout: .milliseconds(20)
             )
         }
-        try await waitUntil { verifier.isEntered }
-        try await Task.sleep(for: .milliseconds(50))
-        verifier.release()
 
         await #expect(throws: CodexAppServerClientError.timeout) {
             _ = try await inventory.value
@@ -274,13 +239,8 @@ struct CodexAppServerClientTests {
 
     @Test
     func liveStartupRejectsStartedSessionThatArrivesAfterItsAbsoluteDeadline() async throws {
-        let verifier = BlockingClientSpawnVerifier()
-        let process = CodexAppServerProcess(configuration: try .init(
-            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
-            arguments: [fixture.path, "persistent"],
-            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
-            terminationGrace: .milliseconds(100),
-            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) }
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "realtime-late-start"
         ))
         let client = CodexAppServerClient(process: process)
         let run = Task {
@@ -290,9 +250,6 @@ struct CodexAppServerClientTests {
                 timeout: .milliseconds(20)
             )
         }
-        try await waitUntil { verifier.isEntered }
-        try await Task.sleep(for: .milliseconds(50))
-        verifier.release()
 
         await #expect(throws: CodexAppServerClientError.timeout) {
             _ = try await run.value

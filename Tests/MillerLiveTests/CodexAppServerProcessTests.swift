@@ -255,6 +255,38 @@ struct CodexAppServerProcessTests {
     }
 
     @Test
+    func stopBetweenAdmissionPreparationAndPublicationCannotPublishLiveProcess() async throws {
+        let gate = StartPublicationGate()
+        let verifier = SpawnVerifierProbe(outcome: .accept)
+        let process = CodexAppServerProcess(configuration: try configuration(
+            mode: "normal",
+            spawnedProcessVerifier: { pid in try verifier.verify(pid: pid) },
+            testStartPublicationGate: { gate.hold() }
+        ))
+        defer { Task { await process.stop() } }
+
+        let start = Task { () -> Bool in
+            do {
+                _ = try process.start()
+                return true
+            } catch {
+                return false
+            }
+        }
+        try await waitUntil { gate.isEntered }
+
+        let stop = Task { await process.stop() }
+        try await Task.sleep(for: .milliseconds(30))
+        gate.release()
+
+        #expect(await start.value == false)
+        #expect(await stop.value == .completed)
+        #expect(try #require(verifier.observedPID) > 0)
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test
     func cleanupPendingCallbackOnlyFiresForFinalPendingResult() async throws {
         let process = CodexAppServerProcess(configuration: try .init(
             executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
@@ -556,14 +588,26 @@ struct CodexAppServerProcessTests {
     private func configuration(
         mode: String,
         extraArguments: [String] = [],
-        spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in }
+        spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in },
+        testStartPublicationGate: (@Sendable () -> Void)? = nil
     ) throws -> CodexAppServerProcess.Configuration {
         try .init(
             executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
             arguments: [fixture.path, mode] + extraArguments,
             temporaryParentURL: repository.appendingPathComponent(".artifacts"),
             terminationGrace: .milliseconds(100),
-            spawnedProcessVerifier: spawnedProcessVerifier
+            spawnedProcessVerifier: spawnedProcessVerifier,
+            testStartPublicationGate: testStartPublicationGate,
+            testRealtimeFeatureConfig: Data(
+                """
+                [features]
+                realtime_conversation = true
+
+                [realtime]
+                version = "v1"
+
+                """.utf8
+            )
         )
     }
 
@@ -659,6 +703,32 @@ private final class BlockingSpawnVerifier: @unchecked Sendable {
 
     func verify(pid: pid_t) throws {
         _ = pid
+        condition.lock()
+        entered = true
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+private final class StartPublicationGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var isEntered: Bool {
+        condition.lock(); defer { condition.unlock() }
+        return entered
+    }
+
+    func hold() {
         condition.lock()
         entered = true
         condition.broadcast()

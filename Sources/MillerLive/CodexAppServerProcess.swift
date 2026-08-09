@@ -28,6 +28,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         public let cleanupDeadline: Duration
         public let spawnedProcessVerifier: @Sendable (pid_t) throws -> Void
         let realtimeFeatureConfig: Data?
+        let testStartPublicationGate: (@Sendable () -> Void)?
 
         public init(
             executableURL: URL,
@@ -48,6 +49,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
                 cleanupDeadline: cleanupDeadline,
                 additionalEnvironment: additionalEnvironment,
                 spawnedProcessVerifier: spawnedProcessVerifier,
+                testStartPublicationGate: nil,
                 testRealtimeFeatureConfig: Data(
                     """
                     [features]
@@ -70,7 +72,8 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             cleanupDeadline: Duration = .seconds(5),
             additionalEnvironment: [String: String] = [:],
             spawnedProcessVerifier: @escaping @Sendable (pid_t) throws -> Void = { _ in },
-            testRealtimeFeatureConfig: Data?
+            testStartPublicationGate: (@Sendable () -> Void)? = nil,
+            testRealtimeFeatureConfig: Data? = nil
         ) throws {
             guard executableURL.isFileURL, executableURL.baseURL == nil,
                   executableURL.path.hasPrefix("/"), temporaryParentURL.isFileURL,
@@ -88,6 +91,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             self.cleanupPendingDelay = cleanupPendingDelay
             self.cleanupDeadline = cleanupDeadline
             self.spawnedProcessVerifier = spawnedProcessVerifier
+            self.testStartPublicationGate = testStartPublicationGate
             realtimeFeatureConfig = testRealtimeFeatureConfig
             let baseline = [
                 "HOME": root.path,
@@ -345,17 +349,6 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             throw LiveProcessError.executableRejected
         }
 
-        let admitted = state.locked { value in
-            value.lifecycleEpoch == startEpoch && !value.terminationRequested
-        }
-        guard admitted else {
-            Self.signalGroup(pid, signal: SIGKILL)
-            Self.reapRejectedProcess(pid)
-            Self.closeDescriptors(stdinPipe + stdoutPipe + stderrPipe)
-            _ = removePrivateRoot()
-            throw LiveProcessError.processUnavailable
-        }
-
         _ = fcntl(stdinPipe[1], F_SETFD, FD_CLOEXEC)
         _ = fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
         _ = fcntl(stderrPipe[0], F_SETFD, FD_CLOEXEC)
@@ -363,12 +356,26 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         let stream = AsyncThrowingStream<Data, Error>(unfolding: {
             try await frameQueue.next()
         })
-        state.locked {
-            $0.pid = pid; $0.input = stdinPipe[1]; $0.output = stdoutPipe[0]
-            $0.error = stderrPipe[0]; $0.frameQueue = frameQueue
-            $0.buffer = Data(); $0.running = true; $0.exitStatus = nil
-            $0.terminationRequested = false; $0.cleanupPendingReported = false
-            $0.cleanupPending = false
+        configuration.testStartPublicationGate?()
+        let published = state.locked { value -> Bool in
+            guard value.lifecycleEpoch == startEpoch,
+                  !value.terminationRequested,
+                  value.starting,
+                  !value.running
+            else { return false }
+            value.pid = pid; value.input = stdinPipe[1]; value.output = stdoutPipe[0]
+            value.error = stderrPipe[0]; value.frameQueue = frameQueue
+            value.buffer = Data(); value.running = true; value.exitStatus = nil
+            value.terminationRequested = false; value.cleanupPendingReported = false
+            value.cleanupPending = false
+            return true
+        }
+        guard published else {
+            Self.signalGroup(pid, signal: SIGKILL)
+            Self.reapRejectedProcess(pid)
+            Self.closeDescriptors(stdinPipe + stdoutPipe + stderrPipe)
+            _ = removePrivateRoot()
+            throw LiveProcessError.processUnavailable
         }
         let state = self.state
         let root = configuration.temporaryRootURL

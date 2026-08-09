@@ -3288,6 +3288,8 @@ actor ProviderSettingsController {
     private let codexTypedRemoteReadiness: @Sendable (
         ProviderProfile
     ) async throws -> CodexTypedReadiness
+    private let testAfterCredentialInvalidation: @Sendable () async -> Void
+    private let testAfterCredentialLoad: @Sendable () async -> Void
     private var cachedCodexReadiness: (profileID: UUID, result: CodexTypedReadiness)?
     private var cachedRemoteCodexReadiness: (
         profileID: UUID, result: CodexTypedReadiness
@@ -3305,7 +3307,9 @@ actor ProviderSettingsController {
         ) async throws -> CodexTypedReadiness,
         codexTypedRemoteReadiness: @escaping @Sendable (
             ProviderProfile
-        ) async throws -> CodexTypedReadiness
+        ) async throws -> CodexTypedReadiness,
+        testAfterCredentialInvalidation: @escaping @Sendable () async -> Void = {},
+        testAfterCredentialLoad: @escaping @Sendable () async -> Void = {}
     ) {
         self.repository = repository
         self.credentials = credentials
@@ -3325,6 +3329,8 @@ actor ProviderSettingsController {
         self.cacheURL = cacheURL
         self.codexTypedReadiness = codexTypedReadiness
         self.codexTypedRemoteReadiness = codexTypedRemoteReadiness
+        self.testAfterCredentialInvalidation = testAfterCredentialInvalidation
+        self.testAfterCredentialLoad = testAfterCredentialLoad
     }
 
     private func invalidateCodexReadiness() {
@@ -3381,9 +3387,19 @@ actor ProviderSettingsController {
         ) {
             return replacement
         }
-        if try await repository.credentialIsInvalidated(
+        let credentialIsInvalidated = try await repository.credentialIsInvalidated(
             reference: selected.credentialReference
+        )
+        await testAfterCredentialInvalidation()
+        if let replacement = try await snapshotAfterGenerationChange(
+            generation: generation,
+            retriesRemaining: retriesRemaining,
+            codexModels: codexModels,
+            codexDefaultModel: codexDefaultModel
         ) {
+            return replacement
+        }
+        if credentialIsInvalidated {
             if let replacement = try await snapshotAfterGenerationChange(
                 generation: generation,
                 retriesRemaining: retriesRemaining,
@@ -3402,6 +3418,15 @@ actor ProviderSettingsController {
         }
         do {
             _ = try await credentials.load(for: selected.credentialReference)
+            await testAfterCredentialLoad()
+            if let replacement = try await snapshotAfterGenerationChange(
+                generation: generation,
+                retriesRemaining: retriesRemaining,
+                codexModels: codexModels,
+                codexDefaultModel: codexDefaultModel
+            ) {
+                return replacement
+            }
         } catch {
             if let replacement = try await snapshotAfterGenerationChange(
                 generation: generation,

@@ -328,6 +328,126 @@ struct CodexProfileTests {
         #expect(await probe.calls == 2)
     }
 
+    @Test
+    func snapshotRetriesWhenGenerationMutatesAfterSuccessfulCredentialInvalidationCheck() async throws {
+        _ = NSApplication.shared
+        let boundary = SnapshotCredentialBoundary()
+        let loadCounter = SnapshotCallCounter()
+        let fixture = try await makeCodexSnapshotFixture(
+            afterCredentialInvalidation: { await boundary.pauseFirstCall() },
+            afterCredentialLoad: { await loadCounter.record() }
+        )
+        defer {
+            Task {
+                await fixture.supervisor.shutdown()
+                await fixture.repository.close()
+                try? await fixture.credentials.delete(for: fixture.profile.credentialReference)
+                try? FileManager.default.removeItem(at: fixture.root)
+            }
+        }
+
+        let snapshotTask = Task { try await fixture.controller.snapshot() }
+        try await boundary.waitUntilEntered()
+        try await fixture.controller.saveCodexModel("gpt-5.6-terra")
+        await boundary.release()
+
+        let snapshot = try await snapshotTask.value
+        #expect(snapshot.profiles.first?.model == "gpt-5.6-terra")
+        #expect(await loadCounter.calls == 1)
+    }
+
+    @Test
+    func snapshotRetriesWhenGenerationMutatesAfterSuccessfulCredentialLoad() async throws {
+        _ = NSApplication.shared
+        let boundary = SnapshotCredentialBoundary()
+        let readinessProbe = SnapshotProfileProbe()
+        let fixture = try await makeCodexSnapshotFixture(
+            afterCredentialLoad: { await boundary.pauseFirstCall() },
+            readinessProbe: readinessProbe
+        )
+        defer {
+            Task {
+                await fixture.supervisor.shutdown()
+                await fixture.repository.close()
+                try? await fixture.credentials.delete(for: fixture.profile.credentialReference)
+                try? FileManager.default.removeItem(at: fixture.root)
+            }
+        }
+
+        let snapshotTask = Task { try await fixture.controller.snapshot() }
+        try await boundary.waitUntilEntered()
+        try await fixture.controller.saveCodexModel("gpt-5.6-terra")
+        await boundary.release()
+
+        let snapshot = try await snapshotTask.value
+        #expect(snapshot.profiles.first?.model == "gpt-5.6-terra")
+        #expect(await readinessProbe.models == ["gpt-5.6-terra"])
+    }
+
+    private func makeCodexSnapshotFixture(
+        afterCredentialInvalidation: @escaping @Sendable () async -> Void = {},
+        afterCredentialLoad: @escaping @Sendable () async -> Void = {},
+        readinessProbe: SnapshotProfileProbe? = nil
+    ) async throws -> CodexSnapshotFixture {
+        let root = try makeRoot()
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let cache = root.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex OAuth",
+            baseURL: nil,
+            model: "gpt-5",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        let credentials = KeychainCredentialStore()
+        try await credentials.store(
+            CredentialEnvelope(
+                providerKind: .codexOAuth,
+                payload: Data("synthetic".utf8)
+            ),
+            for: profile.credentialReference
+        )
+        let gatewayRoot = helperPath
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let supervisor = GatewaySupervisor(configuration: .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [helperPath.path, "normal"],
+            workingDirectoryURL: gatewayRoot,
+            environment: [
+                "LANG": "C", "LC_ALL": "C", "TMPDIR": cache.path, "TZ": "UTC",
+            ],
+            terminationGrace: .milliseconds(200)
+        ))
+        let controller = ProviderSettingsController(
+            repository: repository,
+            credentials: credentials,
+            supervisor: supervisor,
+            databaseURL: database,
+            cacheURL: cache,
+            codexTypedReadiness: { profile in
+                await readinessProbe?.record(profile)
+                return .init(state: .ready)
+            },
+            codexTypedRemoteReadiness: { _ in .init(state: .remoteProbeTimedOut) },
+            testAfterCredentialInvalidation: afterCredentialInvalidation,
+            testAfterCredentialLoad: afterCredentialLoad
+        )
+        return CodexSnapshotFixture(
+            root: root,
+            profile: profile,
+            repository: repository,
+            credentials: credentials,
+            supervisor: supervisor,
+            controller: controller
+        )
+    }
+
     private var helperPath: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -379,5 +499,50 @@ private actor SnapshotReadinessProbe {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private struct CodexSnapshotFixture {
+    let root: URL
+    let profile: ProviderProfile
+    let repository: SQLiteConversationRepository
+    let credentials: KeychainCredentialStore
+    let supervisor: GatewaySupervisor
+    let controller: ProviderSettingsController
+}
+
+private actor SnapshotCredentialBoundary {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+
+    func pauseFirstCall() async {
+        calls += 1
+        guard calls == 1 else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilEntered() async throws {
+        while calls == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SnapshotCallCounter {
+    private(set) var calls = 0
+
+    func record() { calls += 1 }
+}
+
+private actor SnapshotProfileProbe {
+    private(set) var models: [String] = []
+
+    func record(_ profile: ProviderProfile) {
+        models.append(profile.model)
     }
 }
