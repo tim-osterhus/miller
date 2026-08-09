@@ -95,7 +95,10 @@ public struct CodexAppServerProtocol: Sendable {
             "id": id,
             "method": "initialize",
             "params": [
-                "clientInfo": ["name": "miller", "version": "0.1.0"],
+                "clientInfo": [
+                    "name": MillerAppServerClientInfo.name,
+                    "version": MillerAppServerClientInfo.version,
+                ],
                 "capabilities": ["experimentalApi": true],
             ],
         ])

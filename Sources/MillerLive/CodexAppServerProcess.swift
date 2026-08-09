@@ -3,6 +3,8 @@ import Foundation
 
 public enum LiveProcessError: Error, Equatable, Sendable {
     case invalidConfiguration
+    case executableMissing
+    case executableRejected
     case processUnavailable
     case invalidFrame
     case helperExited
@@ -234,9 +236,9 @@ public final class CodexAppServerProcess: @unchecked Sendable {
     }
 
     public func start() throws -> AsyncThrowingStream<Data, Error> {
-        guard !isRunning,
-              FileManager.default.isExecutableFile(atPath: configuration.executableURL.path)
-        else { throw LiveProcessError.processUnavailable }
+        guard !isRunning else { throw LiveProcessError.processUnavailable }
+        guard FileManager.default.isExecutableFile(atPath: configuration.executableURL.path)
+        else { throw LiveProcessError.executableMissing }
         try preparePrivateRoot()
 
         var stdinPipe = [Int32](repeating: -1, count: 2)
@@ -302,7 +304,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
             Self.reapRejectedProcess(pid)
             Self.closeDescriptors(stdinPipe + stdoutPipe + stderrPipe)
             removePrivateRoot()
-            throw LiveProcessError.processUnavailable
+            throw LiveProcessError.executableRejected
         }
 
         _ = fcntl(stdinPipe[1], F_SETFD, FD_CLOEXEC)

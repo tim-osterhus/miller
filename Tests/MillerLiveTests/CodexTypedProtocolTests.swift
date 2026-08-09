@@ -29,6 +29,21 @@ struct CodexTypedProtocolTests {
         #expect(input[1]["type"] as? String == "skill")
         #expect(input[1]["name"] as? String == "Example")
     }
+
+    @Test
+    func typedAndLiveInitializationUseOneMillerClientVersion() throws {
+        let typed = try object(CodexTypedProtocol().initializeRequest(id: "typed:initialize"))
+        let live = try object(CodexAppServerProtocol().initializeRequest(id: "live:initialize"))
+        let typedInfo = try #require(
+            (typed["params"] as? [String: Any])?["clientInfo"] as? [String: Any]
+        )
+        let liveInfo = try #require(
+            (live["params"] as? [String: Any])?["clientInfo"] as? [String: Any]
+        )
+        #expect(typedInfo["version"] as? String == MillerAppServerClientInfo.version)
+        #expect(liveInfo["version"] as? String == MillerAppServerClientInfo.version)
+        #expect((typedInfo["version"] as? String) == (liveInfo["version"] as? String))
+    }
     private let codec = CodexTypedProtocol(
         maximumIdentifierBytes: 64,
         maximumTextBytes: 128,

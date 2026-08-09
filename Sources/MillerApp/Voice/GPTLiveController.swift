@@ -640,7 +640,8 @@ actor GPTLiveController {
             switch process {
             case .invalidFrame: return "protocol_mismatch"
             case .timeout: return "voice_timeout"
-            case .helperExited, .invalidConfiguration, .processUnavailable:
+            case .executableMissing, .executableRejected,
+                 .helperExited, .invalidConfiguration, .processUnavailable:
                 return "helper_failed"
             }
         }

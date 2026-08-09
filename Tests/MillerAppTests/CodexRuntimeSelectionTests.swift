@@ -40,6 +40,25 @@ struct CodexRuntimeSelectionTests {
     }
 
     @Test
+    func runtimeProjectionDistinguishesMissingFromRejectedExecutable() throws {
+        let fixture = try RuntimeSelectionFixture()
+        defer { fixture.cleanup() }
+        let missing = fixture.root.appendingPathComponent("missing-codex")
+        let missingResolver = CodexRuntimeResolver(
+            automaticCandidates: [missing],
+            verify: { _ in }
+        )
+        #expect(missingResolver.resolveReadiness(savedPath: nil) == .missing)
+
+        let rejected = try fixture.executable(named: "rejected-codex")
+        let rejectedResolver = CodexRuntimeResolver(
+            automaticCandidates: [rejected],
+            verify: { _ in throw CodexRuntimeSelectionError.invalidCandidate }
+        )
+        #expect(rejectedResolver.resolveReadiness(savedPath: nil) == .rejected)
+    }
+
+    @Test
     func npmLauncherResolvesToPlatformNativeExecutable() throws {
         let fixture = try RuntimeSelectionFixture()
         defer { fixture.cleanup() }

@@ -10,6 +10,14 @@ public enum CodexTypedProtocolError: Error, Equatable, Sendable {
     case invalidSequence
     case featureUnavailable
     case providerFailed
+    case initializeRejected
+    case authenticationRequired
+}
+
+public enum MillerAppServerClientInfo: Sendable {
+    public static let name = "miller"
+    public static let title = "Miller"
+    public static let version = "0.1.1"
 }
 
 public struct CodexTypedContextMessage: Equatable, Sendable {
@@ -144,9 +152,9 @@ public struct CodexTypedProtocol: Sendable {
                 // External ChatGPT token authentication is experimental in App Server 0.146.
                 "capabilities": ["experimentalApi": true],
                 "clientInfo": [
-                    "name": "miller",
-                    "title": "Miller",
-                    "version": "0.1.1",
+                    "name": MillerAppServerClientInfo.name,
+                    "title": MillerAppServerClientInfo.title,
+                    "version": MillerAppServerClientInfo.version,
                 ],
             ],
         ])

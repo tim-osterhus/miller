@@ -618,12 +618,221 @@ struct CodexTypedReasoningGatewayTests {
                 temporaryParentURL: repository.appendingPathComponent(".artifacts")
             ))
         )
-        await #expect(throws: LiveProcessError.processUnavailable) {
+        await #expect(throws: LiveProcessError.executableMissing) {
             _ = try await unavailable.probeTypedFeatures(
                 credential: credential, model: "gpt-5.6-terra",
                 cwd: repository.path, timeout: .seconds(2)
             )
         }
+    }
+
+    @Test
+    func localReadinessStopsAfterAuthenticationWithoutStartingAModelTurn() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/typed-readiness-record-\(UUID().uuidString.lowercased()).jsonl"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let client = try TypedClientFactory(
+            mode: "typed-readiness-record", extraArguments: [marker.path]
+        ).makeClient()
+
+        let result = try await client.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+
+        #expect(result.state == .ready)
+        #expect(result.executableVerified)
+        #expect(result.appServerInitialized)
+        #expect(result.authenticated)
+        let methods = try String(contentsOf: marker, encoding: .utf8)
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                return (object as? [String: Any])?["method"] as? String
+            }
+        #expect(methods == ["initialize", "initialized", "account/login/start"])
+        #expect(!methods.contains("thread/start"))
+        #expect(!methods.contains("turn/start"))
+    }
+
+    @Test
+    func readinessKeepsExecutableCredentialAndProtocolStatesDistinct() async throws {
+        let missing = CodexAppServerClient(
+            process: CodexAppServerProcess(configuration: try .init(
+                executableURL: URL(fileURLWithPath: "/private/tmp/miller-no-codex"),
+                arguments: ["app-server"],
+                temporaryParentURL: repository.appendingPathComponent(".artifacts")
+            ))
+        )
+        let missingResult = try await missing.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(missingResult.state == .executableMissing)
+        #expect(!missingResult.executableVerified)
+
+        let rejected = CodexAppServerClient(
+            process: CodexAppServerProcess(configuration: try .init(
+                executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+                arguments: [fixture.path, "typed-readiness-record"],
+                temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+                spawnedProcessVerifier: { _ in throw LiveProcessError.processUnavailable }
+            ))
+        )
+        let rejectedResult = try await rejected.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(rejectedResult.state == .executableRejected)
+        #expect(!rejectedResult.executableVerified)
+
+        let invalidCredential = try TypedClientFactory(
+            mode: "typed-readiness-record"
+        ).makeClient()
+        let localCredentialResult = try await invalidCredential.probeTypedReadiness(
+            credential: .init(accessToken: Data(), accountID: "", planType: nil),
+            timeout: .seconds(2)
+        )
+        #expect(localCredentialResult.state == .localCredentialUnavailable)
+        #expect(localCredentialResult.executableVerified)
+        #expect(localCredentialResult.appServerInitialized)
+        #expect(!localCredentialResult.authenticated)
+
+        let authRequired = try TypedClientFactory(
+            mode: "typed-readiness-login-error"
+        ).makeClient()
+        let authRequiredResult = try await authRequired.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(authRequiredResult.state == .authenticationRequired)
+        #expect(authRequiredResult.executableVerified)
+        #expect(authRequiredResult.appServerInitialized)
+        #expect(!authRequiredResult.authenticated)
+
+        let initializationFailure = try TypedClientFactory(
+            mode: "typed-readiness-initialize-error"
+        ).makeClient()
+        let initializationResult = try await initializationFailure.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(initializationResult.state == .appServerUnavailable)
+        #expect(initializationResult.executableVerified)
+        #expect(!initializationResult.appServerInitialized)
+
+        let unsupported = try TypedClientFactory(
+            mode: "typed-readiness-malformed"
+        ).makeClient()
+        let unsupportedResult = try await unsupported.probeTypedReadiness(
+            credential: credential, timeout: .seconds(2)
+        )
+        #expect(unsupportedResult.state == .unsupportedProtocol)
+        #expect(unsupportedResult.executableVerified)
+        #expect(!unsupportedResult.appServerInitialized)
+    }
+
+    @Test
+    func optionalRemoteProbeTimesOutExplicitlyAndDoesNotPoisonTheNextTypedUse() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/typed-probe-slow-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let factory = TypedClientFactory(
+            mode: "typed-probe-slow-once", extraArguments: [marker.path]
+        )
+        let client = try factory.makeClient()
+
+        let result = try await client.probeTypedRemote(
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            timeout: .milliseconds(200)
+        )
+
+        #expect(result.state == .remoteProbeTimedOut)
+        #expect(result.ownerFacingStatus == "Readiness probe timed out")
+        #expect(result.executableVerified)
+        #expect(result.appServerInitialized)
+        #expect(result.authenticated)
+        #expect(!factory.latestProcessIsRunning)
+        #expect(!FileManager.default.fileExists(atPath: factory.latestRoot.path))
+
+        var messages: [CodexTypedMessage] = []
+        for try await message in client.typedEvents(
+            requestID: "after-timeout",
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            context: [],
+            userText: "ordinary use",
+            timeout: .seconds(2)
+        ) {
+            messages.append(message)
+        }
+        #expect(messages.contains {
+            if case .turnCompleted(_, _, .completed) = $0 { true } else { false }
+        })
+    }
+
+    @Test
+    func optionalRemoteProbePreservesSuccessfulInitializationWhenProviderFails() async throws {
+        let client = try TypedClientFactory(
+            mode: "typed-probe-post-admission-error"
+        ).makeClient()
+
+        let result = try await client.probeTypedRemote(
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            timeout: .seconds(2)
+        )
+
+        #expect(result.state == .providerUnavailable)
+        #expect(result.executableVerified)
+        #expect(result.appServerInitialized)
+        #expect(result.authenticated)
+    }
+
+    @Test
+    func cancellingOptionalRemoteProbeTerminatesItsChildAndCleansItsRoot() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/typed-probe-cancel-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let factory = TypedClientFactory(
+            mode: "typed-probe-slow", extraArguments: [marker.path]
+        )
+        let client = try factory.makeClient()
+        let task = Task {
+            try await client.probeTypedRemote(
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                timeout: .seconds(30)
+            )
+        }
+        try await waitUntil { FileManager.default.fileExists(atPath: marker.path) }
+
+        task.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        try await waitUntil { !factory.latestProcessIsRunning }
+        #expect(!FileManager.default.fileExists(atPath: factory.latestRoot.path))
+    }
+
+    @Test
+    func optionalRemoteProbeReportsSuccessfulReadiness() async throws {
+        let client = try TypedClientFactory(mode: "typed-probe-new-version").makeClient()
+
+        let result = try await client.probeTypedRemote(
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            timeout: .seconds(2)
+        )
+
+        #expect(result.state == .ready)
+        #expect(result.isReady)
+        #expect(result.supportsOrdinaryTurns)
+        #expect(result.supportsApps)
+        #expect(result.supportsMCPStatus)
+        #expect(result.supportsSkills)
     }
 
     @Test
@@ -760,6 +969,7 @@ private final class TypedClientFactory: @unchecked Sendable {
     private let extraArguments: [String]
     private var roots: [URL] = []
     private var clients: [CodexAppServerClient] = []
+    private var processes: [CodexAppServerProcess] = []
 
     init(mode: String, extraArguments: [String] = []) {
         self.mode = mode
@@ -774,6 +984,16 @@ private final class TypedClientFactory: @unchecked Sendable {
     var latestClient: CodexAppServerClient? {
         lock.lock(); defer { lock.unlock() }
         return clients.last
+    }
+
+    var latestProcessIsRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return processes.last?.isRunning == true
+    }
+
+    var latestRoot: URL {
+        lock.lock(); defer { lock.unlock() }
+        return roots.last!
     }
 
     func makeClient(
@@ -792,6 +1012,7 @@ private final class TypedClientFactory: @unchecked Sendable {
         lock.lock()
         roots.append(process.temporaryRootURL)
         clients.append(client)
+        processes.append(process)
         lock.unlock()
         return client
     }

@@ -464,6 +464,7 @@ lines.on("line", async (line) => {
   }
   if (mode.startsWith("typed-")) {
     if ((mode === "typed-record" || mode === "typed-probe-record" ||
+         mode === "typed-readiness-record" ||
          mode === "typed-portable-skill-routing-proof" ||
          mode.startsWith("typed-authority-")) && pidPath) {
       fs.appendFileSync(pidPath, `${line}\n`, { mode: 0o600 });
@@ -473,11 +474,23 @@ lines.on("line", async (line) => {
         send({ id: request.id, error: { code: -32602, message: "experimental API required" } });
         return;
       }
+      if (mode === "typed-readiness-initialize-error") {
+        send({ id: request.id, error: { code: -32000, message: "synthetic initialize rejection" } });
+        return;
+      }
+      if (mode === "typed-readiness-malformed") {
+        process.stdout.write("{malformed\n");
+        return;
+      }
       send({ id: request.id, result: initializeResult() });
       return;
     }
     if (request.method === "initialized") return;
     if (request.method === "account/login/start") {
+      if (mode === "typed-readiness-login-error") {
+        send({ id: request.id, error: { code: -32000, message: "authentication required" } });
+        return;
+      }
       send({ id: request.id, result: { type: "chatgptAuthTokens" } });
       return;
     }
@@ -612,6 +625,11 @@ lines.on("line", async (line) => {
         return;
       }
       if (mode.startsWith("typed-probe-")) {
+        if (mode === "typed-probe-slow" ||
+            (mode === "typed-probe-slow-once" && !fs.existsSync(pidPath))) {
+          if (pidPath) fs.writeFileSync(pidPath, "remote-probe-pending\n", { mode: 0o600 });
+          return;
+        }
         if (mode === "typed-probe-refresh-unavailable" ||
             mode === "typed-probe-refresh-rejected") {
           send({

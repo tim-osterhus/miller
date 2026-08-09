@@ -1826,7 +1826,8 @@ final class AppPresentationModel: ObservableObject {
             switch process {
             case .invalidFrame: return "protocol_mismatch"
             case .timeout: return "voice_timeout"
-            case .helperExited, .invalidConfiguration, .processUnavailable:
+            case .executableMissing, .executableRejected,
+                 .helperExited, .invalidConfiguration, .processUnavailable:
                 return "helper_failed"
             }
         }
@@ -2166,11 +2167,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             environment: environment,
             verify: { try runtimeVerifier.verify($0) }
         )
-        let runtimeSelection = try Self.liveRuntimeSelection(
+        let runtimeResolution = try Self.liveRuntimeResolution(
             arguments: arguments,
             savedPath: CodexRuntimePreferences().loadPath(),
             resolver: runtimeResolver
         )
+        let runtimeSelection = runtimeResolution.selection
         let configuration = GatewayProcess.Configuration(
             executableURL: try Self.nodeURL(environment: environment),
             arguments: Self.helperArguments(
@@ -2374,9 +2376,14 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             supervisor: supervisor,
             databaseURL: URL(fileURLWithPath: databasePath),
             cacheURL: cacheURL,
-            codexTypedReadiness: { profile in
-                guard let codexExecutableURL = runtimeSelection?.executableURL
-                else { throw ProviderRoutingError.unsupportedProvider }
+            codexTypedReadiness: { [repository] profile in
+                guard let codexExecutableURL = runtimeSelection?.executableURL else {
+                    let state: CodexTypedReadinessState = switch runtimeResolution {
+                    case .rejected: .executableRejected
+                    case .missing, .available: .executableMissing
+                    }
+                    return .init(state: state)
+                }
                 let loader = GPTLiveCredentialLoader(
                     load: { [credentialStore] reference in
                         try await credentialStore.load(for: reference)
@@ -2403,10 +2410,19 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         try await typedCredentialRefresher.refresh(accountID: accountID)
                     }
                 )
-                return try await client.probeTypedFeatures(
-                    credential: try await loader.load(profile: profile),
-                    model: profile.model,
-                    cwd: typedRoot.path,
+                guard try await repository.credentialIsInvalidated(
+                    reference: profile.credentialReference
+                ) == false else {
+                    return .init(state: .localCredentialUnavailable)
+                }
+                let credential: CodexOAuthCredential
+                do {
+                    credential = try await loader.load(profile: profile)
+                } catch {
+                    return .init(state: .localCredentialUnavailable)
+                }
+                return try await client.probeTypedReadiness(
+                    credential: credential,
                     timeout: .seconds(10)
                 )
             }
@@ -3146,11 +3162,23 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         savedPath: String?,
         resolver: CodexRuntimeResolver
     ) throws -> CodexRuntimeSelection? {
+        try liveRuntimeResolution(
+            arguments: arguments,
+            savedPath: savedPath,
+            resolver: resolver
+        ).selection
+    }
+
+    nonisolated static func liveRuntimeResolution(
+        arguments: [String],
+        savedPath: String?,
+        resolver: CodexRuntimeResolver
+    ) throws -> CodexRuntimeReadiness {
         let positions = arguments.indices.filter {
             arguments[$0] == "--gpt-live-app-server"
         }
         guard !positions.isEmpty else {
-            return resolver.resolve(savedPath: savedPath)
+            return resolver.resolveReadiness(savedPath: savedPath)
         }
         guard positions.count == 1, let position = positions.first,
               arguments.indices.contains(position + 1)
@@ -3159,10 +3187,10 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         guard path.hasPrefix("/"), !path.isEmpty else {
             throw LiveProcessError.invalidConfiguration
         }
-        return try resolver.resolveCandidate(
+        return .available(try resolver.resolveCandidate(
             URL(fileURLWithPath: path),
             source: .developmentOverride
-        )
+        ))
     }
 }
 
@@ -3178,7 +3206,7 @@ private actor ProviderSettingsController {
     private let codexTypedReadiness: @Sendable (
         ProviderProfile
     ) async throws -> CodexTypedReadiness
-    private var typedReadinessConfirmed = false
+    private var cachedCodexReadiness: (profileID: UUID, result: CodexTypedReadiness)?
 
     init(
         repository: SQLiteConversationRepository,
@@ -3252,19 +3280,35 @@ private actor ProviderSettingsController {
                 codexDefaultModel: codexDefaultModel
             )
         }
-        if selected.kind == .codexOAuth, !typedReadinessConfirmed {
-            do {
-                let observed = try await codexTypedReadiness(selected)
-                guard observed.supportsOrdinaryTurns,
-                      observed.supportsApps,
-                      observed.supportsMCPStatus,
-                      observed.supportsSkills
-                else { throw CodexTypedProtocolError.featureUnavailable }
-                typedReadinessConfirmed = true
-            } catch {
+        if selected.kind == .codexOAuth {
+            let observed: CodexTypedReadiness
+            if let cached = cachedCodexReadiness,
+               cached.profileID == selected.id
+            {
+                observed = cached.result
+            } else {
+                do {
+                    observed = try await codexTypedReadiness(selected)
+                    cachedCodexReadiness = (selected.id, observed)
+                } catch let error as GPTLiveCredentialError
+                    where error == .invalidCredential {
+                    let result = CodexTypedReadiness(
+                        state: .localCredentialUnavailable
+                    )
+                    cachedCodexReadiness = (selected.id, result)
+                    observed = result
+                } catch {
+                    let result = CodexTypedReadiness(
+                        state: .appServerUnavailable
+                    )
+                    cachedCodexReadiness = (selected.id, result)
+                    observed = result
+                }
+            }
+            guard observed.state == .ready else {
                 return .init(
                     profiles: profiles.map(ProviderSettingsProfile.init),
-                    readiness: "External Codex protocol unavailable",
+                    readiness: observed.ownerFacingStatus,
                     codexModels: codexModels,
                     codexDefaultModel: codexDefaultModel
                 )
@@ -3368,6 +3412,7 @@ private actor ProviderSettingsController {
 
     func select(_ id: UUID, hasActiveTurn: Bool) async throws {
         try await profileService.selectProfile(id: id, hasActiveTurn: hasActiveTurn)
+        cachedCodexReadiness = nil
         _ = try await credentialCoordinator.restoreSelectedProfile()
     }
 
@@ -3451,7 +3496,7 @@ private actor ProviderSettingsController {
     }
 
     func retryReadiness() async throws -> ProviderSettingsSnapshot {
-        typedReadinessConfirmed = false
+        cachedCodexReadiness = nil
         return try await snapshot()
     }
 

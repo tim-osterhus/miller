@@ -5,6 +5,17 @@ enum CodexRuntimeSelectionError: Error, Equatable, Sendable {
     case invalidCandidate
 }
 
+enum CodexRuntimeReadiness: Equatable, Sendable {
+    case available(CodexRuntimeSelection)
+    case missing
+    case rejected
+
+    var selection: CodexRuntimeSelection? {
+        if case let .available(selection) = self { return selection }
+        return nil
+    }
+}
+
 enum CodexRuntimeSelectionSource: Equatable, Sendable {
     case developmentOverride
     case saved
@@ -46,20 +57,27 @@ struct CodexRuntimeResolver: Sendable {
     }
 
     func resolve(savedPath: String?) -> CodexRuntimeSelection? {
-        if let savedPath,
-           let selected = try? resolveCandidate(
-               URL(fileURLWithPath: savedPath),
-               source: .saved
-           )
-        {
-            return selected
-        }
-        for candidate in automaticCandidates {
-            if let selected = try? resolveCandidate(candidate, source: .automatic) {
-                return selected
+        resolveReadiness(savedPath: savedPath).selection
+    }
+
+    func resolveReadiness(savedPath: String?) -> CodexRuntimeReadiness {
+        var rejected = false
+        if let savedPath {
+            let candidate = URL(fileURLWithPath: savedPath)
+            do {
+                return .available(try resolveCandidate(candidate, source: .saved))
+            } catch {
+                rejected = candidateIsExecutable(candidate)
             }
         }
-        return nil
+        for candidate in automaticCandidates {
+            do {
+                return .available(try resolveCandidate(candidate, source: .automatic))
+            } catch {
+                rejected = rejected || candidateIsExecutable(candidate)
+            }
+        }
+        return rejected ? .rejected : .missing
     }
 
     func resolveCandidate(
@@ -93,6 +111,27 @@ struct CodexRuntimeResolver: Sendable {
             executableURL: executable,
             source: source
         )
+    }
+
+    private func candidateIsExecutable(_ candidate: URL) -> Bool {
+        guard let executable = executableURL(for: candidate) else { return false }
+        return FileManager.default.isExecutableFile(atPath: executable.path)
+    }
+
+    private func executableURL(for candidate: URL) -> URL? {
+        guard candidate.isFileURL, candidate.path.hasPrefix("/") else { return nil }
+        let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+        if resolved.lastPathComponent == "codex.js" {
+            let packageRoot = resolved
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            return packageRoot
+                .appendingPathComponent("node_modules/@openai/codex-darwin-arm64")
+                .appendingPathComponent("vendor/aarch64-apple-darwin/bin/codex")
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+        }
+        return resolved
     }
 
     static func defaultCandidates(

@@ -219,6 +219,32 @@ root. The external qualification script repeats the publisher, architecture,
 and signing checks as a separate operator preflight; it does not replace
 application enforcement.
 
+### External Codex readiness lifecycle
+
+Typed settings uses a local readiness operation separate from the optional
+remote provider probe. The local operation starts a task-private App Server
+child, sends `initialize`, completes the in-memory OAuth handshake, and then
+terminates and reaps that child. It never starts a model turn merely to load
+settings. Its typed result preserves executable verification,
+initialization, and authentication evidence alongside a fixed state: missing
+executable, rejected executable, unavailable local credential,
+authentication required, App Server unavailable, unsupported protocol, remote
+probe timeout, provider unavailable, or ready.
+
+The optional remote operation has a separate 30-second ceiling. It may run a
+real typed turn and capability checks, but a timeout is reported as the fixed
+owner-facing message `Readiness probe timed out` and retains all local facts
+already established. Cancellation and timeout terminate only a child started
+by that probe and remove its temporary root. A client that was already sharing
+an external runtime is not stopped by an optional probe failure. Subsequent
+ordinary typed use can start normally after probe cleanup.
+
+Settings caches the local result for the selected profile and invalidates it on
+profile selection or an explicit retry. Provider failures and remote timeouts
+therefore do not get projected as executable absence or protocol
+incompatibility. The first ordinary typed use may still establish model
+availability without erasing the local readiness evidence.
+
 Live transcripts are bounded presentation state. Miller does not write them,
 audio, App Server identifiers, or provider payloads to SQLite. Typed and live
 operations are mutually exclusive. Typed interaction resumes after live

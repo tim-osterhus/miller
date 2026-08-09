@@ -5,7 +5,9 @@
 Miller v0.1 supports Codex OAuth through the reviewed Pi-derived gateway and
 one configurable HTTPS OpenAI-compatible endpoint. DeepSeek is the qualified
 OpenAI-compatible reference. Model identifiers are configurable; availability
-is confirmed by the provider on first use.
+is confirmed by the provider on first use. Settings checks only local Codex
+process and protocol readiness, so opening settings does not start a model
+turn.
 
 Miller owns conversation history, context selection, cancellation, and visible
 terminal outcomes. Providers do not own Miller's durable conversation state.
@@ -16,6 +18,30 @@ reference/evidence only; it is not a supported runtime boundary. The Pi gateway
 and OpenAI-compatible path are provider-portable for typed reasoning, while the
 account-backed app surface remains Codex-only.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+
+### External Codex readiness
+
+Miller keeps local and remote facts separate. The bounded local check verifies
+the selected executable, starts App Server, completes initialization, and
+completes the in-memory OAuth handshake. It does not require a model turn.
+The owner-visible states are:
+
+- executable missing;
+- executable rejected by identity or signature verification;
+- local credential unavailable (missing or invalidated);
+- authentication required;
+- App Server unavailable during spawn or initialization;
+- unsupported App Server protocol;
+- remote readiness probe timed out;
+- provider unavailable after local initialization; and
+- ready.
+
+The optional remote provider and capability probe has its own 30-second
+ceiling and cleans up its child and temporary root. A timeout is reported as
+`Readiness probe timed out`; it does not rewrite known executable,
+initialization, or authentication evidence as process absence. A normal typed
+turn may still be attempted after that optional probe, and its result does not
+erase the earlier local facts.
 
 ## GPT-Live voice
 

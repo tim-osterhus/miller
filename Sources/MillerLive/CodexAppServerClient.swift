@@ -109,16 +109,64 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private final class StartupTimeoutState: @unchecked Sendable {
         private let lock = NSLock()
         private var timedOut = false
+        private var started = false
 
         func markTimedOut() {
             lock.lock(); defer { lock.unlock() }
             timedOut = true
         }
 
+        func markStarted() {
+            lock.lock(); defer { lock.unlock() }
+            started = true
+        }
+
         var didTimeOut: Bool {
             lock.lock(); defer { lock.unlock() }
             return timedOut
         }
+
+        var didStart: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return started
+        }
+    }
+
+    private final class TypedHandshakeProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var executableVerified = false
+        private var appServerInitialized = false
+        private var authenticated = false
+
+        func markExecutableVerified() {
+            lock.lock(); defer { lock.unlock() }
+            executableVerified = true
+        }
+
+        func markAppServerInitialized() {
+            lock.lock(); defer { lock.unlock() }
+            appServerInitialized = true
+        }
+
+        func markAuthenticated() {
+            lock.lock(); defer { lock.unlock() }
+            authenticated = true
+        }
+
+        func snapshot() -> CodexTypedReadinessEvidence {
+            lock.lock(); defer { lock.unlock() }
+            return .init(
+                executableVerified: executableVerified,
+                appServerInitialized: appServerInitialized,
+                authenticated: authenticated
+            )
+        }
+    }
+
+    private struct TypedProbeFailure: Error {
+        let underlying: Error
+        let evidence: CodexTypedReadinessEvidence
+        let timedOut: Bool
     }
 
     private let process: CodexAppServerProcess
@@ -387,29 +435,148 @@ public final class CodexAppServerClient: @unchecked Sendable {
         }
     }
 
-    public func probeTypedFeatures(
+    public func probeTypedReadiness(
         credential: CodexOAuthCredential,
-        model: String,
-        cwd: String,
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(10),
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) async throws -> CodexTypedReadiness {
-        let codec = CodexTypedProtocol()
-        let prefix = "probe:\(UUID().uuidString.lowercased())"
+        let progress = TypedHandshakeProgress()
         let timeoutState = StartupTimeoutState()
         let watchdog = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             timeoutState.markTimedOut()
-            self.process.cancel()
+            if timeoutState.didStart { self.process.cancel() }
         }
         defer { watchdog.cancel() }
+        return try await withTaskCancellationHandler(operation: {
+            var probeStarted = false
+            do {
+                var currentCredential = credential
+                let source = try process.start()
+                probeStarted = true
+                timeoutState.markStarted()
+                if Task.isCancelled || timeoutState.didTimeOut {
+                    throw timeoutState.didTimeOut
+                        ? CodexAppServerClientError.timeout : CancellationError()
+                }
+                progress.markExecutableVerified()
+                var iterator = source.makeAsyncIterator()
+                try await typedHandshake(
+                    prefix: "readiness:\(UUID().uuidString.lowercased())",
+                    credential: &currentCredential,
+                    codec: CodexTypedProtocol(),
+                    iterator: &iterator,
+                    progress: progress
+                )
+                if probeStarted {
+                    await process.stop(onCleanupPending: onCleanupPending)
+                }
+                return .init(state: .ready, evidence: progress.snapshot())
+            } catch {
+                if probeStarted {
+                    await process.stop(onCleanupPending: onCleanupPending)
+                }
+                if Task.isCancelled { throw CancellationError() }
+                return localReadiness(
+                    error: error,
+                    evidence: progress.snapshot(),
+                    timedOut: timeoutState.didTimeOut
+                )
+            }
+        }, onCancel: {
+            if timeoutState.didStart { self.process.cancel() }
+        })
+    }
+
+    public func probeTypedRemote(
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        timeout: Duration = .seconds(30),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) async throws -> CodexTypedReadiness {
+        let startState = StartupTimeoutState()
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                return try await runTypedRemoteProbe(
+                    credential: credential,
+                    model: model,
+                    cwd: cwd,
+                    timeout: timeout,
+                    onCleanupPending: onCleanupPending,
+                    startState: startState
+                )
+            } catch let failure as TypedProbeFailure {
+                return remoteReadiness(failure)
+            }
+        }, onCancel: {
+            // The probe owns only a process it successfully started itself.
+            // A client may otherwise be shared with an active external session.
+            if startState.didStart { self.process.cancel() }
+        })
+    }
+
+    /// Retains the original throwing feature-probe contract for existing
+    /// callers while the structured readiness operation is used by settings.
+    public func probeTypedFeatures(
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        timeout: Duration = .seconds(30),
+        onCleanupPending: @escaping @Sendable () async -> Void = {}
+    ) async throws -> CodexTypedReadiness {
+        let startState = StartupTimeoutState()
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                return try await runTypedRemoteProbe(
+                    credential: credential,
+                    model: model,
+                    cwd: cwd,
+                    timeout: timeout,
+                    onCleanupPending: onCleanupPending,
+                    startState: startState
+                )
+            } catch let failure as TypedProbeFailure {
+                throw failure.underlying
+            }
+        }, onCancel: {
+            if startState.didStart { self.process.cancel() }
+        })
+    }
+
+    private func runTypedRemoteProbe(
+        credential: CodexOAuthCredential,
+        model: String,
+        cwd: String,
+        timeout: Duration,
+        onCleanupPending: @escaping @Sendable () async -> Void,
+        startState: StartupTimeoutState
+    ) async throws -> CodexTypedReadiness {
+        let codec = CodexTypedProtocol()
+        let prefix = "probe:\(UUID().uuidString.lowercased())"
+        let progress = TypedHandshakeProgress()
+        let timeoutState = startState
+        let watchdog = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            timeoutState.markTimedOut()
+            if timeoutState.didStart { self.process.cancel() }
+        }
+        defer { watchdog.cancel() }
+        var probeStarted = false
         do {
             var currentCredential = credential
             let source = try process.start()
+            probeStarted = true
+            timeoutState.markStarted()
+            if Task.isCancelled || timeoutState.didTimeOut {
+                throw timeoutState.didTimeOut
+                    ? CodexAppServerClientError.timeout : CancellationError()
+            }
+            progress.markExecutableVerified()
             var iterator = source.makeAsyncIterator()
             try await typedHandshake(
                 prefix: prefix, credential: &currentCredential, codec: codec,
-                iterator: &iterator
+                iterator: &iterator, progress: progress
             )
             let threadRequestID = "\(prefix):probe:thread-start"
             try process.send(try codec.threadStartRequest(
@@ -522,8 +689,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
                     throw CodexTypedProtocolError.featureUnavailable
                 }
             }
-            await process.stop(onCleanupPending: onCleanupPending)
+            if probeStarted {
+                await process.stop(onCleanupPending: onCleanupPending)
+            }
             return .init(
+                state: .ready,
+                evidence: progress.snapshot(),
                 supportsOrdinaryTurns: observed.contains("thread/start")
                     && observed.contains("turn/start"),
                 supportsApps: observed.contains("app/list"),
@@ -531,9 +702,16 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 supportsSkills: observed.contains("skills/list")
             )
         } catch {
-            await process.stop(onCleanupPending: onCleanupPending)
-            if timeoutState.didTimeOut { throw CodexAppServerClientError.timeout }
-            throw error
+            if probeStarted {
+                await process.stop(onCleanupPending: onCleanupPending)
+            }
+            if Task.isCancelled { throw CancellationError() }
+            throw TypedProbeFailure(
+                underlying: timeoutState.didTimeOut
+                    ? CodexAppServerClientError.timeout : error,
+                evidence: progress.snapshot(),
+                timedOut: timeoutState.didTimeOut
+            )
         }
     }
 
@@ -1033,7 +1211,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         prefix: String,
         credential: inout CodexOAuthCredential,
         codec: CodexTypedProtocol,
-        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<Data, Error>.AsyncIterator,
+        progress: TypedHandshakeProgress? = nil
     ) async throws {
         let initializeID = "\(prefix):initialize"
         try process.send(try codec.initializeRequest(id: initializeID))
@@ -1043,6 +1222,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             codec: codec,
             iterator: &iterator
         )
+        progress?.markAppServerInitialized()
         try process.send(try codec.initializedNotification())
         let loginID = "\(prefix):login"
         try process.send(try bridge.loginRequest(id: loginID, credential: credential))
@@ -1052,6 +1232,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
             codec: codec,
             iterator: &iterator
         )
+        progress?.markAuthenticated()
     }
 
     private func awaitCapabilityResponse(
@@ -1118,6 +1299,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 continue
             }
             if case .requestError = message {
+                if case .initializeResponse = expected {
+                    throw CodexTypedProtocolError.initializeRejected
+                }
+                if case .loginResponse = expected {
+                    throw CodexTypedProtocolError.authenticationRequired
+                }
                 throw CodexTypedProtocolError.providerFailed
             }
             throw CodexTypedProtocolError.invalidSequence
@@ -1833,6 +2020,91 @@ public final class CodexAppServerClient: @unchecked Sendable {
         }
     }
 
+    private func localReadiness(
+        error: Error,
+        evidence: CodexTypedReadinessEvidence,
+        timedOut: Bool
+    ) -> CodexTypedReadiness {
+        let state: CodexTypedReadinessState
+        if timedOut {
+            state = .appServerUnavailable
+        } else if let error = error as? LiveProcessError {
+            switch error {
+            case .executableMissing: state = .executableMissing
+            case .executableRejected: state = .executableRejected
+            default: state = .appServerUnavailable
+            }
+        } else if let error = error as? CredentialBridgeError,
+                  error == .invalidCredential {
+            state = .localCredentialUnavailable
+        } else if let error = error as? CodexTypedProtocolError {
+            switch error {
+            case .authenticationRequired: state = .authenticationRequired
+            case .initializeRejected: state = .appServerUnavailable
+            default: state = .unsupportedProtocol
+            }
+        } else if let error = error as? CodexAppServerClientError {
+            switch error {
+            case .credentialRejected, .refreshUnavailable:
+                state = .authenticationRequired
+            case .wrongResponse, .unexpectedMessage:
+                state = .unsupportedProtocol
+            default:
+                state = .appServerUnavailable
+            }
+        } else if error is LiveProtocolError {
+            state = .unsupportedProtocol
+        } else {
+            state = .appServerUnavailable
+        }
+        return .init(state: state, evidence: evidence)
+    }
+
+    private func remoteReadiness(_ failure: TypedProbeFailure) -> CodexTypedReadiness {
+        let state: CodexTypedReadinessState
+        if failure.timedOut {
+            state = .remoteProbeTimedOut
+        } else if let error = failure.underlying as? LiveProcessError {
+            switch error {
+            case .executableMissing: state = .executableMissing
+            case .executableRejected: state = .executableRejected
+            default:
+                state = failure.evidence.authenticated
+                    ? .providerUnavailable : .appServerUnavailable
+            }
+        } else if let error = failure.underlying as? CredentialBridgeError,
+                  error == .invalidCredential {
+            state = .localCredentialUnavailable
+        } else if let error = failure.underlying as? CodexTypedProtocolError {
+            switch error {
+            case .authenticationRequired: state = .authenticationRequired
+            case .initializeRejected: state = .appServerUnavailable
+            case .featureUnavailable, .malformedJSON, .invalidField,
+                 .invalidSequence, .identifierTooLarge, .textTooLarge,
+                 .tooManyItems:
+                state = .unsupportedProtocol
+            case .providerFailed: state = .providerUnavailable
+            }
+        } else if let error = failure.underlying as? CodexAppServerClientError {
+            switch error {
+            case .credentialRejected, .refreshUnavailable:
+                state = .authenticationRequired
+            case .timeout: state = .remoteProbeTimedOut
+            case .wrongResponse, .unexpectedMessage:
+                state = .unsupportedProtocol
+            default:
+                state = failure.evidence.authenticated
+                    ? .providerUnavailable : .appServerUnavailable
+            }
+        } else if failure.underlying is LiveProtocolError {
+            state = .unsupportedProtocol
+        } else {
+            state = failure.evidence.authenticated
+                ? .providerUnavailable : .appServerUnavailable
+        }
+        return .init(state: state, evidence: failure.evidence)
+    }
+
     private func retainFailureStateIfNeeded() {
         state.locked { value in
             guard let identity = value.identity,
@@ -1845,15 +2117,106 @@ public final class CodexAppServerClient: @unchecked Sendable {
     }
 }
 
+public enum CodexTypedReadinessState: String, Equatable, Sendable {
+    case executableMissing = "executable_missing"
+    case executableRejected = "executable_rejected"
+    case localCredentialUnavailable = "local_credential_unavailable"
+    case authenticationRequired = "authentication_required"
+    case appServerUnavailable = "app_server_unavailable"
+    case unsupportedProtocol = "unsupported_protocol"
+    case remoteProbeTimedOut = "remote_probe_timed_out"
+    case providerUnavailable = "provider_unavailable"
+    case ready
+}
+
+public struct CodexTypedReadinessEvidence: Equatable, Sendable {
+    public let executableVerified: Bool
+    public let appServerInitialized: Bool
+    public let authenticated: Bool
+
+    public init(
+        executableVerified: Bool = false,
+        appServerInitialized: Bool = false,
+        authenticated: Bool = false
+    ) {
+        self.executableVerified = executableVerified
+        self.appServerInitialized = appServerInitialized
+        self.authenticated = authenticated
+    }
+}
+
 public struct CodexTypedReadiness: Equatable, Sendable {
     public static let minimumTestedRelease = "0.146.0"
 
+    public let state: CodexTypedReadinessState
+    public let evidence: CodexTypedReadinessEvidence
     public let supportsOrdinaryTurns: Bool
     public let supportsApps: Bool
     public let supportsMCPStatus: Bool
     public let supportsSkills: Bool
 
+    public init(
+        state: CodexTypedReadinessState,
+        evidence: CodexTypedReadinessEvidence = .init(),
+        supportsOrdinaryTurns: Bool = false,
+        supportsApps: Bool = false,
+        supportsMCPStatus: Bool = false,
+        supportsSkills: Bool = false
+    ) {
+        self.state = state
+        self.evidence = evidence
+        self.supportsOrdinaryTurns = supportsOrdinaryTurns
+        self.supportsApps = supportsApps
+        self.supportsMCPStatus = supportsMCPStatus
+        self.supportsSkills = supportsSkills
+    }
+
+    public init(
+        supportsOrdinaryTurns: Bool,
+        supportsApps: Bool,
+        supportsMCPStatus: Bool,
+        supportsSkills: Bool
+    ) {
+        self.init(
+            state: .ready,
+            evidence: .init(
+                executableVerified: true,
+                appServerInitialized: true,
+                authenticated: true
+            ),
+            supportsOrdinaryTurns: supportsOrdinaryTurns,
+            supportsApps: supportsApps,
+            supportsMCPStatus: supportsMCPStatus,
+            supportsSkills: supportsSkills
+        )
+    }
+
+    public var executableVerified: Bool { evidence.executableVerified }
+    public var appServerInitialized: Bool { evidence.appServerInitialized }
+    public var authenticated: Bool { evidence.authenticated }
+
+    public var ownerFacingStatus: String {
+        switch state {
+        case .executableMissing: return "Codex executable not found"
+        case .executableRejected: return "Codex executable rejected"
+        case .localCredentialUnavailable: return "Local credential unavailable"
+        case .authenticationRequired: return "Authentication required"
+        case .appServerUnavailable: return "Codex App Server unavailable"
+        case .unsupportedProtocol: return "Unsupported Codex App Server protocol"
+        case .remoteProbeTimedOut: return "Readiness probe timed out"
+        case .providerUnavailable: return "Provider unavailable"
+        case .ready: return "Ready"
+        }
+    }
+
     public var isReady: Bool {
-        supportsOrdinaryTurns && supportsApps && supportsMCPStatus && supportsSkills
+        state == .ready
+            && executableVerified
+            && appServerInitialized
+            && authenticated
+            && supportsOrdinaryTurns
+            && supportsApps
+            && supportsMCPStatus
+            && supportsSkills
     }
 }

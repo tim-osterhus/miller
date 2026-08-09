@@ -298,7 +298,7 @@ struct CodexAppServerProtocolTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
         #expect(clientInfo.keys.sorted() == ["name", "version"])
         #expect(clientInfo["name"] as? String == "miller")
-        #expect(clientInfo["version"] as? String == "0.1.0")
+        #expect(clientInfo["version"] as? String == MillerAppServerClientInfo.version)
         let capabilities = try #require(params["capabilities"] as? [String: Any])
         #expect(capabilities.keys.sorted() == ["experimentalApi"])
         #expect(capabilities["experimentalApi"] as? Bool == true)
