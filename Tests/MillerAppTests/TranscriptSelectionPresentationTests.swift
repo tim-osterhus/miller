@@ -77,6 +77,42 @@ struct TranscriptSelectionPresentationTests {
 
     @Test
     @MainActor
+    func oneMarkdownMessageKeepsInlineEmphasisInTheNativeSurface() {
+        let rendered = AssistantMarkdown.transcriptAttributedString(
+            "**Bold** and *italic* and `inline code`"
+        )
+        let boldLocation = (rendered.string as NSString).range(of: "Bold").location
+        let boldFont = rendered.attribute(
+            .font,
+            at: boldLocation,
+            effectiveRange: nil
+        ) as? NSFont
+        let italicLocation = (rendered.string as NSString).range(of: "italic").location
+        let italicFont = rendered.attribute(
+            .font,
+            at: italicLocation,
+            effectiveRange: nil
+        ) as? NSFont
+        let codeLocation = (rendered.string as NSString).range(of: "inline code").location
+        let codeFont = rendered.attribute(
+            .font,
+            at: codeLocation,
+            effectiveRange: nil
+        ) as? NSFont
+
+        #expect(
+            boldFont?.fontDescriptor.symbolicTraits.contains(.bold) == true
+        )
+        #expect(
+            italicFont?.fontDescriptor.symbolicTraits.contains(.italic) == true
+        )
+        #expect(
+            codeFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true
+        )
+    }
+
+    @Test
+    @MainActor
     func codeBlockKeepsMonospacedClippedParagraphMetadataForHorizontalScrolling() {
         let rendered = AssistantMarkdown.transcriptAttributedString(
             "```swift\nlet value = 1\n```"
@@ -92,6 +128,95 @@ struct TranscriptSelectionPresentationTests {
 
         #expect(font?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
         #expect(paragraph?.lineBreakMode == .byClipping)
+    }
+
+    @Test
+    @MainActor
+    func codeBlockKeepsPriorBackgroundAndPaddingPresentation() {
+        let rendered = AssistantMarkdown.transcriptAttributedString(
+            "```swift\nlet value = 1\n```"
+        )
+        let codeLocation = (rendered.string as NSString).range(of: "let value").location
+        let paragraph = rendered.attribute(
+            .paragraphStyle,
+            at: codeLocation,
+            effectiveRange: nil
+        ) as? NSParagraphStyle
+        let codeBlock = paragraph?.textBlocks.first
+
+        #expect(codeBlock?.backgroundColor != nil)
+        #expect(
+            codeBlock?.width(for: .padding, edge: .minX) == 8
+        )
+        #expect(
+            codeBlock?.width(for: .padding, edge: .maxX) == 8
+        )
+        #expect(
+            codeBlock?.width(for: .padding, edge: .minY) == 8
+        )
+        #expect(
+            codeBlock?.width(for: .padding, edge: .maxY) == 8
+        )
+    }
+
+    @Test
+    @MainActor
+    func multilineCodeKeepsLinesContiguousInsideThePaddedBlock() {
+        let rendered = AssistantMarkdown.transcriptAttributedString(
+            "```swift\nfirst line\nsecond line\n```"
+        )
+        let firstLocation = (rendered.string as NSString).range(of: "first line").location
+        let secondLocation = (rendered.string as NSString).range(of: "second line").location
+        let firstParagraph = rendered.attribute(
+            .paragraphStyle,
+            at: firstLocation,
+            effectiveRange: nil
+        ) as? NSParagraphStyle
+        let secondParagraph = rendered.attribute(
+            .paragraphStyle,
+            at: secondLocation,
+            effectiveRange: nil
+        ) as? NSParagraphStyle
+
+        #expect(firstParagraph?.paragraphSpacingBefore == 0)
+        #expect(firstParagraph?.paragraphSpacing == 0)
+        #expect(secondParagraph?.paragraphSpacing == 6)
+    }
+
+    @Test
+    @MainActor
+    func codeBlockPreservesTrailingBlankLines() {
+        let rendered = AssistantMarkdown.transcriptAttributedString(
+            "```swift\nfirst line\n\n```"
+        )
+
+        #expect(rendered.string == "swift\nfirst line\n")
+    }
+
+    @Test
+    @MainActor
+    func markdownBlocksKeepPriorParagraphSpacing() {
+        let rendered = AssistantMarkdown.transcriptAttributedString(
+            "# Heading\n- First\n> Quoted\nsecond paragraph"
+        )
+
+        for text in ["Heading", "•", "│", "second paragraph"] {
+            let location = (rendered.string as NSString).range(of: text).location
+            let paragraph = rendered.attribute(
+                .paragraphStyle,
+                at: location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle
+            #expect(paragraph?.paragraphSpacing == 6)
+        }
+
+        let headingLocation = (rendered.string as NSString).range(of: "Heading").location
+        let headingParagraph = rendered.attribute(
+            .paragraphStyle,
+            at: headingLocation,
+            effectiveRange: nil
+        ) as? NSParagraphStyle
+        #expect(headingParagraph?.paragraphSpacingBefore == 4)
     }
 
     @Test
@@ -178,9 +303,27 @@ struct TranscriptSelectionPresentationTests {
 
         #expect(conversation.contains("AssistantMarkdown.transcriptAttributedString"))
         #expect(conversation.contains(
-            "attributedText: AssistantMarkdown.transcriptAttributedString(source)"
+            "let rendered = AssistantMarkdown.transcriptAttributedString(source)"
         ))
+        #expect(conversation.contains("attributedText: rendered"))
         #expect(!conversation.contains("private func blockView("))
+    }
+
+    @Test
+    func assistantMarkdownUsesOneTruthfulMessageAccessibilityElement() {
+        let conversation = source(named: "ConversationView.swift")
+        let metadata = source(named: "TranscriptPresentationMetadata.swift")
+
+        #expect(conversation.contains(
+            "TranscriptAccessibilityMetadata.typedAssistant"
+        ))
+        #expect(conversation.contains(
+            "accessibilityLabel: metadata.transcriptElementLabel"
+        ))
+        #expect(!conversation.contains("typedAssistantBlock("))
+        #expect(!conversation.contains("blockIndex: 0"))
+        #expect(metadata.contains("static func typedAssistant("))
+        #expect(!metadata.contains("typedAssistantBlock("))
     }
 
     @Test
@@ -200,7 +343,9 @@ struct TranscriptSelectionPresentationTests {
         #expect(conversation.contains("ForEach(model.liveTranscriptTurns, id: \\.id)"))
         #expect(overlay.contains("ForEach(model.liveTranscriptTurns, id: \\.id)"))
         #expect(conversation.contains("TranscriptAccessibilityIdentifier.typedUser"))
-        #expect(conversation.contains("typedAssistantBlock("))
+        #expect(conversation.contains(
+            "TranscriptAccessibilityMetadata.typedAssistant"
+        ))
         #expect(shared.contains("TranscriptAccessibilityMetadata.live"))
     }
 

@@ -7,6 +7,42 @@ enum TranscriptTextAttribute {
     static let codeBlock = NSAttributedString.Key(
         "miller.transcript.code-block"
     )
+    static let codeBlockPadding: CGFloat = 8
+}
+
+final class TranscriptCodeTextBlock: NSTextBlock {
+    override init() {
+        super.init()
+        backgroundColor = NSColor.quaternarySystemFill
+        let absoluteValueType = NSTextBlock.ValueType(rawValue: 0)!
+        for edge in [NSRectEdge.minX, .maxX, .minY, .maxY] {
+            setWidth(
+                TranscriptTextAttribute.codeBlockPadding,
+                type: absoluteValueType,
+                for: .padding,
+                edge: edge
+            )
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func drawBackground(
+        withFrame frameRect: NSRect,
+        in controlView: NSView,
+        characterRange: NSRange,
+        layoutManager: NSLayoutManager
+    ) {
+        let color = backgroundColor ?? NSColor.quaternarySystemFill
+        color.setFill()
+        NSBezierPath(
+            roundedRect: frameRect,
+            xRadius: 6,
+            yRadius: 6
+        ).fill()
+    }
 }
 
 struct SelectableTranscriptSurface: View {
@@ -155,7 +191,9 @@ struct NativeTranscriptTextView: NSViewRepresentable {
                 )
             }
         }
-        return ceil(width + 8)
+        return ceil(
+            width + TranscriptTextAttribute.codeBlockPadding * 2
+        )
     }
 
     private func update(

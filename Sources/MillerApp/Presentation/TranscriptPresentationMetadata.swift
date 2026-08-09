@@ -95,12 +95,11 @@ enum TranscriptAccessibilityIdentifier {
         "\(prefix(surface)).typed.user.\(turnID.description)"
     }
 
-    static func typedAssistantBlock(
+    static func typedAssistant(
         surface: TranscriptSurfaceNamespace,
-        turnID: TurnID,
-        blockIndex: Int
+        turnID: TurnID
     ) -> String {
-        "\(prefix(surface)).typed.assistant.\(turnID.description).block.\(blockIndex)"
+        "\(prefix(surface)).typed.assistant.\(turnID.description)"
     }
 
     static func live(
@@ -126,6 +125,7 @@ enum TranscriptAccessibilityIdentifier {
 struct TranscriptAccessibilityMetadata: Equatable, Sendable {
     let roleLabel: String
     let transcriptElementIdentifier: String
+    let transcriptElementLabel: String?
 
     static func live(
         surface: TranscriptSurfaceNamespace,
@@ -137,7 +137,24 @@ struct TranscriptAccessibilityMetadata: Equatable, Sendable {
             transcriptElementIdentifier: TranscriptAccessibilityIdentifier.live(
                 surface: surface,
                 turnID: turnID
-            )
+            ),
+            transcriptElementLabel: nil
+        )
+    }
+
+    static func typedAssistant(
+        surface: TranscriptSurfaceNamespace,
+        turnID: TurnID,
+        visibleText: String
+    ) -> Self {
+        Self(
+            roleLabel: "Miller transcript",
+            transcriptElementIdentifier: TranscriptAccessibilityIdentifier
+                .typedAssistant(
+                    surface: surface,
+                    turnID: turnID
+                ),
+            transcriptElementLabel: "Miller response: \(visibleText)"
         )
     }
 

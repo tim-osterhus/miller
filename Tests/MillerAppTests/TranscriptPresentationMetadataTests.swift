@@ -213,10 +213,9 @@ struct TranscriptPresentationMetadataTests {
                 surface: .conversation,
                 turnID: turnID
             ),
-            TranscriptAccessibilityIdentifier.typedAssistantBlock(
+            TranscriptAccessibilityIdentifier.typedAssistant(
                 surface: .conversation,
-                turnID: turnID,
-                blockIndex: 0
+                turnID: turnID
             ),
             TranscriptAccessibilityIdentifier.live(
                 surface: .conversation,
@@ -230,10 +229,9 @@ struct TranscriptPresentationMetadataTests {
                 surface: .overlay,
                 turnID: turnID
             ),
-            TranscriptAccessibilityIdentifier.typedAssistantBlock(
+            TranscriptAccessibilityIdentifier.typedAssistant(
                 surface: .overlay,
-                turnID: turnID,
-                blockIndex: 0
+                turnID: turnID
             ),
             TranscriptAccessibilityIdentifier.live(
                 surface: .overlay,
@@ -296,6 +294,32 @@ struct TranscriptPresentationMetadataTests {
             assistant.transcriptElementIdentifier
                 != user.transcriptElementIdentifier
         )
+    }
+
+    @Test
+    func typedAssistantAccessibilityMetadataUsesMessageIdentityAndFullLabel() {
+        let turnID = TurnID(
+            rawValue: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        )
+        let metadata = TranscriptAccessibilityMetadata.typedAssistant(
+            surface: .conversation,
+            turnID: turnID,
+            visibleText: "Heading\n\nFirst paragraph"
+        )
+
+        #expect(
+            metadata.transcriptElementIdentifier
+                == TranscriptAccessibilityIdentifier.typedAssistant(
+                    surface: .conversation,
+                    turnID: turnID
+                )
+        )
+        #expect(metadata.roleLabel == "Miller transcript")
+        #expect(
+            metadata.transcriptElementLabel
+                == "Miller response: Heading\n\nFirst paragraph"
+        )
+        #expect(!metadata.transcriptElementIdentifier.contains(".block."))
     }
 
     private func transcriptTestDependencies(

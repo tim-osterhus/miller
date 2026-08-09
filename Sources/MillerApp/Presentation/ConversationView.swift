@@ -107,42 +107,62 @@ enum AssistantMarkdown {
         case let .heading(level, text):
             return inlineTranscriptText(
                 text,
-                font: .boldSystemFont(
-                    ofSize: level == 1 ? 22 : level == 2 ? 17 : 14
-                )
+                font: .systemFont(
+                    ofSize: level == 1 ? 22 : level == 2 ? 17 : 14,
+                    weight: .semibold
+                ),
+                paragraphStyle: headingParagraphStyle(level: level)
             )
         case let .paragraph(text):
             return inlineTranscriptText(text)
         case let .unorderedItem(text):
+            let paragraphStyle = listParagraphStyle()
             let rendered = NSMutableAttributedString(
                 string: "• ",
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                    .foregroundColor: NSColor.textColor,
+                    .paragraphStyle: paragraphStyle,
+                ]
             )
-            rendered.append(inlineTranscriptText(text))
+            rendered.append(
+                inlineTranscriptText(text, paragraphStyle: paragraphStyle)
+            )
             return rendered
         case let .orderedItem(marker, text):
+            let paragraphStyle = listParagraphStyle()
             let rendered = NSMutableAttributedString(
                 string: "\(marker) ",
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                    .foregroundColor: NSColor.textColor,
+                    .paragraphStyle: paragraphStyle,
+                ]
             )
-            rendered.append(inlineTranscriptText(text))
+            rendered.append(
+                inlineTranscriptText(text, paragraphStyle: paragraphStyle)
+            )
             return rendered
         case let .quote(text):
+            let paragraphStyle = quoteParagraphStyle()
             let rendered = NSMutableAttributedString(
                 string: "│ ",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
                     .foregroundColor: NSColor.secondaryLabelColor,
+                    .paragraphStyle: paragraphStyle,
                 ]
             )
             rendered.append(
                 inlineTranscriptText(
                     text,
-                    color: NSColor.secondaryLabelColor
+                    color: NSColor.secondaryLabelColor,
+                    paragraphStyle: paragraphStyle
                 )
             )
             return rendered
         case let .code(language, text):
+            let codeBlock = TranscriptCodeTextBlock()
             let rendered = NSMutableAttributedString()
             if let language {
                 rendered.append(
@@ -150,6 +170,10 @@ enum AssistantMarkdown {
                         language,
                         font: .systemFont(ofSize: NSFont.smallSystemFontSize),
                         color: NSColor.secondaryLabelColor,
+                        paragraphStyle: codeParagraphStyle(
+                            block: codeBlock,
+                            paragraphSpacing: 4
+                        ),
                         preserveMarkdown: false
                     )
                 )
@@ -161,11 +185,35 @@ enum AssistantMarkdown {
                     ofSize: NSFont.systemFontSize,
                     weight: .regular
                 ),
-                paragraphStyle: codeParagraphStyle(),
+                paragraphStyle: codeParagraphStyle(block: codeBlock),
                 preserveMarkdown: false
             )
             let codeRange = NSRange(location: rendered.length, length: code.length)
             rendered.append(code)
+            if code.length > 0 {
+                let lastLineStart = (code.string as NSString).range(
+                    of: "\n",
+                    options: .backwards
+                ).location
+                let finalLineStart = lastLineStart == NSNotFound
+                    ? 0
+                    : lastLineStart + 1
+                let finalLineLength = code.length - finalLineStart
+                if finalLineLength > 0 {
+                    let finalRange = NSRange(
+                        location: codeRange.location + finalLineStart,
+                        length: finalLineLength
+                    )
+                    rendered.addAttribute(
+                        .paragraphStyle,
+                        value: codeParagraphStyle(
+                            block: codeBlock,
+                            paragraphSpacing: 6
+                        ),
+                        range: finalRange
+                    )
+                }
+            }
             rendered.addAttribute(
                 TranscriptTextAttribute.codeBlock,
                 value: true,
@@ -202,19 +250,76 @@ enum AssistantMarkdown {
             ],
             range: NSRange(location: 0, length: mutable.length)
         )
+        let inlinePresentationIntent = NSAttributedString.Key(
+            "NSInlinePresentationIntent"
+        )
+        mutable.enumerateAttribute(
+            inlinePresentationIntent,
+            in: NSRange(location: 0, length: mutable.length)
+        ) { value, range, _ in
+            let rawValue = (value as? NSNumber)?.intValue ?? 0
+            guard rawValue != 0 else { return }
+            let inlineFont: NSFont
+            if rawValue & 4 != 0 {
+                inlineFont = NSFont.monospacedSystemFont(
+                    ofSize: font.pointSize,
+                    weight: .regular
+                )
+            } else if rawValue & 2 != 0 {
+                inlineFont = NSFontManager.shared.convert(
+                    font,
+                    toHaveTrait: .boldFontMask
+                )
+            } else if rawValue & 1 != 0 {
+                inlineFont = NSFontManager.shared.convert(
+                    font,
+                    toHaveTrait: .italicFontMask
+                )
+            } else {
+                return
+            }
+            mutable.addAttribute(.font, value: inlineFont, range: range)
+        }
         return mutable
     }
 
     private static func paragraphStyle() -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byWordWrapping
-        style.paragraphSpacing = 2
+        style.paragraphSpacing = 6
         return style
     }
 
-    private static func codeParagraphStyle() -> NSParagraphStyle {
+    private static func headingParagraphStyle(level: Int) -> NSParagraphStyle {
+        let style = paragraphStyle().mutableCopy() as! NSMutableParagraphStyle
+        if level == 1 {
+            style.paragraphSpacingBefore = 4
+        }
+        return style
+    }
+
+    private static func listParagraphStyle() -> NSParagraphStyle {
+        let style = paragraphStyle().mutableCopy() as! NSMutableParagraphStyle
+        style.firstLineHeadIndent = 8
+        style.headIndent = 8
+        return style
+    }
+
+    private static func quoteParagraphStyle() -> NSParagraphStyle {
+        let style = paragraphStyle().mutableCopy() as! NSMutableParagraphStyle
+        style.firstLineHeadIndent = 4
+        style.headIndent = 4
+        return style
+    }
+
+    private static func codeParagraphStyle(
+        block: NSTextBlock,
+        paragraphSpacing: CGFloat = 0
+    ) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byClipping
+        style.paragraphSpacing = paragraphSpacing
+        style.textBlocks = [block]
         return style
     }
 }
@@ -226,14 +331,16 @@ struct AssistantMarkdownView: View {
     let turnID: TurnID
 
     var body: some View {
+        let rendered = AssistantMarkdown.transcriptAttributedString(source)
+        let metadata = TranscriptAccessibilityMetadata.typedAssistant(
+            surface: surface,
+            turnID: turnID,
+            visibleText: rendered.string
+        )
         SelectableTranscriptSurface(
-            attributedText: AssistantMarkdown.transcriptAttributedString(source),
-            accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                .typedAssistantBlock(
-                    surface: surface,
-                    turnID: turnID,
-                    blockIndex: 0
-                ),
+            attributedText: rendered,
+            accessibilityIdentifier: metadata.transcriptElementIdentifier,
+            accessibilityLabel: metadata.transcriptElementLabel,
             selectionBegan: selectionBegan
         )
     }
