@@ -17,7 +17,16 @@ public enum CodexTypedProtocolError: Error, Equatable, Sendable {
 public enum MillerAppServerClientInfo: Sendable {
     public static let name = "miller"
     public static let title = "Miller"
-    public static let version = "0.1.1"
+    public static var version: String {
+        version(for: Bundle.main.infoDictionary ?? [:])
+    }
+
+    static func version(for info: [String: Any]) -> String {
+        guard let value = info["CFBundleShortVersionString"] as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return "development" }
+        return value
+    }
 }
 
 public struct CodexTypedContextMessage: Equatable, Sendable {
@@ -353,8 +362,24 @@ public struct CodexTypedProtocol: Sendable {
             return .requestError(id: id, code: code)
         }
         let result = try requireObject(root["result"])
-        if id.hasSuffix(":initialize") { return .initializeResponse(id: id) }
-        if id.hasSuffix(":login") { return .loginResponse(id: id) }
+        if id.hasSuffix(":initialize") {
+            try requireExactFields(
+                result,
+                required: ["codexHome", "platformFamily", "platformOs", "userAgent"]
+            )
+            try validateAbsolutePath(try text(result, key: "codexHome"))
+            _ = try text(result, key: "platformFamily")
+            _ = try text(result, key: "platformOs")
+            _ = try text(result, key: "userAgent")
+            return .initializeResponse(id: id)
+        }
+        if id.hasSuffix(":login") {
+            try requireExactFields(result, required: ["type"])
+            guard try text(result, key: "type") == "chatgptAuthTokens" else {
+                throw CodexTypedProtocolError.invalidField
+            }
+            return .loginResponse(id: id)
+        }
         if id.hasSuffix(":thread") || id.hasSuffix(":thread-start") {
             let thread = try requireObject(result["thread"])
             return .threadStartResponse(
@@ -591,6 +616,15 @@ public struct CodexTypedProtocol: Sendable {
             throw CodexTypedProtocolError.invalidField
         }
         return value
+    }
+
+    private func requireExactFields(
+        _ object: [String: Any],
+        required: Set<String>
+    ) throws {
+        guard Set(object.keys) == required else {
+            throw CodexTypedProtocolError.invalidField
+        }
     }
 
     private func requireArray(_ value: Any?) throws -> [Any] {

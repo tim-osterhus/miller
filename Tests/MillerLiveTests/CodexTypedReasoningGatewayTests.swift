@@ -726,6 +726,33 @@ struct CodexTypedReasoningGatewayTests {
         #expect(unsupportedResult.state == .unsupportedProtocol)
         #expect(unsupportedResult.executableVerified)
         #expect(!unsupportedResult.appServerInitialized)
+
+        for mode in [
+            "typed-readiness-initialize-empty",
+            "typed-readiness-initialize-wrong",
+        ] {
+            let malformedInitialize = try TypedClientFactory(mode: mode).makeClient()
+            let result = try await malformedInitialize.probeTypedReadiness(
+                credential: credential, timeout: .seconds(2)
+            )
+            #expect(result.state == .unsupportedProtocol)
+            #expect(result.executableVerified)
+            #expect(!result.appServerInitialized)
+        }
+
+        for mode in [
+            "typed-readiness-login-empty",
+            "typed-readiness-login-wrong",
+        ] {
+            let malformedLogin = try TypedClientFactory(mode: mode).makeClient()
+            let result = try await malformedLogin.probeTypedReadiness(
+                credential: credential, timeout: .seconds(2)
+            )
+            #expect(result.state == .unsupportedProtocol)
+            #expect(result.executableVerified)
+            #expect(result.appServerInitialized)
+            #expect(!result.authenticated)
+        }
     }
 
     @Test
@@ -813,6 +840,70 @@ struct CodexTypedReasoningGatewayTests {
         task.cancel()
         await #expect(throws: CancellationError.self) { _ = try await task.value }
         try await waitUntil { !factory.latestProcessIsRunning }
+        #expect(!FileManager.default.fileExists(atPath: factory.latestRoot.path))
+    }
+
+    @Test
+    func remoteProbeAdmissionRejectsConcurrentTypedUseWithoutSharingItsProcess() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/typed-probe-admission-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let factory = TypedClientFactory(
+            mode: "typed-probe-slow", extraArguments: [marker.path]
+        )
+        let client = try factory.makeClient()
+        let probe = Task {
+            try await client.probeTypedRemote(
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                timeout: .seconds(2)
+            )
+        }
+        try await waitUntil { FileManager.default.fileExists(atPath: marker.path) }
+
+        do {
+            for try await _ in client.typedEvents(
+                requestID: "concurrent-typed",
+                credential: credential,
+                model: "gpt-5.6-terra",
+                cwd: repository.path,
+                context: [],
+                userText: "must not share the probe"
+            ) {
+                Issue.record("typed use unexpectedly reached the shared process")
+            }
+            Issue.record("concurrent typed use unexpectedly succeeded")
+        } catch let error as CodexAppServerClientError {
+            #expect(error == .sessionAlreadyActive)
+        }
+        _ = try await probe.value
+        #expect(!factory.latestProcessIsRunning)
+        #expect(!FileManager.default.fileExists(atPath: factory.latestRoot.path))
+    }
+
+    @Test
+    func remoteProbeCannotReturnReadyAfterItsCeilingAndStillCleansUp() async throws {
+        let marker = repository.appendingPathComponent(
+            ".artifacts/typed-probe-late-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let factory = TypedClientFactory(
+            mode: "typed-probe-late", extraArguments: [marker.path]
+        )
+        let client = try factory.makeClient()
+
+        let result = try await client.probeTypedRemote(
+            credential: credential,
+            model: "gpt-5.6-terra",
+            cwd: repository.path,
+            timeout: .milliseconds(100)
+        )
+
+        #expect(result.state == .remoteProbeTimedOut)
+        #expect(result.ownerFacingStatus == "Readiness probe timed out")
+        #expect(!factory.latestProcessIsRunning)
         #expect(!FileManager.default.fileExists(atPath: factory.latestRoot.path))
     }
 

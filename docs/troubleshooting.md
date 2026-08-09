@@ -16,8 +16,10 @@ signed, non-arm64, or identity-mismatched executables.
 If the message is `Readiness probe timed out`, the executable, App Server, and
 authentication facts already established remain valid. The optional remote
 provider/capability probe reached its 30-second ceiling; it is not evidence
-that Codex is absent or protocol-incompatible. Retry the probe when the
-provider or network is available. A provider error after successful local
+that Codex is absent or protocol-incompatible. Ordinary Settings loads do not
+run this probe. `Refresh Codex` or `Retry helper readiness` runs one bounded
+probe and caches that result until the next credential or profile mutation.
+A provider error after successful local
 initialization is shown as `Provider unavailable`, and ordinary typed use is
 not poisoned by that optional probe.
 

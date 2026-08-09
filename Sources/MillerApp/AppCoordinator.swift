@@ -2250,14 +2250,42 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             }
         )
         let codexGateway: any ReasoningGateway
+        let typedRoot = cacheURL.appendingPathComponent(
+            "typed-codex", isDirectory: true
+        )
+        let makeSettingsCodexClient: (@Sendable () throws -> CodexAppServerClient)?
         if let codexExecutableURL = runtimeSelection?.executableURL {
-            let typedRoot = cacheURL.appendingPathComponent(
-                "typed-codex", isDirectory: true
-            )
             try FileManager.default.createDirectory(
                 at: typedRoot,
                 withIntermediateDirectories: true
             )
+            makeSettingsCodexClient = { [environment, runtimeVerifier,
+                                          typedCredentialRefresher, typedRoot] in
+                CodexAppServerClient(
+                    process: CodexAppServerProcess(
+                        configuration: try Self.typedCodexProcessConfiguration(
+                            executableURL: codexExecutableURL,
+                            temporaryParentURL: typedRoot,
+                            environment: environment,
+                            spawnedProcessVerifier: { pid in
+                                try runtimeVerifier.verifyRunningProcess(
+                                    pid: pid,
+                                    expectedExecutableURL: codexExecutableURL
+                                )
+                            }
+                        )
+                    ),
+                    refreshProvider: { accountID in
+                        try await typedCredentialRefresher.refresh(
+                            accountID: accountID
+                        )
+                    }
+                )
+            }
+        } else {
+            makeSettingsCodexClient = nil
+        }
+        if let codexExecutableURL = runtimeSelection?.executableURL {
             let makeCodexClient: @Sendable () throws -> CodexAppServerClient = {
                 [capabilityController, capabilityBridgeBox,
                  capabilityProviderCallbackAuthorityBox] in
@@ -2377,7 +2405,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             databaseURL: URL(fileURLWithPath: databasePath),
             cacheURL: cacheURL,
             codexTypedReadiness: { [repository] profile in
-                guard let codexExecutableURL = runtimeSelection?.executableURL else {
+                guard let makeSettingsCodexClient else {
                     let state: CodexTypedReadinessState = switch runtimeResolution {
                     case .rejected: .executableRejected
                     case .missing, .available: .executableMissing
@@ -2387,27 +2415,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 let loader = GPTLiveCredentialLoader(
                     load: { [credentialStore] reference in
                         try await credentialStore.load(for: reference)
-                    }
-                )
-                let typedRoot = cacheURL.appendingPathComponent(
-                    "typed-codex", isDirectory: true
-                )
-                let client = CodexAppServerClient(
-                    process: CodexAppServerProcess(
-                        configuration: try Self.typedCodexProcessConfiguration(
-                            executableURL: codexExecutableURL,
-                            temporaryParentURL: typedRoot,
-                            environment: environment,
-                            spawnedProcessVerifier: { pid in
-                                try runtimeVerifier.verifyRunningProcess(
-                                    pid: pid,
-                                    expectedExecutableURL: codexExecutableURL
-                                )
-                            }
-                        )
-                    ),
-                    refreshProvider: { accountID in
-                        try await typedCredentialRefresher.refresh(accountID: accountID)
                     }
                 )
                 guard try await repository.credentialIsInvalidated(
@@ -2421,9 +2428,40 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 } catch {
                     return .init(state: .localCredentialUnavailable)
                 }
-                return try await client.probeTypedReadiness(
+                return try await makeSettingsCodexClient().probeTypedReadiness(
                     credential: credential,
                     timeout: .seconds(10)
+                )
+            },
+            codexTypedRemoteReadiness: { [repository] profile in
+                guard let makeSettingsCodexClient else {
+                    let state: CodexTypedReadinessState = switch runtimeResolution {
+                    case .rejected: .executableRejected
+                    case .missing, .available: .executableMissing
+                    }
+                    return .init(state: state)
+                }
+                guard try await repository.credentialIsInvalidated(
+                    reference: profile.credentialReference
+                ) == false else {
+                    return .init(state: .localCredentialUnavailable)
+                }
+                let loader = GPTLiveCredentialLoader(
+                    load: { [credentialStore] reference in
+                        try await credentialStore.load(for: reference)
+                    }
+                )
+                let credential: CodexOAuthCredential
+                do {
+                    credential = try await loader.load(profile: profile)
+                } catch {
+                    return .init(state: .localCredentialUnavailable)
+                }
+                return try await makeSettingsCodexClient().probeTypedRemote(
+                    credential: credential,
+                    model: profile.model,
+                    cwd: typedRoot.path,
+                    timeout: .seconds(30)
                 )
             }
         )
@@ -2833,9 +2871,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     )
                     return DiagnosticsSettingsSnapshot(
                         componentVersions: [
-                            "Miller": Bundle.main.object(
-                                forInfoDictionaryKey: "CFBundleShortVersionString"
-                            ) as? String ?? "development",
+                            "Miller": MillerAppServerClientInfo.version,
                             "MCP SDK": "0.12.1",
                             "Pi overlay": "0.82.0-a3",
                         ],
@@ -3194,7 +3230,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     }
 }
 
-private actor ProviderSettingsController {
+actor ProviderSettingsController {
     private let repository: SQLiteConversationRepository
     private let credentials: KeychainCredentialStore
     private let credentialCoordinator: CredentialCoordinator
@@ -3206,7 +3242,14 @@ private actor ProviderSettingsController {
     private let codexTypedReadiness: @Sendable (
         ProviderProfile
     ) async throws -> CodexTypedReadiness
+    private let codexTypedRemoteReadiness: @Sendable (
+        ProviderProfile
+    ) async throws -> CodexTypedReadiness
     private var cachedCodexReadiness: (profileID: UUID, result: CodexTypedReadiness)?
+    private var cachedRemoteCodexReadiness: (
+        profileID: UUID, result: CodexTypedReadiness
+    )?
+    private var readinessGeneration = 0
 
     init(
         repository: SQLiteConversationRepository,
@@ -3215,6 +3258,9 @@ private actor ProviderSettingsController {
         databaseURL: URL,
         cacheURL: URL,
         codexTypedReadiness: @escaping @Sendable (
+            ProviderProfile
+        ) async throws -> CodexTypedReadiness,
+        codexTypedRemoteReadiness: @escaping @Sendable (
             ProviderProfile
         ) async throws -> CodexTypedReadiness
     ) {
@@ -3235,6 +3281,26 @@ private actor ProviderSettingsController {
         self.databaseURL = databaseURL
         self.cacheURL = cacheURL
         self.codexTypedReadiness = codexTypedReadiness
+        self.codexTypedRemoteReadiness = codexTypedRemoteReadiness
+    }
+
+    private func invalidateCodexReadiness() {
+        cachedCodexReadiness = nil
+        cachedRemoteCodexReadiness = nil
+        readinessGeneration &+= 1
+    }
+
+    private func remoteReadiness(
+        for profile: ProviderProfile
+    ) async -> CodexTypedReadiness {
+        do {
+            return try await codexTypedRemoteReadiness(profile)
+        } catch let error as GPTLiveCredentialError
+            where error == .invalidCredential {
+            return .init(state: .localCredentialUnavailable)
+        } catch {
+            return .init(state: .appServerUnavailable)
+        }
     }
 
     func snapshot() async throws -> ProviderSettingsSnapshot {
@@ -3253,16 +3319,10 @@ private actor ProviderSettingsController {
         }
         let codexModels = catalog?.models ?? []
         let codexDefaultModel = catalog?.defaultModel ?? ""
-        do {
-            _ = try await credentials.load(for: selected.credentialReference)
-        } catch CredentialError.itemNotFound {
-            return .init(
-                profiles: profiles.map(ProviderSettingsProfile.init),
-                readiness: "Authentication required",
-                codexModels: codexModels,
-                codexDefaultModel: codexDefaultModel
-            )
-        } catch {
+        if try await repository.credentialIsInvalidated(
+            reference: selected.credentialReference
+        ) {
+            invalidateCodexReadiness()
             return .init(
                 profiles: profiles.map(ProviderSettingsProfile.init),
                 readiness: "Local credential unavailable",
@@ -3270,38 +3330,50 @@ private actor ProviderSettingsController {
                 codexDefaultModel: codexDefaultModel
             )
         }
-        if try await repository.credentialIsInvalidated(
-            reference: selected.credentialReference
-        ) {
+        do {
+            _ = try await credentials.load(for: selected.credentialReference)
+        } catch {
+            invalidateCodexReadiness()
             return .init(
                 profiles: profiles.map(ProviderSettingsProfile.init),
-                readiness: "Authentication required",
+                readiness: "Local credential unavailable",
                 codexModels: codexModels,
                 codexDefaultModel: codexDefaultModel
             )
         }
         if selected.kind == .codexOAuth {
             let observed: CodexTypedReadiness
-            if let cached = cachedCodexReadiness,
+            if let cached = cachedRemoteCodexReadiness,
+               cached.profileID == selected.id
+            {
+                observed = cached.result
+            } else if let cached = cachedCodexReadiness,
                cached.profileID == selected.id
             {
                 observed = cached.result
             } else {
+                let generation = readinessGeneration
                 do {
                     observed = try await codexTypedReadiness(selected)
-                    cachedCodexReadiness = (selected.id, observed)
+                    if readinessGeneration == generation {
+                        cachedCodexReadiness = (selected.id, observed)
+                    }
                 } catch let error as GPTLiveCredentialError
                     where error == .invalidCredential {
                     let result = CodexTypedReadiness(
                         state: .localCredentialUnavailable
                     )
-                    cachedCodexReadiness = (selected.id, result)
+                    if readinessGeneration == generation {
+                        cachedCodexReadiness = (selected.id, result)
+                    }
                     observed = result
                 } catch {
                     let result = CodexTypedReadiness(
                         state: .appServerUnavailable
                     )
-                    cachedCodexReadiness = (selected.id, result)
+                    if readinessGeneration == generation {
+                        cachedCodexReadiness = (selected.id, result)
+                    }
                     observed = result
                 }
             }
@@ -3333,6 +3405,8 @@ private actor ProviderSettingsController {
     }
 
     func saveCodexModel(_ rawModel: String) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         guard let existing = try await repository.selectedProviderProfile(),
               existing.kind == .codexOAuth
         else {
@@ -3359,6 +3433,8 @@ private actor ProviderSettingsController {
         _ input: ProviderSettingsInput,
         hasActiveTurn: Bool
     ) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         guard !hasActiveTurn else { throw ProviderProfileError.activeTurn }
         let profiles = try await repository.providerProfiles()
         let existing = input.profileID.flatMap { id in
@@ -3411,12 +3487,15 @@ private actor ProviderSettingsController {
     }
 
     func select(_ id: UUID, hasActiveTurn: Bool) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         try await profileService.selectProfile(id: id, hasActiveTurn: hasActiveTurn)
-        cachedCodexReadiness = nil
         _ = try await credentialCoordinator.restoreSelectedProfile()
     }
 
     func beginCodexLogin(hasActiveTurn: Bool) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         guard !hasActiveTurn else { throw ProviderProfileError.activeTurn }
         let catalog = try await gatewayCredentials.codexModelCatalog()
         guard !catalog.defaultModel.isEmpty else {
@@ -3470,6 +3549,7 @@ private actor ProviderSettingsController {
     }
 
     func refreshCodexAuthentication(hasActiveTurn: Bool) async throws {
+        invalidateCodexReadiness()
         guard !hasActiveTurn else { throw ProviderProfileError.activeTurn }
         guard let profile = try await repository.selectedProviderProfile(),
               profile.kind == .codexOAuth
@@ -3489,18 +3569,36 @@ private actor ProviderSettingsController {
                 )
             }
         )
+        let generation = readinessGeneration
+        let observed = await remoteReadiness(for: profile)
+        if readinessGeneration == generation {
+            cachedRemoteCodexReadiness = (profile.id, observed)
+        }
     }
 
     func restoreSelectedProfile() async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         _ = try await credentialCoordinator.restoreSelectedProfile()
     }
 
     func retryReadiness() async throws -> ProviderSettingsSnapshot {
-        cachedCodexReadiness = nil
+        invalidateCodexReadiness()
+        if let selected = try await repository.selectedProviderProfile(),
+           selected.kind == .codexOAuth
+        {
+            let generation = readinessGeneration
+            let observed = await remoteReadiness(for: selected)
+            if readinessGeneration == generation {
+                cachedRemoteCodexReadiness = (selected.id, observed)
+            }
+        }
         return try await snapshot()
     }
 
     func localLogout(hasActiveTurn: Bool) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         guard let selected = try await repository.selectedProviderProfile()
         else {
             throw ProviderProfileError.profileNotFound
@@ -3512,6 +3610,8 @@ private actor ProviderSettingsController {
     }
 
     func delete(_ id: UUID, hasActiveTurn: Bool) async throws {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         guard !hasActiveTurn else { throw ProviderProfileError.activeTurn }
         guard let profile = try await repository.providerProfiles().first(where: {
             $0.id == id
@@ -3528,6 +3628,8 @@ private actor ProviderSettingsController {
     }
 
     func reset() async -> ResetResult {
+        invalidateCodexReadiness()
+        defer { invalidateCodexReadiness() }
         let service = ResetService(
             databaseURL: databaseURL,
             cacheURLs: [cacheURL],

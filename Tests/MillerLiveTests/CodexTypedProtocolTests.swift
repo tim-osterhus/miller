@@ -44,6 +44,85 @@ struct CodexTypedProtocolTests {
         #expect(liveInfo["version"] as? String == MillerAppServerClientInfo.version)
         #expect((typedInfo["version"] as? String) == (liveInfo["version"] as? String))
     }
+
+    @Test
+    func clientVersionReadsBuildMetadataAndUsesDevelopmentFallback() {
+        #expect(MillerAppServerClientInfo.version(for: [
+            "CFBundleShortVersionString": "0.1.2",
+        ]) == "0.1.2")
+        #expect(MillerAppServerClientInfo.version(for: [
+            "CFBundleShortVersionString": "",
+        ]) == "development")
+        #expect(MillerAppServerClientInfo.version(for: [:]) == "development")
+    }
+
+    @Test
+    func typedHandshakeRequiresObservedInitializeAndLoginShapes() throws {
+        let initialize = try codec.decode(frame([
+            "id": "typed:initialize",
+            "result": [
+                "codexHome": "/private/tmp/codex",
+                "platformFamily": "unix",
+                "platformOs": "macos",
+                "userAgent": "codex",
+            ],
+        ]))
+        #expect(initialize == .initializeResponse(id: "typed:initialize"))
+
+        let login = try codec.decode(frame([
+            "id": "typed:login",
+            "result": ["type": "chatgptAuthTokens"],
+        ]))
+        #expect(login == .loginResponse(id: "typed:login"))
+
+        let invalidInitializeResults: [[String: Any]] = [
+            [:],
+            ["codexHome": "/private/tmp/codex"],
+            [
+                "codexHome": "relative",
+                "platformFamily": "unix",
+                "platformOs": "macos",
+                "userAgent": "codex",
+            ],
+            [
+                "codexHome": "/private/tmp/codex",
+                "platformFamily": 7,
+                "platformOs": "macos",
+                "userAgent": "codex",
+            ],
+            [
+                "codexHome": "/private/tmp/codex",
+                "platformFamily": "unix",
+                "platformOs": "macos",
+                "userAgent": "codex",
+                "future": true,
+            ],
+        ]
+        for result in invalidInitializeResults {
+            #expect(throws: CodexTypedProtocolError.invalidField) {
+                _ = try codec.decode(frame([
+                    "id": "typed:initialize",
+                    "result": result,
+                ]))
+            }
+        }
+
+        let invalidLoginResults: [[String: Any]] = [
+            [:],
+            ["type": "apikey"],
+            ["type": 7],
+            ["type": "chatgptAuthTokens", "future": true],
+        ]
+        for result in invalidLoginResults {
+            #expect(throws: CodexTypedProtocolError.invalidField) {
+                _ = try codec.decode(frame([
+                    "id": "typed:login",
+                    "result": result,
+                ]))
+            }
+        }
+    }
+
     private let codec = CodexTypedProtocol(
         maximumIdentifierBytes: 64,
         maximumTextBytes: 128,

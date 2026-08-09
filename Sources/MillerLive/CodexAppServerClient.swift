@@ -87,6 +87,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         var stopBeforeAdmission: LiveSessionIdentity?
         var stopAcknowledged = false
         var sessionAdmitted = false
+        var processAdmission = false
         var realtimeStarted = false
         var peerConnected = false
         var peerAdmissionAborted = false
@@ -108,11 +109,18 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
     private final class StartupTimeoutState: @unchecked Sendable {
         private let lock = NSLock()
+        private let deadline: ContinuousClock.Instant?
         private var timedOut = false
         private var started = false
+        private var completed = false
+
+        init(timeout: Duration? = nil) {
+            deadline = timeout.map { ContinuousClock.now.advanced(by: $0) }
+        }
 
         func markTimedOut() {
             lock.lock(); defer { lock.unlock() }
+            guard !completed else { return }
             timedOut = true
         }
 
@@ -123,12 +131,22 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
         var didTimeOut: Bool {
             lock.lock(); defer { lock.unlock() }
-            return timedOut
+            guard !completed else { return timedOut }
+            return timedOut || (deadline.map { ContinuousClock.now >= $0 } ?? false)
         }
 
         var didStart: Bool {
             lock.lock(); defer { lock.unlock() }
             return started
+        }
+
+        func markCompletedBeforeDeadline() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !timedOut,
+                  deadline.map({ ContinuousClock.now < $0 }) ?? true
+            else { return false }
+            completed = true
+            return true
         }
     }
 
@@ -213,6 +231,21 @@ public final class CodexAppServerClient: @unchecked Sendable {
         state.locked { $0.typedActive && $0.typedThreadID != nil && $0.typedTurnID != nil }
     }
 
+    private func admitProcess() -> Bool {
+        state.locked { value in
+            guard !value.processAdmission,
+                  !value.sessionAdmitted,
+                  !value.typedActive
+            else { return false }
+            value.processAdmission = true
+            return true
+        }
+    }
+
+    private func releaseProcessAdmission() {
+        state.locked { $0.processAdmission = false }
+    }
+
     public func inventoryCapabilities(
         requestID: String,
         credential: CodexOAuthCredential,
@@ -222,12 +255,21 @@ public final class CodexAppServerClient: @unchecked Sendable {
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) async throws -> CapabilityCatalogSnapshot {
         let admitted = state.locked { value -> Bool in
-            guard !value.typedActive, !value.sessionAdmitted else { return false }
+            guard !value.processAdmission,
+                  !value.typedActive,
+                  !value.sessionAdmitted
+            else { return false }
+            value.processAdmission = true
             value.typedActive = true
             return true
         }
         guard admitted else { throw CodexAppServerClientError.sessionAlreadyActive }
-        defer { state.locked { $0.typedActive = false } }
+        defer {
+            state.locked {
+                $0.typedActive = false
+                $0.processAdmission = false
+            }
+        }
 
         let timeoutState = StartupTimeoutState()
         let watchdog = Task {
@@ -440,8 +482,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
         timeout: Duration = .seconds(10),
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) async throws -> CodexTypedReadiness {
+        guard admitProcess() else {
+            throw CodexAppServerClientError.sessionAlreadyActive
+        }
+        defer { releaseProcessAdmission() }
         let progress = TypedHandshakeProgress()
-        let timeoutState = StartupTimeoutState()
+        let timeoutState = StartupTimeoutState(timeout: timeout)
         let watchdog = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             timeoutState.markTimedOut()
@@ -471,6 +517,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
                 if probeStarted {
                     await process.stop(onCleanupPending: onCleanupPending)
                 }
+                guard timeoutState.markCompletedBeforeDeadline() else {
+                    throw CodexAppServerClientError.timeout
+                }
                 return .init(state: .ready, evidence: progress.snapshot())
             } catch {
                 if probeStarted {
@@ -495,7 +544,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         timeout: Duration = .seconds(30),
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) async throws -> CodexTypedReadiness {
-        let startState = StartupTimeoutState()
+        guard admitProcess() else {
+            throw CodexAppServerClientError.sessionAlreadyActive
+        }
+        defer { releaseProcessAdmission() }
+        let startState = StartupTimeoutState(timeout: timeout)
         return try await withTaskCancellationHandler(operation: {
             do {
                 return try await runTypedRemoteProbe(
@@ -525,7 +578,11 @@ public final class CodexAppServerClient: @unchecked Sendable {
         timeout: Duration = .seconds(30),
         onCleanupPending: @escaping @Sendable () async -> Void = {}
     ) async throws -> CodexTypedReadiness {
-        let startState = StartupTimeoutState()
+        guard admitProcess() else {
+            throw CodexAppServerClientError.sessionAlreadyActive
+        }
+        defer { releaseProcessAdmission() }
+        let startState = StartupTimeoutState(timeout: timeout)
         return try await withTaskCancellationHandler(operation: {
             do {
                 return try await runTypedRemoteProbe(
@@ -691,6 +748,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
             }
             if probeStarted {
                 await process.stop(onCleanupPending: onCleanupPending)
+            }
+            guard timeoutState.markCompletedBeforeDeadline() else {
+                throw CodexAppServerClientError.timeout
             }
             return .init(
                 state: .ready,
@@ -914,14 +974,19 @@ public final class CodexAppServerClient: @unchecked Sendable {
             throw error
         }
         try state.locked {
-            guard !$0.sessionAdmitted else {
+            guard !$0.sessionAdmitted,
+                  !$0.typedActive,
+                  !$0.processAdmission
+            else {
                 throw CodexAppServerClientError.sessionAlreadyActive
             }
             $0.sessionAdmitted = true
+            $0.processAdmission = true
         }
         defer {
             state.locked {
                 $0.sessionAdmitted = false
+                $0.processAdmission = false
                 $0.identity = nil
             }
         }
@@ -973,8 +1038,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
         emit: @escaping @Sendable (CodexTypedMessage) -> Void
     ) async throws {
         let admitted = state.locked { value -> Bool in
-            guard !value.typedActive, !value.sessionAdmitted else { return false }
+            guard !value.typedActive,
+                  !value.sessionAdmitted,
+                  !value.processAdmission
+            else { return false }
             value.typedActive = true
+            value.processAdmission = true
             value.typedThreadID = nil
             value.typedTurnID = nil
             value.typedInterruptID = nil
@@ -984,6 +1053,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         defer {
             state.locked {
                 $0.typedActive = false
+                $0.processAdmission = false
                 $0.typedThreadID = nil
                 $0.typedTurnID = nil
                 $0.typedInterruptID = nil

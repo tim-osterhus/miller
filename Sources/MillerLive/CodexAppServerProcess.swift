@@ -217,6 +217,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
 
     private let configuration: Configuration
     private let state = State()
+    private let startLock = NSLock()
 
     public init(configuration: Configuration) { self.configuration = configuration }
 
@@ -236,6 +237,8 @@ public final class CodexAppServerProcess: @unchecked Sendable {
     }
 
     public func start() throws -> AsyncThrowingStream<Data, Error> {
+        startLock.lock()
+        defer { startLock.unlock() }
         guard !isRunning else { throw LiveProcessError.processUnavailable }
         guard FileManager.default.isExecutableFile(atPath: configuration.executableURL.path)
         else { throw LiveProcessError.executableMissing }

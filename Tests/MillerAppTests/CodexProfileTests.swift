@@ -1,9 +1,19 @@
 import AppKit
 import Foundation
 import MillerCore
+import MillerGateway
 import MillerStorage
 import Testing
 @testable import MillerApp
+
+private actor ReadinessCallCounts {
+    private var local = 0
+    private var remote = 0
+
+    func recordLocal() { local += 1 }
+    func recordRemote() { remote += 1 }
+    func values() -> (local: Int, remote: Int) { (local, remote) }
+}
 
 @Suite
 @MainActor
@@ -107,6 +117,146 @@ struct CodexProfileTests {
         #expect(preserved?.id == profile.id)
         #expect(preserved?.model == custom)
         #expect(preserved?.credentialReference == profile.credentialReference)
+    }
+
+    @Test
+    func missingSelectedCredentialProjectsLocalCredentialUnavailable() async throws {
+        _ = NSApplication.shared
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let profile = try ProviderProfile(
+            kind: .openAICompatible,
+            label: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            model: "deepseek-chat",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        await repository.close()
+
+        let coordinator = try AppCoordinator(environment: environment(root, database: database))
+        await coordinator.model.refreshProviderSettings()
+        #expect(coordinator.model.providerStatus == "Local credential unavailable")
+        await coordinator.shutdown()
+    }
+
+    @Test
+    func invalidatedSelectedCredentialProjectsLocalCredentialUnavailable() async throws {
+        _ = NSApplication.shared
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let credentialStore = KeychainCredentialStore()
+        let profile = try ProviderProfile(
+            kind: .openAICompatible,
+            label: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            model: "deepseek-chat",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        defer { Task { try? await credentialStore.delete(for: profile.credentialReference) } }
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        try await credentialStore.store(
+            CredentialEnvelope(
+                providerKind: .openAICompatible,
+                payload: Data("{\"kind\":\"api_key\",\"key\":\"test\"}".utf8)
+            ),
+            for: profile.credentialReference
+        )
+        try await repository.setCredentialInvalidated(
+            true,
+            reference: profile.credentialReference
+        )
+        await repository.close()
+
+        let coordinator = try AppCoordinator(environment: environment(root, database: database))
+        await coordinator.model.refreshProviderSettings()
+        #expect(coordinator.model.providerStatus == "Local credential unavailable")
+        await coordinator.shutdown()
+    }
+
+    @Test
+    func retryPerformsOneCachedRemoteProbeAndMutationsInvalidateIt() async throws {
+        _ = NSApplication.shared
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let cache = root.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex OAuth",
+            baseURL: nil,
+            model: "gpt-5",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        let credentials = KeychainCredentialStore()
+        try await credentials.store(
+            CredentialEnvelope(
+                providerKind: .codexOAuth,
+                payload: Data("synthetic".utf8)
+            ),
+            for: profile.credentialReference
+        )
+        let gatewayRoot = helperPath
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let supervisor = GatewaySupervisor(configuration: .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [helperPath.path, "normal"],
+            workingDirectoryURL: gatewayRoot,
+            environment: [
+                "LANG": "C", "LC_ALL": "C", "TMPDIR": cache.path, "TZ": "UTC",
+            ],
+            terminationGrace: .milliseconds(200)
+        ))
+        let counts = ReadinessCallCounts()
+        let controller = ProviderSettingsController(
+            repository: repository,
+            credentials: credentials,
+            supervisor: supervisor,
+            databaseURL: database,
+            cacheURL: cache,
+            codexTypedReadiness: { _ in
+                await counts.recordLocal()
+                return .init(state: .ready)
+            },
+            codexTypedRemoteReadiness: { _ in
+                await counts.recordRemote()
+                return .init(state: .remoteProbeTimedOut)
+            }
+        )
+        defer {
+            Task {
+                await supervisor.shutdown()
+                await repository.close()
+                try? await credentials.delete(for: profile.credentialReference)
+            }
+        }
+
+        _ = try await controller.snapshot()
+        #expect(await counts.values().local == 1)
+        #expect(await counts.values().remote == 0)
+
+        let retried = try await controller.retryReadiness()
+        #expect(retried.readiness == "Readiness probe timed out")
+        let cached = try await controller.snapshot()
+        #expect(cached.readiness == "Readiness probe timed out")
+        #expect(await counts.values().remote == 1)
+
+        try await controller.saveCodexModel("gpt-5.6-terra")
+        _ = try await controller.snapshot()
+        #expect(await counts.values().local == 2)
+        #expect(await counts.values().remote == 1)
     }
 
     private var helperPath: URL {

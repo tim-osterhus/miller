@@ -239,11 +239,14 @@ by that probe and remove its temporary root. A client that was already sharing
 an external runtime is not stopped by an optional probe failure. Subsequent
 ordinary typed use can start normally after probe cleanup.
 
-Settings caches the local result for the selected profile and invalidates it on
-profile selection or an explicit retry. Provider failures and remote timeouts
-therefore do not get projected as executable absence or protocol
-incompatibility. The first ordinary typed use may still establish model
-availability without erasing the local readiness evidence.
+Settings caches the cheap local result for the selected profile. Ordinary
+Settings loads never run the remote operation. `Refresh Codex` and `Retry
+helper readiness` each run one bounded remote/provider probe and cache its
+result; credential mutations, login, refresh, logout, profile edits,
+selection, deletion, and reset invalidate both caches. Provider failures and
+remote timeouts therefore do not get projected as executable absence or
+protocol incompatibility. The first ordinary typed use may still establish
+model availability without erasing the local readiness evidence.
 
 Live transcripts are bounded presentation state. Miller does not write them,
 audio, App Server identifiers, or provider payloads to SQLite. Typed and live

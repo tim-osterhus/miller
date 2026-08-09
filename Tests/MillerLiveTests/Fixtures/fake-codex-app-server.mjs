@@ -478,6 +478,14 @@ lines.on("line", async (line) => {
         send({ id: request.id, error: { code: -32000, message: "synthetic initialize rejection" } });
         return;
       }
+      if (mode === "typed-readiness-initialize-empty") {
+        send({ id: request.id, result: {} });
+        return;
+      }
+      if (mode === "typed-readiness-initialize-wrong") {
+        send({ id: request.id, result: { codexHome: 7 } });
+        return;
+      }
       if (mode === "typed-readiness-malformed") {
         process.stdout.write("{malformed\n");
         return;
@@ -489,6 +497,14 @@ lines.on("line", async (line) => {
     if (request.method === "account/login/start") {
       if (mode === "typed-readiness-login-error") {
         send({ id: request.id, error: { code: -32000, message: "authentication required" } });
+        return;
+      }
+      if (mode === "typed-readiness-login-empty") {
+        send({ id: request.id, result: {} });
+        return;
+      }
+      if (mode === "typed-readiness-login-wrong") {
+        send({ id: request.id, result: { type: "apikey" } });
         return;
       }
       send({ id: request.id, result: { type: "chatgptAuthTokens" } });
@@ -626,8 +642,23 @@ lines.on("line", async (line) => {
       }
       if (mode.startsWith("typed-probe-")) {
         if (mode === "typed-probe-slow" ||
+            mode === "typed-probe-late" ||
             (mode === "typed-probe-slow-once" && !fs.existsSync(pidPath))) {
           if (pidPath) fs.writeFileSync(pidPath, "remote-probe-pending\n", { mode: 0o600 });
+          if (mode === "typed-probe-late") {
+            setTimeout(() => {
+              notify("item/agentMessage/delta", {
+                threadId, turnId: typedTurnId,
+                itemId: "typed-probe-late-message-1", delta: "OK",
+              });
+              notify("turn/completed", {
+                threadId,
+                turn: {
+                  id: typedTurnId, status: "completed", items: [], error: null,
+                },
+              });
+            }, 250);
+          }
           return;
         }
         if (mode === "typed-probe-refresh-unavailable" ||
