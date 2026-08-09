@@ -102,6 +102,59 @@ struct CodexLiveTextCompatibilityTests {
     }
 
     @Test
+    func dynamicThreadStartIDsAreCapturedAndRejectedOutsideTheBoundedUUIDShape() throws {
+        let dynamicThreadID = "00000000-0000-4000-8000-000000000001"
+        #expect(try LiveTextCompatibilityHarness.dynamicThreadID(from: .threadStartResponse(
+            id: "probe:thread-start",
+            threadID: dynamicThreadID
+        )) == dynamicThreadID)
+        #expect(throws: LiveTextCompatibilityFrameError.invalid) {
+            try LiveTextCompatibilityHarness.dynamicThreadID(from: .emptyResponse(
+                id: "probe:thread-start"
+            ))
+        }
+        #expect(throws: LiveTextCompatibilityFrameError.invalid) {
+            try LiveTextCompatibilityHarness.dynamicThreadID(from: .threadStartResponse(
+                id: "probe:thread-start",
+                threadID: "not-a-uuid"
+            ))
+        }
+        #expect(throws: LiveTextCompatibilityFrameError.payloadTooLarge) {
+            try LiveTextCompatibilityHarness.dynamicThreadID(from: .threadStartResponse(
+                id: "probe:thread-start",
+                threadID: String(repeating: "0", count: LiveTextCompatibilityHarness.maximumThreadIDBytes + 1)
+            ))
+        }
+    }
+
+    @Test
+    func boundedProbeCapturesAndFencesTheDynamicThreadIDReturnedByTheFixture() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = Bundle.module.url(
+            forResource: "fake-codex-app-server",
+            withExtension: "mjs",
+            subdirectory: "Fixtures"
+        )!
+
+        let result = try await LiveTextCompatibilityHarness.probe(
+            scenario: .accepted,
+            fixture: fixture,
+            temporaryParent: repository.appendingPathComponent(".artifacts")
+        )
+        #expect(result.outcome == .accepted)
+        #expect(result.observations == [
+            .startAcknowledged, .realtimeStarted, .assistantOutputActive,
+            .appendPending, .appendAcknowledged, .echo, .stopAcknowledged, .closed,
+        ])
+        #expect(result.temporaryRootWasRemoved)
+        #expect(result.childWasStopped)
+    }
+
+    @Test
     func boundedProcessProbeCoversEveryStrictFixtureAndCleansItsPrivateRoot() async throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -208,7 +261,7 @@ struct CodexLiveTextCompatibilityTests {
             executableURL: executable,
             temporaryParent: repository.appendingPathComponent(".artifacts")
         )
-        #expect(result.stage != .appendTextAccepted)
+        #expect(result.stage == .realtimeStartErrored)
         #expect(result.temporaryRootWasRemoved)
         #expect(result.childWasStopped)
     }

@@ -53,6 +53,7 @@ if (mode === "record-stdin" || mode.startsWith("portable-skill-live")) {
 }
 let threadId = "thread-1";
 let helperThreadCreated = false;
+const liveTextCompatibilityThreadID = "00000000-0000-4000-8000-000000000001";
 let typedTurnId = "typed-turn-1";
 let realtimePrompt = null;
 let connectorApprovalResponses = 0;
@@ -362,9 +363,9 @@ function threadObject(id = "helper-thread-1") {
   return thread;
 }
 
-function threadStartResult(id) {
+function threadStartResult(id, threadID = "helper-thread-1") {
   const result = {
-    thread: threadObject(), model: "gpt-live", modelProvider: "openai", serviceTier: null,
+    thread: threadObject(threadID), model: "gpt-live", modelProvider: "openai", serviceTier: null,
     cwd: process.env.HOME, instructionSources: [], approvalPolicy: "never",
     approvalsReviewer: "user", sandbox: { type: "readOnly", networkAccess: false },
     activePermissionProfile: null, reasoningEffort: null,
@@ -1166,10 +1167,13 @@ lines.on("line", async (line) => {
       return;
     }
     helperThreadCreated = true;
+    const startedThreadID = liveTextCompatibility
+      ? liveTextCompatibilityThreadID
+      : "helper-thread-1";
     if (mode === "thread-notification-before-response") {
-      notify("thread/started", { thread: threadObject("helper-thread-1") });
+      notify("thread/started", { thread: threadObject(startedThreadID) });
     }
-    send(threadStartResult(request.id));
+    send(threadStartResult(request.id, startedThreadID));
     if (mode === "wait-after-thread-created") {
       fs.writeFileSync(pidPath, "after-thread-created\n", { mode: 0o600 });
       return;
@@ -1177,7 +1181,9 @@ lines.on("line", async (line) => {
     if (mode === "thread-response-before-login-notifications") emitAccountNotifications();
     if (mode === "realtime-response-before-thread-started" ||
         mode === "thread-notification-before-response") return;
-    const startedThread = threadObject(mode === "thread-started-wrong-thread" ? "helper-other" : "helper-thread-1");
+    const startedThread = threadObject(
+      mode === "thread-started-wrong-thread" ? "helper-other" : startedThreadID
+    );
     const startedParams = { thread: startedThread };
     if (mode === "thread-started-unknown-field") startedParams.future = true;
     notify("thread/started", startedParams);
@@ -1185,7 +1191,10 @@ lines.on("line", async (line) => {
     return;
   }
   if (request.method === "thread/realtime/start") {
-    if (!helperThreadCreated || request.params.threadId !== "helper-thread-1") {
+    const expectedThreadID = liveTextCompatibility
+      ? liveTextCompatibilityThreadID
+      : "helper-thread-1";
+    if (!helperThreadCreated || request.params.threadId !== expectedThreadID) {
       send({ id: request.id, error: { code: -32600, message: "thread not loaded" } });
       return;
     }

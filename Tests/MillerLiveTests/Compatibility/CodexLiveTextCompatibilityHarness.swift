@@ -253,6 +253,7 @@ enum LiveTextCompatibilityExternalStage: Equatable, Sendable {
     case threadStartUnexpected
     case realtimeStartAccepted
     case realtimeStartRejected(code: Int)
+    case realtimeStartErrored
     case appendTextAccepted
     case appendTextRejected(code: Int)
 }
@@ -264,6 +265,23 @@ struct LiveTextCompatibilityExternalProbeResult: Equatable, Sendable {
 }
 
 enum LiveTextCompatibilityHarness {
+    static let maximumThreadIDBytes = 128
+
+    static func dynamicThreadID(
+        from message: CodexAppServerMessage
+    ) throws -> String {
+        guard case let .threadStartResponse(_, threadID) = message,
+              !threadID.isEmpty
+        else { throw LiveTextCompatibilityFrameError.invalid }
+        guard threadID.utf8.count <= maximumThreadIDBytes else {
+            throw LiveTextCompatibilityFrameError.payloadTooLarge
+        }
+        guard UUID(uuidString: threadID) != nil else {
+            throw LiveTextCompatibilityFrameError.invalid
+        }
+        return threadID
+    }
+
     static func installedVersion(executableURL: URL) throws -> String {
         let process = Process()
         let output = Pipe()
@@ -312,31 +330,38 @@ enum LiveTextCompatibilityHarness {
             if case let .requestError(_, code, _) = threadStart {
                 stage = .threadStartRejected(code: code)
             } else if case .threadStartResponse(
-                id: "external:thread-start", threadID: "helper-thread-1"
+                id: "external:thread-start", threadID: _
             ) = threadStart {
+                let threadID = try dynamicThreadID(from: threadStart)
                 stage = .threadStartAccepted
                 try process.send(try LiveTextCompatibilityFrame.realtimeStartRequest(
                     id: "external:start",
-                    threadID: "helper-thread-1",
+                    threadID: threadID,
                     initialItems: [.init(role: "user", text: "synthetic-history")]
                 ))
                 let realtimeStart = try await nextControlMessage(&iterator, codec: codec)
                 if case let .requestError(_, code, _) = realtimeStart {
                     stage = .realtimeStartRejected(code: code)
                 } else if case .emptyResponse(id: "external:start") = realtimeStart {
-                    stage = .realtimeStartAccepted
-                    _ = try await nextControlMessage(&iterator, codec: codec)
-                    try process.send(try LiveTextCompatibilityFrame.appendTextRequest(
-                        id: "external:append",
-                        threadID: "helper-thread-1",
-                        text: "synthetic-input",
-                        role: "user"
-                    ))
-                    let append = try await nextControlMessage(&iterator, codec: codec)
-                    if case let .requestError(_, code, _) = append {
-                        stage = .appendTextRejected(code: code)
-                    } else if case .emptyResponse(id: "external:append") = append {
-                        stage = .appendTextAccepted
+                    let realtimeStarted = try await nextControlMessage(&iterator, codec: codec)
+                    if case .error(threadID: threadID, message: _) = realtimeStarted {
+                        stage = .realtimeStartErrored
+                    } else if case .started(threadID: threadID, version: .v3) = realtimeStarted {
+                        stage = .realtimeStartAccepted
+                        try process.send(try LiveTextCompatibilityFrame.appendTextRequest(
+                            id: "external:append",
+                            threadID: threadID,
+                            text: "synthetic-input",
+                            role: "user"
+                        ))
+                        let append = try await nextControlMessage(&iterator, codec: codec)
+                        if case let .requestError(_, code, _) = append {
+                            stage = .appendTextRejected(code: code)
+                        } else if case .emptyResponse(id: "external:append") = append {
+                            stage = .appendTextAccepted
+                        }
+                    } else {
+                        throw LiveTextCompatibilityFrameError.invalid
                     }
                 }
             } else if case .closed = threadStart {
@@ -393,15 +418,16 @@ enum LiveTextCompatibilityHarness {
             try process.send(try codec.threadStartRequest(
                 id: "probe:thread-start", cwd: temporaryParent.path
             ))
-            _ = try await nextMessage(&iterator, codec: codec) { message in
-                if case .threadStartResponse(id: "probe:thread-start", threadID: "helper-thread-1") = message {
+            let threadStart = try await nextMessage(&iterator, codec: codec) { message in
+                if case .threadStartResponse(id: "probe:thread-start", threadID: _) = message {
                     return true
                 }
                 return false
             }
+            let threadID = try dynamicThreadID(from: threadStart)
             try process.send(try LiveTextCompatibilityFrame.realtimeStartRequest(
                 id: "probe:start",
-                threadID: "helper-thread-1",
+                threadID: threadID,
                 initialItems: [.init(role: "user", text: "synthetic-history")]
             ))
             _ = try await nextMessage(&iterator, codec: codec) { message in
@@ -410,13 +436,13 @@ enum LiveTextCompatibilityHarness {
             }
             observations.append(.startAcknowledged)
             _ = try await nextMessage(&iterator, codec: codec) { message in
-                if case .started(threadID: "helper-thread-1", version: .v3) = message { return true }
+                if case .started(threadID: threadID, version: .v3) = message { return true }
                 return false
             }
             observations.append(.realtimeStarted)
             _ = try await nextMessage(&iterator, codec: codec) { message in
                 if case .transcriptDelta(
-                    threadID: "helper-thread-1", role: "assistant", delta: "synthetic-active"
+                    threadID: threadID, role: "assistant", delta: "synthetic-active"
                 ) = message { return true }
                 return false
             }
@@ -431,16 +457,16 @@ enum LiveTextCompatibilityHarness {
             switch scenario {
             case .malformed:
                 appendFrame = LiveTextCompatibilityFrame.malformedAppendTextRequest(
-                    id: appendID, threadID: "helper-thread-1"
+                    id: appendID, threadID: threadID
                 )
             case .oversized:
                 appendFrame = LiveTextCompatibilityFrame.oversizedAppendTextRequest(
-                    id: appendID, threadID: "helper-thread-1"
+                    id: appendID, threadID: threadID
                 )
             default:
                 appendFrame = try LiveTextCompatibilityFrame.appendTextRequest(
                     id: appendID,
-                    threadID: "helper-thread-1",
+                    threadID: threadID,
                     text: "synthetic-input",
                     role: "user"
                 )
@@ -451,7 +477,7 @@ enum LiveTextCompatibilityHarness {
                 ledger.cancel(appendID)
                 observations.append(.appendCancelled)
                 try process.send(LiveTextCompatibilityFrame.stopRequest(
-                    id: "probe:cancelled:stop", threadID: "helper-thread-1"
+                    id: "probe:cancelled:stop", threadID: threadID
                 ))
                 outcome = .cancelled
             } else if scenario == .late {
@@ -461,7 +487,7 @@ enum LiveTextCompatibilityHarness {
                 outcome = ledger.observe(acknowledgement)
                 observations.append(.appendLate)
                 try process.send(LiveTextCompatibilityFrame.stopRequest(
-                    id: "probe:late:stop", threadID: "helper-thread-1"
+                    id: "probe:late:stop", threadID: threadID
                 ))
             } else {
                 let acknowledgement = try await nextAcknowledgement(&iterator, codec: codec)
@@ -484,14 +510,14 @@ enum LiveTextCompatibilityHarness {
                 if scenario == .accepted {
                     _ = try await nextMessage(&iterator, codec: codec) { message in
                         if case .transcriptDone(
-                            threadID: "helper-thread-1", role: "user", text: "synthetic-echo"
+                            threadID: threadID, role: "user", text: "synthetic-echo"
                         ) = message { return true }
                         return false
                     }
                     observations.append(.echo)
                 }
                 try process.send(LiveTextCompatibilityFrame.stopRequest(
-                    id: "probe:\(scenario.rawValue):stop", threadID: "helper-thread-1"
+                    id: "probe:\(scenario.rawValue):stop", threadID: threadID
                 ))
             }
             _ = try await nextMessage(&iterator, codec: codec) { message in
@@ -500,7 +526,7 @@ enum LiveTextCompatibilityHarness {
             }
             observations.append(.stopAcknowledged)
             _ = try await nextMessage(&iterator, codec: codec) { message in
-                if case .closed(threadID: "helper-thread-1", reason: "stopped") = message {
+                if case .closed(threadID: threadID, reason: "stopped") = message {
                     return true
                 }
                 return false
