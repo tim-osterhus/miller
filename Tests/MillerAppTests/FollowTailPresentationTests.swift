@@ -81,7 +81,7 @@ struct FollowTailPresentationTests {
             "source: turn.assistantText,\n                    selectionBegan: selectionBegan"
         ))
         #expect(conversation.contains("LiveTranscriptTurnView("))
-        #expect(surface.contains("DragGesture(minimumDistance: 0)"))
+        #expect(surface.contains("mouseDown(with event"))
     }
 
     @Test

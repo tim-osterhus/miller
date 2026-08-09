@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MillerCore
 
@@ -17,6 +18,17 @@ enum AssistantMarkdown {
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(source)
+    }
+
+    static func transcriptAttributedString(_ source: String) -> NSAttributedString {
+        let rendered = NSMutableAttributedString()
+        for (index, block) in blocks(source).enumerated() {
+            if index > 0 {
+                rendered.append(NSAttributedString(string: "\n"))
+            }
+            rendered.append(transcriptBlock(block))
+        }
+        return rendered
     }
 
     static func blocks(_ source: String) -> [Block] {
@@ -89,6 +101,122 @@ enum AssistantMarkdown {
             text: String(line[line.index(after: separator)...])
         )
     }
+
+    private static func transcriptBlock(_ block: Block) -> NSAttributedString {
+        switch block {
+        case let .heading(level, text):
+            return inlineTranscriptText(
+                text,
+                font: .boldSystemFont(
+                    ofSize: level == 1 ? 22 : level == 2 ? 17 : 14
+                )
+            )
+        case let .paragraph(text):
+            return inlineTranscriptText(text)
+        case let .unorderedItem(text):
+            let rendered = NSMutableAttributedString(
+                string: "• ",
+                attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+            )
+            rendered.append(inlineTranscriptText(text))
+            return rendered
+        case let .orderedItem(marker, text):
+            let rendered = NSMutableAttributedString(
+                string: "\(marker) ",
+                attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+            )
+            rendered.append(inlineTranscriptText(text))
+            return rendered
+        case let .quote(text):
+            let rendered = NSMutableAttributedString(
+                string: "│ ",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]
+            )
+            rendered.append(
+                inlineTranscriptText(
+                    text,
+                    color: NSColor.secondaryLabelColor
+                )
+            )
+            return rendered
+        case let .code(language, text):
+            let rendered = NSMutableAttributedString()
+            if let language {
+                rendered.append(
+                    inlineTranscriptText(
+                        language,
+                        font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                        color: NSColor.secondaryLabelColor,
+                        preserveMarkdown: false
+                    )
+                )
+                rendered.append(NSAttributedString(string: "\n"))
+            }
+            let code = inlineTranscriptText(
+                text,
+                font: NSFont.monospacedSystemFont(
+                    ofSize: NSFont.systemFontSize,
+                    weight: .regular
+                ),
+                paragraphStyle: codeParagraphStyle(),
+                preserveMarkdown: false
+            )
+            let codeRange = NSRange(location: rendered.length, length: code.length)
+            rendered.append(code)
+            rendered.addAttribute(
+                TranscriptTextAttribute.codeBlock,
+                value: true,
+                range: codeRange
+            )
+            return rendered
+        case .spacer:
+            return NSAttributedString()
+        }
+    }
+
+    private static func inlineTranscriptText(
+        _ text: String,
+        font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
+        color: NSColor = .textColor,
+        paragraphStyle: NSParagraphStyle = paragraphStyle(),
+        preserveMarkdown: Bool = true
+    ) -> NSAttributedString {
+        let rendered: NSAttributedString
+        if preserveMarkdown {
+            rendered = NSAttributedString(
+                AssistantMarkdown.attributedString(text)
+            )
+        } else {
+            rendered = NSAttributedString(string: text)
+        }
+        let mutable = NSMutableAttributedString(attributedString: rendered)
+        guard mutable.length > 0 else { return mutable }
+        mutable.addAttributes(
+            [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraphStyle,
+            ],
+            range: NSRange(location: 0, length: mutable.length)
+        )
+        return mutable
+    }
+
+    private static func paragraphStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        style.paragraphSpacing = 2
+        return style
+    }
+
+    private static func codeParagraphStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byClipping
+        return style
+    }
 }
 
 struct AssistantMarkdownView: View {
@@ -98,127 +226,16 @@ struct AssistantMarkdownView: View {
     let turnID: TurnID
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(
-                Array(AssistantMarkdown.blocks(source).enumerated()),
-                id: \.offset
-            ) { index, block in
-                blockView(block, index: index)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func blockView(
-        _ block: AssistantMarkdown.Block,
-        index: Int
-    ) -> some View {
-        switch block {
-        case let .heading(level, text):
-            SelectableTranscriptSurface(
-                accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                    .typedAssistantBlock(
-                        surface: surface,
-                        turnID: turnID,
-                        blockIndex: index
-                    ),
-                selectionBegan: selectionBegan
-            ) {
-                Text(AssistantMarkdown.attributedString(text))
-                    .font(level == 1 ? .title2 : level == 2 ? .headline : .body)
-                    .fontWeight(.semibold)
-                    .padding(.top, level == 1 ? 4 : 0)
-            }
-        case let .paragraph(text):
-            SelectableTranscriptSurface(
-                accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                    .typedAssistantBlock(
-                        surface: surface,
-                        turnID: turnID,
-                        blockIndex: index
-                    ),
-                selectionBegan: selectionBegan
-            ) {
-                Text(AssistantMarkdown.attributedString(text))
-            }
-        case let .unorderedItem(text):
-            SelectableTranscriptSurface(
-                accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                    .typedAssistantBlock(
-                        surface: surface,
-                        turnID: turnID,
-                        blockIndex: index
-                    ),
-                selectionBegan: selectionBegan
-            ) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("•")
-                    Text(AssistantMarkdown.attributedString(text))
-                }
-                .padding(.leading, 8)
-            }
-        case let .orderedItem(marker, text):
-            SelectableTranscriptSurface(
-                accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                    .typedAssistantBlock(
-                        surface: surface,
-                        turnID: turnID,
-                        blockIndex: index
-                    ),
-                selectionBegan: selectionBegan
-            ) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(marker)
-                    Text(AssistantMarkdown.attributedString(text))
-                }
-                .padding(.leading, 8)
-            }
-        case let .quote(text):
-            SelectableTranscriptSurface(
-                accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                    .typedAssistantBlock(
-                        surface: surface,
-                        turnID: turnID,
-                        blockIndex: index
-                    ),
-                selectionBegan: selectionBegan
-            ) {
-                HStack(alignment: .top, spacing: 8) {
-                    Rectangle()
-                        .fill(.secondary)
-                        .frame(width: 3)
-                    Text(AssistantMarkdown.attributedString(text))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 4)
-            }
-        case let .code(language, text):
-            VStack(alignment: .leading, spacing: 4) {
-                if let language {
-                    Text(language)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                ScrollView(.horizontal) {
-                    SelectableTranscriptSurface(
-                        accessibilityIdentifier: TranscriptAccessibilityIdentifier
-                            .typedAssistantBlock(
-                                surface: surface,
-                                turnID: turnID,
-                                blockIndex: index
-                            ),
-                        selectionBegan: selectionBegan
-                    ) {
-                        Text(text)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                }
-            }
-            .padding(8)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-        case .spacer:
-            Color.clear.frame(height: 2)
-        }
+        SelectableTranscriptSurface(
+            attributedText: AssistantMarkdown.transcriptAttributedString(source),
+            accessibilityIdentifier: TranscriptAccessibilityIdentifier
+                .typedAssistantBlock(
+                    surface: surface,
+                    turnID: turnID,
+                    blockIndex: 0
+                ),
+            selectionBegan: selectionBegan
+        )
     }
 }
 
@@ -371,14 +388,13 @@ struct TranscriptTurnView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             SelectableTranscriptSurface(
+                text: turn.userText,
                 accessibilityIdentifier: TranscriptAccessibilityIdentifier.typedUser(
                     surface: surface,
                     turnID: turn.id
                 ),
                 selectionBegan: selectionBegan
-            ) {
-                Text(turn.userText)
-            }
+            )
             if !turn.assistantText.isEmpty {
                 Text("Miller")
                     .font(.caption)
