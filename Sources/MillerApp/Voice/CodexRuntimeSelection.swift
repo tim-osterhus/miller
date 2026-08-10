@@ -221,12 +221,16 @@ final class CodexRuntimeSettingsModel: ObservableObject {
 
     func clear() {
         preferences.clear()
-        if let automatic = resolver.resolve(savedPath: nil) {
+        switch resolver.resolveReadiness(savedPath: nil) {
+        case let .available(automatic):
             displayPath = automatic.executableURL.path
             status = "Automatic selection — relaunch Miller to apply"
-        } else {
+        case .missing:
             displayPath = nil
             status = "Not installed — relaunch Miller to apply"
+        case .rejected:
+            displayPath = nil
+            status = "Unsupported Codex executable — relaunch Miller to apply"
         }
         requiresRelaunch = true
     }
