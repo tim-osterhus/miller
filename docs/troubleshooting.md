@@ -52,7 +52,9 @@ Enter one bounded English phrase and save it again. Wake capture stops while
 manual Live Voice is active and rearms only after provider, WebKit, transcript,
 and admission cleanup. A sleep, inactive transition, device loss, or shutdown
 therefore shows a paused/unavailable state instead of pretending that capture
-continues.
+continues. The owner-visible microphone and custom-phrase check is
+`LIVE_NOT_RUN` in the v0.1.2 release closure; deterministic tests do not prove
+speech detection or audible handoff.
 
 ## A reasoning request fails
 

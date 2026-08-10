@@ -71,7 +71,7 @@ export async function callTask18Bridge(options = {}) {
     const initialized = await request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "miller-task18-route", version: "0.1.1" },
+      clientInfo: { name: "miller-task18-route", version: "0.1.2" },
     });
     if (initialized.error) throw new Error("task18_bridge_initialize_failed");
     send({ jsonrpc: "2.0", method: "notifications/initialized" });

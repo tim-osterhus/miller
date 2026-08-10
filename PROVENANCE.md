@@ -56,7 +56,7 @@ their implementation must not be copied into Miller. Any independently
 authored Cortana material proposed for reuse requires a file-level authorship
 and provenance review before incorporation.
 
-## Miller v0.1.1 capability and wakeword inputs
+## Miller v0.1.2 capability and wakeword inputs
 
 ### Model Context Protocol Swift SDK
 
@@ -65,7 +65,7 @@ and provenance review before incorporation.
 - Resolved revision: `a0ae212ebf6eab5f754c3129608bc5557637e605`
 - License: upstream mixed Apache-2.0/MIT transition terms recorded in the
   revision's `LICENSE` file.
-- Current scope: statically linked capability-bridge dependency in the v0.1.1
+- Current scope: statically linked capability-bridge dependency in the v0.1.2
   application. The app SBOM and runtime inventory list this component only at
   its reviewed version; no SDK source tree is copied into the application.
 
@@ -87,7 +87,7 @@ archives, headers, compiler inputs, extraction roots, private generated
 keyword files, donor test inputs, and audio are excluded from the application
 payload.
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
-the v0.1.1 minimum tested/support boundary. The `0.145.0` material below is
+the v0.1.2 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
 
 ### Cortana wakeword donor

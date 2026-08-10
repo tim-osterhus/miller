@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+release_version="$(tr -d '[:space:]' < "$repo_root/Packaging/Miller.version")"
+test "$release_version" = "0.1.2"
 release_root="$repo_root/.artifacts/release"
 measurement_path="$release_root/package-measurement.env"
 inventory_path="$release_root/inventory.json"
@@ -19,6 +21,13 @@ assert_release_root_closed() {
           print -u2 "refusing unsafe retained release output: $entry"
           return 1
         }
+        ;;
+      .DS_Store)
+        [[ -f "$entry" && ! -L "$entry" ]] || {
+          print -u2 "refusing unsafe release Finder residue: $entry"
+          return 1
+        }
+        unlink "$entry"
         ;;
       *)
         print -u2 "unexpected release-root artifact: $entry"
@@ -94,7 +103,8 @@ assert_release_root_closed
   exit 1
 }
 measurement_tmp="$(mktemp "$release_root/package-measurement.XXXXXX")"
-printf 'schema=miller-v0.1.1-package-measurement-v1\nclean_build_duration_ms=%s\n' \
+printf 'schema=miller-v%s-package-measurement-v1\nclean_build_duration_ms=%s\n' \
+  "$release_version" \
   "$((package_end_ms - package_start_ms))" \
   > "$measurement_tmp"
 chmod 0600 "$measurement_tmp"
@@ -108,4 +118,4 @@ measurement_tmp=""
 remove_release_finder_residue
 assert_release_root_closed
 
-printf 'MILLER_V0_1_1_UNSIGNED_RELEASE_APP_READY=1\n'
+printf 'MILLER_V0_1_2_UNSIGNED_RELEASE_APP_READY=1\n'

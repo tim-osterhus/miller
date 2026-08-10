@@ -63,7 +63,7 @@ public struct MillerCapabilityBridgeRuntime: Sendable {
     public func makeServer() async -> Server {
         let server = Server(
             name: "miller-capability-bridge",
-            version: "0.1.1",
+            version: MillerCapabilityClientInfo.version,
             capabilities: .init(tools: .init(listChanged: false)),
             configuration: .strict
         )

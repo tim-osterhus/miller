@@ -1,6 +1,6 @@
 # Miller privacy boundary
 
-The v0.1.1 external Codex boundary tested by Task 18 is official Codex CLI/App
+The v0.1.2 external Codex boundary tested by Task 18 is official Codex CLI/App
 Server `0.146.0` on Apple Silicon. `0.145.0` is protocol reference/evidence
 only, not a runtime support claim. Codex remains an external prerequisite.
 
@@ -43,8 +43,9 @@ pipe. Neither
 may enter arguments, environment, SQLite, logs, diagnostics, or retained
 qualification evidence. Synthetic transcripts and synthetic SDP values exist
 only inside deterministic tests and are removed during cleanup. Live
-transcripts remain bounded presentation state and do not enter SQLite. SDP,
-audio, credentials, account identifiers, and provider payloads are neither
+transcripts remain bounded presentation state until the owner explicitly saves
+text to the selected conversation. Saved transcript text and metadata may enter
+SQLite; SDP, audio, credentials, account identifiers, and provider payloads are neither
 logged nor retained. No real credential, transcript, microphone, audio device,
 or provider network is used for headless qualification.
 
@@ -61,7 +62,8 @@ See `removal.md` before deleting the app when local-data removal is desired.
 Live Voice is opt-in and begins only after the owner chooses Start Live Voice.
 The microphone track and remote WebRTC track are session media; Miller does
 not save either audio stream. Live transcript text is selectable presentation
-text. Copying or selecting text does not copy or retain audio.
+text. The owner may explicitly save a text turn to local history; copying or
+selecting text does not copy or retain audio.
 
 Saving a typed or reviewed transcript turn saves text and metadata only. It
 does not imply that audio was saved. History is reviewed explicitly by opening

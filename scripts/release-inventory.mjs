@@ -11,6 +11,15 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const releaseVersion = (await readFile(
+  join(repositoryRoot, "Packaging", "Miller.version"),
+  "utf8",
+)).trim();
+if (releaseVersion !== "0.1.2") {
+  throw new Error(`unsupported Miller release version: ${releaseVersion}`);
+}
+
 const runtimeInventory = [
   {
     name: "MCP Swift SDK",
@@ -62,7 +71,7 @@ const runtimeInventory = [
   },
   {
     name: "MillerCapabilityBridge",
-    version: "0.1.1",
+    version: releaseVersion,
     path: "Contents/Helpers/MillerCapabilityBridge",
     role: "capability_bridge",
   },
@@ -364,8 +373,8 @@ async function buildInventory(
   return {
     schema: "miller-source-release-inventory",
     version: 2,
-    release: "0.1.1",
-    application_version: "0.1.1",
+    release: releaseVersion,
+    application_version: releaseVersion,
     signing_status: "AD_HOC_ONLY",
     notarization_status: "NOT_RUN",
     inventory_self_exclusion: {

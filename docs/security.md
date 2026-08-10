@@ -17,7 +17,7 @@ portability covers the typed reasoning adapters and Pi route, not the
 installation or management of a Codex account app.
 
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
-the v0.1.1 minimum tested/support boundary. The `0.145.0` material is protocol
+the v0.1.2 minimum tested/support boundary. The `0.145.0` material is protocol
 reference/evidence only, not a runtime support claim. Packaging requires the
 explicit lockfile-integrity dependency bootstrap and never calls it implicitly.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
@@ -39,6 +39,10 @@ loss, inactive/sleep state, disable, or shutdown stops the engine and clears
 callbacks. Generation checks reject stale samples and late callbacks.
 Prepared command PCM is bounded and can be injected into the existing WebKit
 outbound track once; no second process or speech backend is created.
+
+The default wake phrase is **Hey Miller**; one bounded custom English phrase is
+compiled locally. The owner-visible microphone and custom-phrase gate remains
+`LIVE_NOT_RUN` for this release closure.
 
 Live Voice depends on an owner-installed official Codex App Server. Missing or
 incompatible Codex, denied permission, unsupported model, provider refusal,

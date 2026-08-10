@@ -1,4 +1,4 @@
-# Install Miller v0.1
+# Install Miller v0.1.2
 
 ## Requirements
 
@@ -8,14 +8,14 @@
 - A Codex OAuth profile or a configured HTTPS OpenAI-compatible endpoint for
   typed reasoning.
 
-The tested external Codex boundary for v0.1.1 is official Codex CLI/App Server
+The tested external Codex boundary for v0.1.2 is official Codex CLI/App Server
 `0.146.0` on Apple Silicon. `0.145.0` is retained only as protocol
 reference/evidence from the App Server fixtures and is not a runtime support
 claim. GPT-Live cannot start without an owner-installed external Codex App
 Server; Miller does not download or package it.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
 
-Miller does not install, update, or remove Codex. Miller v0.1 contains no
+Miller does not install, update, or remove Codex. Miller v0.1.2 contains no
 avatar renderer or VRM asset.
 
 ## Source-release build
@@ -46,4 +46,6 @@ run the explicit `./scripts/bootstrap-wakeword-dependencies.sh` after its
 storage forecast passes, then run `./scripts/verify-wakeword-dependencies.sh`.
 Wake remains off by default and ships only the verified runtime model/token
 files plus linked native code; private generated keyword files stay in
-Application Support.
+Application Support. The default phrase is **Hey Miller** and one bounded
+custom English phrase is supported. The owner-visible microphone and
+custom-phrase gate remains `LIVE_NOT_RUN`.

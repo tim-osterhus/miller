@@ -1,4 +1,5 @@
 import Foundation
+import MillerCapabilities
 import MillerCore
 import MillerStorage
 import Testing
@@ -6,6 +7,12 @@ import Testing
 
 @Suite
 struct CapabilitySettingsTests {
+    @Test
+    func capabilityClientIdentityUsesTheReleaseVersion() {
+        #expect(MillerCapabilityClientInfo.name == "miller")
+        #expect(MillerCapabilityClientInfo.version == "0.1.2")
+    }
+
     @Test
     func projectsCodexAppsSeparatelyFromMillerServersWithAvailabilityLabels() throws {
         let provider = UUID()
@@ -115,7 +122,7 @@ struct CapabilitySettingsTests {
             cacheCompleteness: .unavailable
         )
         let snapshot = DiagnosticsSettingsSnapshot(
-            componentVersions: ["Miller": "0.1.1"],
+            componentVersions: ["Miller": "0.1.2"],
             sanitizedLastFailure: "provider_unavailable",
             catalogFreshness: "Stale",
             brokerProcessState: "Stopped",

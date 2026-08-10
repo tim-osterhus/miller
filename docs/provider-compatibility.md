@@ -14,12 +14,17 @@ credential or profile mutation.
 Miller owns conversation history, context selection, cancellation, and visible
 terminal outcomes. Providers do not own Miller's durable conversation state.
 
-The v0.1.1 tested external Codex minimum is official Codex CLI/App Server
+The v0.1.2 tested external Codex minimum is official Codex CLI/App Server
 `0.146.0` on Apple Silicon. The fixtures preserve `0.145.0` as protocol
 reference/evidence only; it is not a supported runtime boundary. The Pi gateway
 and OpenAI-compatible path are provider-portable for typed reasoning, while the
 account-backed app surface remains Codex-only.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
+
+The bounded Live-text compatibility spike ended `INCONCLUSIVE`. Miller v0.1.2
+does not expose typed input during an active Live session, `initialItems`, or
+attachment routing. Those remain a v0.1.3 boundary and require a separate
+implementation qualification.
 
 ### External Codex readiness
 
@@ -59,3 +64,7 @@ network availability, and the external Codex version can affect readiness.
 DeepSeek and generic OpenAI-compatible profiles are text-only in v0.1. Local
 STT/TTS adapters are planned after v0.1. Typed operation remains available
 when voice is unavailable.
+
+Wake Listening is local and optional. It defaults off, recognizes **Hey
+Miller** or one bounded custom English phrase, and uses only the system-default
+microphone. Its owner-visible microphone/custom-phrase gate is `LIVE_NOT_RUN`.

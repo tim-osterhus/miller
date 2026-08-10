@@ -1,12 +1,15 @@
 # Upcoming Miller releases
 
-This document records the public feature order after v0.1.1. It summarizes the
-owner-approved v0.1.2 execution plan maintained in the coordination workspace.
+This document records the public feature order after the v0.1.2 source-release
+closure. The owner-visible M1 gate remains `LIVE_NOT_RUN`, so publication still
+requires separate owner approval.
 
-## v0.1.2: daily-use repairs and stable seams
+## v0.1.2: daily-use repairs and stable seams — closure candidate
 
-The next update should make the current application easier to use while
-preventing new work from deepening desktop-only authority.
+The closure candidate makes the current application easier to use while
+preserving the desktop-only authority boundary. Its deterministic checks are
+headless-ready; they do not prove the owner-visible microphone, audio, or M1
+gate.
 
 ### Transcript interaction
 
@@ -14,8 +17,8 @@ preventing new work from deepening desktop-only authority.
 - Allow pointer selection across rendered line breaks and message blocks.
 - Preserve Markdown, links, code blocks, streaming, and follow-tail behavior.
 
-These repairs are already recorded as accepted v0.1.1 limitations. They should
-remain narrow AppKit and presentation work.
+These repairs remain narrow AppKit and presentation work. The owner-visible
+selection and Command-C observation is listed in the unreached M1 gate.
 
 ### Custom wake phrases
 
@@ -23,8 +26,8 @@ remain narrow AppKit and presentation work.
 - Keep the feature optional and owner-controlled.
 - Support one custom phrase, the system-default microphone, clear readiness,
   and deterministic disable and cleanup behavior.
-- Run the deferred microphone and owner-visible wake qualification before
-  calling the feature complete.
+- The deterministic integration is complete; the microphone, default/custom
+  phrase, and audible handoff qualification remains `LIVE_NOT_RUN`.
 
 ### Live text feasibility
 
@@ -38,9 +41,9 @@ supported external Codex App Server:
 - Measure whether text injection leaves the WebRTC connection and first-audio
   latency unchanged.
 
-This spike ends as confirmed, unsupported, or inconclusive. It does not enable
-typed input during Live in v0.1.2. A confirmed result informs the separate
-v0.1.3 implementation packet.
+This spike ended `INCONCLUSIVE`. It does not enable typed input during Live in
+v0.1.2. A future confirmed result would inform a separate v0.1.3
+implementation packet.
 
 ### In-process ownership seam
 

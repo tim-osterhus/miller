@@ -1,12 +1,12 @@
 # Miller text-alpha architecture
 
-This document describes the Miller v0.1 text and GPT-Live architecture,
+This document describes the Miller v0.1.2 text and GPT-Live architecture,
 including its external official Codex App Server WebRTC boundary. The completed
 owner-visible Gate 4B result is recorded separately in
 `docs/qualification/gate-4b-external-codex-human-report.md`.
 
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon. This
-is the v0.1.1 minimum tested/support boundary; `0.145.0` is protocol
+is the v0.1.2 minimum tested/support boundary; `0.145.0` is protocol
 reference/evidence only and is not a runtime support claim.
 
 ## Authority and process boundary
@@ -252,9 +252,11 @@ remote timeouts therefore do not get projected as executable absence or
 protocol incompatibility. The first ordinary typed use may still establish
 model availability without erasing the local readiness evidence.
 
-Live transcripts are bounded presentation state. Miller does not write them,
-audio, App Server identifiers, or provider payloads to SQLite. Typed and live
-operations are mutually exclusive. Typed interaction resumes after live
+Live transcripts are bounded presentation state. Miller does not automatically
+write them, audio, App Server identifiers, or provider payloads to SQLite. An
+explicit owner save may persist transcript text and metadata in the selected
+conversation; audio and provider/session payloads remain transient. Typed and
+live operations are mutually exclusive. Typed interaction resumes after live
 termination.
 
 ## Remaining Gate 4B exclusions
@@ -334,7 +336,9 @@ Wake Listening is composed through the MillerWake coordinator and the existing
 HostDependencies.admitLive authority. It is disabled by default and uses the
 system-default microphone through one AVAudioEngine owner at 16 kHz mono
 Int16. The first valid phrase is Hey Miller; the owner may save one bounded
-English phrase. SQLite wake preferences are the sole preference authority.
+English phrase. SQLite wake preferences are the sole preference authority. The
+custom-phrase and microphone observation gate is explicitly `LIVE_NOT_RUN` in
+the v0.1.2 release closure.
 
 After a match, the coordinator owns a bounded post-keyword PCM buffer. An empty
 timeout rearms without opening Live. Silence or the hard limit transfers that

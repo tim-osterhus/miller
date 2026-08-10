@@ -7,9 +7,9 @@ Miller is for people who want a personal assistant without surrendering control
 of local data or tool permissions. It keeps conversation state on your Mac and
 shows tool activity while it runs.
 
-**Current release:** [v0.1.1](https://github.com/tim-osterhus/miller/releases/tag/v0.1.1)
-for Apple Silicon Macs running macOS 15 or newer. Build it locally from the
-tagged source.
+**Current source version:** v0.1.2 for Apple Silicon Macs running macOS 15 or
+newer. This release-closure candidate is headless-ready; the owner-visible M1
+gate remains explicitly unrun, so it is not publication-ready.
 
 ## Build and open Miller
 
@@ -26,7 +26,7 @@ Clone the repository and build the release app:
 ```bash
 git clone https://github.com/tim-osterhus/miller.git
 cd miller
-git checkout v0.1.1
+git checkout main
 ./scripts/bootstrap-gateway-dependencies.sh
 ./scripts/package-release-app.sh
 open .artifacts/release/Miller.app
@@ -85,8 +85,9 @@ Miller requests microphone access only after you select **Start Live Voice**.
 WebKit carries microphone and remote audio through WebRTC. Miller does not save
 audio.
 
-Live transcripts are presentation text. You can save selected text to local
-history, but saved text never implies saved audio.
+Live transcripts are bounded presentation text. Miller can save a selected text
+turn to local history when the owner explicitly saves it; saved text never
+implies saved audio.
 
 If Live Voice is unavailable, typed conversations and local history remain
 available.
@@ -109,7 +110,7 @@ One native capability broker applies these policies across Codex typed chat,
 Codex Live Voice sideband calls, and the Pi gateway. Miller records bounded
 audit events for classification, approval, denial, and result status.
 
-Codex account apps remain Codex-only in v0.1.1. OpenAI-compatible providers do
+Codex account apps remain Codex-only in v0.1.2. OpenAI-compatible providers do
 not inherit account apps installed through Codex.
 
 ## Provider support
@@ -124,6 +125,7 @@ configurable, and each provider confirms model availability on first use.
 
 Miller tested official Codex CLI/App Server `0.146.0` on Apple Silicon. The
 `0.145.0` fixtures document the protocol shape but do not establish runtime
+support. Protocol reference/evidence is therefore separate from tested runtime
 support.
 
 ## Local data and privacy
@@ -146,11 +148,12 @@ hardware may retain earlier bytes.
 
 ## Known limits
 
-- v0.1.1 is a source-only release without Developer ID signing or notarization.
+- v0.1.2 is a source-first release without Developer ID signing or notarization.
 - Hosted reasoning and Live Voice require network access.
-- Command-C does not copy selected transcript text. Use the context-menu Copy
-  action.
-- Transcript selection cannot span rendered line breaks.
+- The bounded Live-text compatibility spike ended `INCONCLUSIVE`; typed input
+  during an active Live session is not product-supported in v0.1.2.
+- Wake Listening supports **Hey Miller** and one bounded custom English phrase,
+  but its owner-visible microphone/custom-phrase gate is `LIVE_NOT_RUN`.
 
 ## Runtime boundaries
 
@@ -183,12 +186,13 @@ Remove generated build and dependency roots after qualification:
 ./scripts/clean.sh --dependencies
 ```
 
-The v0.1.1 qualification reports record deterministic and owner-visible
-evidence without retaining credentials, audio, transcript content, or provider
-payloads:
+The v0.1.2 qualification artifacts record deterministic evidence without
+retaining credentials, audio, transcript content, or provider payloads. The
+owner-visible M1 gate remains `LIVE_NOT_RUN`:
 
-- `docs/qualification/v0.1.1-headless-report.md`
-- `docs/qualification/v0.1.1-human-protocol.md`
+- `docs/qualification/v0.1.2-headless-report.md`
+- `docs/qualification/v0.1.2-human-protocol.md`
+- `docs/qualification/miller-v012-06-release-closure.md`
 
 ## Documentation
 
@@ -199,7 +203,7 @@ payloads:
 - `docs/removal.md`: local reset and removal procedure.
 - `docs/troubleshooting.md`: bounded recovery for common failures.
 - `docs/development.md`: build, test, package, and cleanup commands.
-- `docs/upcoming-releases.md`: planned v0.1.2, v0.1.3, and later client work.
+- `docs/upcoming-releases.md`: v0.1.3 scope and later client work.
 - `CHANGELOG.md`: release history and known limitations.
 - `PROVENANCE.md` and `THIRD_PARTY_NOTICES.md`: dependency provenance and
   licensing.

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+release_version="$(tr -d '[:space:]' < "$repo_root/Packaging/Miller.version")"
+test "$release_version" = "0.1.2"
 artifacts_root="$repo_root/.artifacts"
 package_mode="development"
 swift_configuration_args=()
@@ -246,13 +248,13 @@ if [[ "$package_mode" == "release" ]]; then
   cp "$repo_root/LICENSE" "$legal_root/LICENSE"
   cp "$repo_root/NOTICE" "$legal_root/NOTICE"
   {
-    printf '# Miller v0.1.1 packaged provenance\n\n'
+    printf '# Miller v%s packaged provenance\n\n' "$release_version"
     printf 'This unsigned release candidate contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
     printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
     printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
   } > "$legal_root/PROVENANCE.md"
   {
-    printf '# Third-party notices for Miller v0.1.1\n\n'
+    printf '# Third-party notices for Miller v%s\n\n' "$release_version"
     printf -- '- Model Context Protocol Swift SDK 0.12.1: Apache-2.0/MIT transition terms; https://github.com/modelcontextprotocol/swift-sdk.git\n'
     printf -- '- Node.js 22.22.0: MIT and bundled upstream notices; see LICENSE.node-22.22.0.\n'
     printf -- '- @miller/pi-mvp-overlay 0.82.0-a3, openai 6.26.0, and partial-json 0.1.7: notices reviewed in this repository.\n'

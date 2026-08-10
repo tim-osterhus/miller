@@ -2,8 +2,8 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "Miller-0.1.1-source-release",
-  "documentNamespace": "https://miller.local/spdx/miller/0.1.1/source-release",
+  "name": "Miller-0.1.2-source-release",
+  "documentNamespace": "https://miller.local/spdx/miller/0.1.2/source-release",
   "creationInfo": {
     "created": "2026-08-05T00:00:00Z",
     "creators": ["Tool: Miller source-release closure"]
@@ -12,7 +12,7 @@
     {
       "name": "Miller",
       "SPDXID": "SPDXRef-Package-Miller",
-      "versionInfo": "0.1.1",
+      "versionInfo": "0.1.2",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
@@ -22,7 +22,7 @@
     {
       "name": "MillerCapabilityBridge",
       "SPDXID": "SPDXRef-Package-MillerCapabilityBridge",
-      "versionInfo": "0.1.1",
+      "versionInfo": "0.1.2",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
@@ -33,7 +33,7 @@
     {
       "name": "MillerCapabilities",
       "SPDXID": "SPDXRef-Package-MillerCapabilities",
-      "versionInfo": "0.1.1",
+      "versionInfo": "0.1.2",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",

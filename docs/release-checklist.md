@@ -1,4 +1,4 @@
-# Miller v0.1 release checklist
+# Miller v0.1.2 release checklist
 
 ## Source-first closure
 
@@ -9,15 +9,24 @@
 - [x] No Codex, Rust/Cargo, Cortana, fake helper, avatar renderer, or VRM asset
       is distributed.
 - [x] Headless M1 size, process, write-root, and cleanup evidence is retained.
+- [x] Packet 3 Live-text spike is recorded as `INCONCLUSIVE` without product
+      support.
+- [x] Packet 5 wake integration is headless-approved; its human gate is
+      `LIVE_NOT_RUN`.
 
-## Owner-visible closure
+## Owner-visible M1 gate — NOT RUN
 
-- [x] External Codex discovery and compatibility pass on the M1 floor.
-- [x] Microphone permission, spoken input/output, transcript ordering,
-      delayed follow-up, mute, interruption, second session, failure handling,
-      typed fallback, and cleanup pass.
+- [ ] External Codex readiness/timeout plus one typed turn.
+- [ ] Overlay/full-window selection and Command-C.
+- [ ] GPT-Live speech/transcript/interrupt/end/second session/cleanup.
+- [ ] Default/custom wake phrase.
+- [ ] Typed fallback with wake disabled and Live unavailable.
+- [ ] Reset/removal/relaunch with no lingering helper or microphone owner.
 
-Evidence: `docs/qualification/gate-4b-external-codex-human-report.md`.
+Evidence: `docs/qualification/v0.1.2-headless-report.md` and
+`docs/qualification/v0.1.2-human-protocol.md`. These artifacts explicitly
+record `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN` and do not claim a human
+pass.
 
 ## Deferred signing and publication
 
@@ -26,7 +35,11 @@ Evidence: `docs/qualification/gate-4b-external-codex-human-report.md`.
 - [ ] Notarize and staple the application.
 - [ ] Pass clean-account Gatekeeper, upgrade, reset, and removal checks.
 - [ ] Complete a small beta and correct release blockers.
-- [ ] Freeze version, changelog, checksums, SBOM, and notices.
+- [x] Freeze version, changelog, checksums, SBOM, and notices for the closure
+      candidate.
 - [ ] Publish source and the signed/notarized application.
+
+The closure candidate is not publication-ready until the owner-visible M1 gate
+passes and publication is separately authorized.
 
 Miller Avatar is released separately and is not part of this checklist.

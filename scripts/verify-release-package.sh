@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+release_version="$(tr -d '[:space:]' < "$repo_root/Packaging/Miller.version")"
+test "$release_version" = "0.1.2"
 bundle_root="${1:-$repo_root/.artifacts/release/Miller.app}"
 release_root="$bundle_root/.."
 plist="$bundle_root/Contents/Info.plist"
@@ -18,6 +20,11 @@ for retained in "$release_root"/*(DN); do
   case "$retained_name" in
     Miller.app|inventory.json|package-measurement.env)
       test ! -L "$retained"
+      ;;
+    .DS_Store)
+      test -f "$retained"
+      test ! -L "$retained"
+      unlink "$retained"
       ;;
     *)
       print -u2 "unexpected release-root artifact: $retained"
@@ -76,7 +83,7 @@ done
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = \
   "ai.millrace.miller"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = \
-  "0.1.1"
+  "$release_version"
 if /usr/libexec/PlistBuddy -c 'Print :MillerGPTLiveHarnessCapability' "$plist" \
   >/dev/null 2>&1; then
   print -u2 "release bundle contains development harness metadata"
@@ -127,11 +134,12 @@ test "$(codesign -dvvv "$bundle_root/Contents/MacOS/Miller" 2>&1 \
   "$(codesign -dvvv "$bridge" 2>&1 \
   | sed -n 's/^Signature=//p' | head -1)"
 "$gateway/runtime/node" --input-type=module - \
-  "$legal/Miller.spdx.json" "$legal/mcp-swift-sdk-LICENSE.txt" <<'EOF'
+  "$legal/Miller.spdx.json" "$legal/mcp-swift-sdk-LICENSE.txt" "$release_version" <<'EOF'
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const sbom = JSON.parse(await readFile(process.argv[2], "utf8"));
 const mcpLicense = await readFile(process.argv[3], "utf8");
+const releaseVersion = process.argv[4];
 assert.equal(sbom.spdxVersion, "SPDX-2.3");
 assert.equal(sbom.dataLicense, "CC0-1.0");
 assert.deepEqual(
@@ -139,9 +147,9 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller@0.1.1",
-    "MillerCapabilityBridge@0.1.1",
-    "MillerCapabilities@0.1.1",
+    `Miller@${releaseVersion}`,
+    `MillerCapabilityBridge@${releaseVersion}`,
+    `MillerCapabilities@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime@1.24.4",
     "Sherpa-ONNX@1.13.2",
@@ -204,18 +212,19 @@ assert.equal(
 );
 EOF
 
-"$gateway/runtime/node" --input-type=module - "$inventory" <<'EOF'
+"$gateway/runtime/node" --input-type=module - "$inventory" "$release_version" <<'EOF'
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const inventory = JSON.parse(await readFile(process.argv[2], "utf8"));
-assert.equal(inventory.release, "0.1.1");
-assert.equal(inventory.application_version, "0.1.1");
+const releaseVersion = process.argv[3];
+assert.equal(inventory.release, releaseVersion);
+assert.equal(inventory.application_version, releaseVersion);
 assert.deepEqual(
   inventory.runtime_inventory.map((entry) => entry.name + "@" + entry.version).sort(),
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "MillerCapabilityBridge@0.1.1",
+    `MillerCapabilityBridge@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime wake runtime@1.24.4",
     "Sherpa-ONNX wake runtime@1.13.2",

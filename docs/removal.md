@@ -1,6 +1,6 @@
 # Remove Miller
 
-Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon;
+Miller v0.1.2 tested official Codex CLI/App Server `0.146.0` on Apple Silicon;
 `0.145.0` is protocol reference/evidence only, not a runtime support claim.
 Reset and removal never modify the external Codex installation.
 
@@ -37,7 +37,8 @@ SQLite wake preferences, and removes Miller's generated
 `~/Library/Application Support/ai.millrace.miller/wake-keywords.txt` file and
 its owner-only wake directory. The packaged model/token files are part of the
 app bundle and disappear when the app is removed; bootstrap archives and
-extraction roots are temporary and are deleted by their scripts.
+extraction roots are temporary and are deleted by their scripts. This applies
+to the default **Hey Miller** phrase and any bounded custom phrase.
 
 An externally installed Codex CLI is owned by the user or its package manager.
 Miller reset, repository cleanup, and app removal never remove or modify that

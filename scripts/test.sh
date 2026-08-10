@@ -17,6 +17,14 @@ for argument in "$@"; do
   fi
 done
 
+if [[ "$with_wakeword" == false ]]; then
+  # Keep ordinary tests on a separate SwiftPM plan so a prior wake-linked
+  # build cannot retain the wake header search path.
+  build_root="$repo_root/.build/swift-no-wake"
+  swift_cache="$repo_root/.cache/swift-module-cache-no-wake"
+  clang_cache="$repo_root/.cache/clang-module-cache-no-wake"
+fi
+
 if [[ "$with_wakeword" == true ]]; then
   if ! "$repo_root/scripts/verify-wakeword-dependencies.sh" >/dev/null 2>&1; then
     "$repo_root/scripts/bootstrap-wakeword-dependencies.sh"

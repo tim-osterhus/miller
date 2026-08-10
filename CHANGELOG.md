@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.2
+
+- Fixed truthful external Codex readiness and timeout presentation, including
+  typed fallback after a timed-out optional probe.
+- Fixed native transcript Command-C and selection across rendered line breaks
+  and Markdown blocks without adding a transcript-specific pasteboard path.
+- Integrated optional Wake Listening with the default **Hey Miller** phrase and
+  one bounded custom English phrase. Wake is off by default and its human
+  microphone/custom-phrase gate remains `LIVE_NOT_RUN`.
+- Recorded the bounded Live-text compatibility spike as `INCONCLUSIVE`; typed
+  input during an active Live session, `initialItems`, and attachments remain
+  outside this release.
+- Updated the source package, inventory, SPDX SBOM, notices, provenance, and
+  qualification schemas to v0.1.2.
+
+Release closure result: `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN`. The
+owner-visible M1 gate, signing, notarization, tagging, publication, and push
+were not run.
+
 ## 0.1.1
 
 - Packaged the Miller capability bridge and production Node/Pi gateway.

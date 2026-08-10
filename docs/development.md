@@ -18,7 +18,7 @@ from a private npm cache or invoke the bootstrap implicitly. The tests use local
 fixtures and loopback servers. They do not call a live provider.
 
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon. That is
-the minimum tested/support boundary for v0.1.1. The protocol reference/evidence
+the minimum tested/support boundary for v0.1.2. The protocol reference/evidence
 is the `0.145.0` wire shape and fixture metadata, not a claim that `0.145.0`
 is supported at runtime.
 Protocol reference: `0.145.0`; tested runtime: `0.146.0`.
@@ -66,17 +66,24 @@ The package command performs only ad-hoc development signing.
 Human checks remain in `docs/qualification/text-alpha-host-check.md` and
 `docs/qualification/provider-check.md`. Do not infer those results from CI.
 
-## v0.1.1 qualification contract
+## v0.1.2 qualification contract
 
 The bounded release-candidate sequence is run from a clean source tree:
 
 ```bash
 ./scripts/clean.sh
-git diff --check
+./scripts/bootstrap-gateway-dependencies.sh  # only when Gateway/node_modules is absent
 ./scripts/test.sh
+./scripts/build.sh
+./scripts/verify-provenance.sh
+./scripts/bootstrap-wakeword-dependencies.sh  # explicit pinned-input bootstrap
+./scripts/verify-wakeword-dependencies.sh
+./scripts/test.sh --with-wakeword
 ./scripts/package-release-app.sh
 ./scripts/verify-release-package.sh .artifacts/release/Miller.app
 ./scripts/run-headless-release-qualification.sh
+zsh -n scripts/*.sh
+git diff --check
 du -sk .build .cache .artifacts Gateway/node_modules 2>/dev/null
 ```
 
@@ -146,4 +153,5 @@ WebKit view, use a network, request a permission, or touch media hardware.
 The external-runtime dry run reports
 `EXTERNAL_CODEX_RUNTIME_READY_LIVE_NOT_RUN`; the other successful non-live
 modes report `WEBRTC_HARNESS_READY_LIVE_NOT_RUN`.
-Delegated checks must not run `--live`.
+Delegated checks must not run `--live`. The final headless result is
+`HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN`; it is not publication approval.

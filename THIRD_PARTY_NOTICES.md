@@ -8,12 +8,12 @@ revision `a0ae212ebf6eab5f754c3129608bc5557637e605`.
 
 The upstream project is transitioning from MIT to Apache-2.0. Contributions
 are licensed under the applicable Apache-2.0 or MIT terms identified by the
-upstream `LICENSE` file. In v0.1.1 the SDK is statically linked through the
+upstream `LICENSE` file. In v0.1.2 the SDK is statically linked through the
 Miller capability bridge; no SDK source tree is bundled. The exact reviewed
 license text is packaged at
 `Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
-## v0.1.1 application inventory
+## v0.1.2 application inventory
 
 The application ships the Miller executable with statically linked MCP and
 wake native code, the verified wake model/token files under
@@ -23,7 +23,7 @@ the Pi overlay `@miller/pi-mvp-overlay@0.82.0-a3`, `openai@6.26.0`, and
 authoritative for the exact packaged files.
 
 Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; that
-is the v0.1.1 minimum tested/support boundary. `0.145.0` is protocol
+is the v0.1.2 minimum tested/support boundary. `0.145.0` is protocol
 reference/evidence only and is not a runtime support claim. Codex remains an
 external prerequisite and is not included in this inventory.
 

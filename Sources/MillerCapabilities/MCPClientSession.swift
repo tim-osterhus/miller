@@ -3,6 +3,14 @@ import Darwin
 import MCP
 import MillerCore
 
+public enum MillerCapabilityClientInfo: Sendable {
+    public static let name = "miller"
+    // Keep this aligned with Packaging/Miller.version. The packaged app's
+    // App Server identity is read from its Info.plist; the standalone bridge
+    // has no application bundle metadata, so it uses this build identity.
+    public static let version = "0.1.2"
+}
+
 public enum MCPClientSessionError: Error, Equatable, Sendable {
     case notConnected
     case connectionClosed
@@ -98,7 +106,9 @@ public actor MCPClientSession: MCPClientSessionProtocol {
         httpConfiguration: URLSessionConfiguration?
     ) async throws -> MCPClientSession {
         let client = Client(
-            name: "miller", version: "0.1.1", configuration: .strict
+            name: MillerCapabilityClientInfo.name,
+            version: MillerCapabilityClientInfo.version,
+            configuration: .strict
         )
         let resources: StdioProcessResources?
         let failureSignal: MCPTransportFailureSignal?

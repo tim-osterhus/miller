@@ -3,6 +3,14 @@ import Foundation
 import PackageDescription
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let millerReleaseVersion = try! String(
+    contentsOf: packageRoot.appendingPathComponent("Packaging/Miller.version"),
+    encoding: .utf8
+).trimmingCharacters(in: .whitespacesAndNewlines)
+precondition(
+    millerReleaseVersion == "0.1.2",
+    "Miller release version must be 0.1.2"
+)
 let wakewordLockedRoot = packageRoot
     .appendingPathComponent(".build/vendor/wakeword/locked").path
 let wakewordInputsAvailable = FileManager.default.fileExists(

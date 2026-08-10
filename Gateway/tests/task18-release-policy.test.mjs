@@ -48,6 +48,11 @@ async function makeBundle() {
     "Contents/Resources/Gateway/runtime/node",
     "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
     "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
+    "Contents/Resources/WakeWord/model/encoder.onnx",
+    "Contents/Resources/WakeWord/model/decoder.onnx",
+    "Contents/Resources/WakeWord/model/joiner.onnx",
+    "Contents/Resources/WakeWord/model/bpe.model",
+    "Contents/Resources/WakeWord/model/tokens.txt",
     "Contents/Resources/Legal/LICENSE",
     "Contents/Resources/Legal/NOTICE",
     "Contents/Resources/Legal/PROVENANCE.md",
@@ -281,7 +286,7 @@ test("qualification preflight clears stale readiness and requires measurements",
     join(repoRoot, "scripts", "run-headless-release-qualification.sh"),
     "utf8",
   );
-  assert.match(script, /rm -f [^\n]*v0\.1\.1-headless-report\.md/);
+  assert.match(script, /rm -f [^\n]*v0\.1\.2-headless-report\.md/);
   assert.match(
     script,
     /(?:test -f "\$package_measurement"|\[\[ -f "\$package_measurement")/,
@@ -701,7 +706,7 @@ test("Codex prerequisite docs distinguish protocol evidence from tested runtime"
 test("policy tests remain deterministic without network or wake bootstrap", async () => {
   const testScript = await readFile(join(repoRoot, "scripts", "test.sh"), "utf8");
   assert.equal(createHash("sha256").update(testScript).digest("hex"),
-    "14f02f52fafe1a5e92ded96d3af806d2cd5b38015eefb62e8459d421401d6115");
+    "464aca58d39d897f12cc30a21f2a9147bc410a5628de1d1d09ccc8030fad6f61");
   assert.doesNotMatch(testScript, /bootstrap-gateway-dependencies/);
   assert.match(testScript, /verify-wakeword-dependencies\.sh/);
   assert.match(testScript, /--if-present/);

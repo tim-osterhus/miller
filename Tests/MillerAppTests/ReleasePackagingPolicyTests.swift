@@ -4,6 +4,40 @@ import Testing
 @Suite
 struct ReleasePackagingPolicyTests {
     private let officialSDKURL = "https://github.com/modelcontextprotocol/swift-sdk.git"
+    private let releaseVersion = "0.1.2"
+
+    @Test
+    func oneReleaseVersionFeedsPackageAndCurrentReleaseArtifacts() throws {
+        let version = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Packaging/Miller.version"),
+            encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(version == releaseVersion)
+
+        let manifest = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+        let plist = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Packaging/Info.plist"),
+            encoding: .utf8
+        )
+        let inventory = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/release-inventory.mjs"),
+            encoding: .utf8
+        )
+        let verifier = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/verify-release-package.sh"),
+            encoding: .utf8
+        )
+
+        #expect(manifest.contains("Packaging/Miller.version"))
+        #expect(plist.contains("<string>\(releaseVersion)</string>"))
+        #expect(inventory.contains("release: releaseVersion"))
+        #expect(inventory.contains("application_version: releaseVersion"))
+        #expect(verifier.contains("const releaseVersion = process.argv[4]"))
+        #expect(verifier.contains("inventory.release, releaseVersion"))
+    }
 
     @Test
     func officialMCPDependencyIsPinnedExactly() throws {
@@ -333,7 +367,7 @@ struct ReleasePackagingPolicyTests {
             contentsOf: repositoryRoot.appendingPathComponent("Packaging/Info.plist"),
             encoding: .utf8
         )
-        #expect(plist.contains("<string>0.1.1</string>"))
+        #expect(plist.contains("<string>0.1.2</string>"))
 
         let data = try Data(contentsOf: repositoryRoot.appending(
             path: "Packaging/Miller.spdx.json"
@@ -350,9 +384,9 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
-            "Miller@0.1.1",
-            "MillerCapabilityBridge@0.1.1",
-            "MillerCapabilities@0.1.1",
+            "Miller@0.1.2",
+            "MillerCapabilityBridge@0.1.2",
+            "MillerCapabilities@0.1.2",
             "Node.js@22.22.0",
             "ONNX Runtime@1.24.4",
             "Sherpa-ONNX@1.13.2",
@@ -394,7 +428,8 @@ struct ReleasePackagingPolicyTests {
             encoding: .utf8
         )
         for required in [
-            "MILLER_V0_1_1_READY_HUMAN_NOT_RUN",
+            "MILLER_V0_1_2_READY_HUMAN_NOT_RUN",
+            "HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN",
             "MillerCapabilitiesTests",
             "MillerLiveTests",
             "MillerAppTests",
@@ -413,25 +448,32 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func qualificationDocumentsAreSanitizedAndRecordHumanApproval() throws {
+    func qualificationDocumentsAreSanitizedAndKeepHumanGateUnrun() throws {
         let reportURL = repositoryRoot.appendingPathComponent(
-            "docs/qualification/v0.1.1-headless-report.md"
+            "docs/qualification/v0.1.2-headless-report.md"
         )
         let report = FileManager.default.fileExists(atPath: reportURL.path)
             ? try String(contentsOf: reportURL, encoding: .utf8)
             : nil
         let protocolDocument = try String(contentsOf: repositoryRoot.appendingPathComponent(
-            "docs/qualification/v0.1.1-human-protocol.md"
+            "docs/qualification/v0.1.2-human-protocol.md"
         ), encoding: .utf8)
         if let report {
-            #expect(report.contains("MILLER_V0_1_1_RELEASE_APPROVED"))
-            #expect(report.contains("MILLER_V0_1_1_READY_HUMAN_NOT_RUN") == false)
+            #expect(report.contains("HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN"))
+            #expect(report.contains("MILLER_V0_1_2_READY_HUMAN_NOT_RUN"))
+            #expect(report.contains("MILLER_V0_1_2_RELEASE_APPROVED") == false)
         }
-        #expect(protocolDocument.contains("MILLER_V0_1_1_RELEASE_APPROVED"))
-        #expect(protocolDocument.contains("NOT_RUN") == false)
+        #expect(protocolDocument.contains("HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN"))
+        #expect(protocolDocument.contains("LIVE_NOT_RUN"))
+        #expect(protocolDocument.contains("External Codex readiness/timeout plus one typed turn"))
+        #expect(protocolDocument.contains("Overlay/full-window selection and Command-C"))
+        #expect(protocolDocument.contains("GPT-Live speech/transcript/interrupt/end/second session/cleanup"))
+        #expect(protocolDocument.contains("Default/custom wake phrase"))
+        #expect(protocolDocument.contains("Typed fallback with wake disabled and Live unavailable"))
+        #expect(protocolDocument.contains("Reset/removal/relaunch with no lingering helper or microphone owner"))
         #expect(protocolDocument.contains("transcript body") == false)
-        #expect(protocolDocument.contains("credential") == false)
         #expect(protocolDocument.contains("private path") == false)
+        #expect(protocolDocument.contains("OAuth value") == false)
     }
 
     private var repositoryRoot: URL {
@@ -456,8 +498,9 @@ struct ReleasePackagingPolicyTests {
             "Gateway/package.json",
             "Gateway/package-lock.json",
             "Packaging/Miller.spdx.json",
+            "Packaging/Miller.version",
         ] {
-            try write("{}", to: root.appendingPathComponent(relativePath))
+            try write(relativePath == "Packaging/Miller.version" ? "0.1.2\n" : "{}", to: root.appendingPathComponent(relativePath))
         }
         return root
     }

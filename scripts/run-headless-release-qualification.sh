@@ -2,13 +2,15 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+release_version="$(tr -d '[:space:]' < "$repo_root/Packaging/Miller.version")"
+test "$release_version" = "0.1.2"
 node_path="/opt/homebrew/opt/node@22/bin/node"
 npm_path="/opt/homebrew/opt/node@22/bin/npm"
 release_root="$repo_root/.artifacts/release"
 bundle_root="$release_root/Miller.app"
 inventory_path="$release_root/inventory.json"
 measurement_root="$repo_root/.artifacts/headless-measurement"
-report_path="$repo_root/docs/qualification/v0.1.1-headless-report.md"
+report_path="$repo_root/docs/qualification/v0.1.2-headless-report.md"
 package_measurement="$release_root/package-measurement.env"
 report_tmp_path=""
 report_committed=false
@@ -72,7 +74,7 @@ clear_stale_report() {
   fi
   if [[ -e "$report_path" ]]; then
     [[ -f "$report_path" ]] || return 1
-    rm -f -- "$repo_root/docs/qualification/v0.1.1-headless-report.md"
+    rm -f -- "$repo_root/docs/qualification/v0.1.2-headless-report.md"
   fi
 }
 
@@ -551,7 +553,7 @@ discover_baseline() {
 }
 
 write_report() {
-  local marker="MILLER_V0_1_1_READY_HUMAN_NOT_RUN"
+  local marker="MILLER_V0_1_2_READY_HUMAN_NOT_RUN"
   local bundle_bytes="$(logical_file_bytes "$bundle_root")"
   local app_binary_bytes="$(stat -f %z "$bundle_root/Contents/MacOS/Miller")"
   local node_binary_bytes="$(stat -f %z "$bundle_root/Contents/Resources/Gateway/runtime/node")"
@@ -571,9 +573,10 @@ write_report() {
   report_tmp_path="$report_path.tmp.$$"
   [[ ! -e "$report_tmp_path" && ! -L "$report_tmp_path" ]] || return 1
   {
-    printf '# Miller v0.1.1 headless qualification\n\n'
+    printf '# Miller v%s headless qualification\n\n' "$release_version"
     printf 'Marker: %s\n\n' "$marker"
-    printf 'This report is deterministic, synthetic, and sanitized. It makes no owner-visible claim and does not claim Developer ID signing, notarization, publication, real-provider behavior, microphone behavior, audio behavior, browser behavior, clipboard behavior, or account readiness.\n\n'
+    printf 'Terminal result: HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN\n\n'
+    printf 'This report is deterministic, synthetic, and sanitized. It records a headless release-ready result only; it is not publication approval and makes no owner-visible claim. It does not claim Developer ID signing, notarization, publication, real-provider behavior, microphone behavior, audio behavior, browser behavior, clipboard behavior, or account readiness.\n\n'
     printf '## Deterministic matrix\n\n'
     printf '| Evidence | Status | Explicit evidence |\n| --- | --- | --- |\n'
     printf '| Same read-only tool through Codex typed / App Server | %s | packaged MillerCapabilityBridge -> Swift CapabilityBroker -> local MCP JSON-RPC fixture; route-specific broker audit/result and fixture audit recorded lookup_note:ok |\n' "$(status_for_check deterministic_route_typed)"
@@ -594,7 +597,7 @@ write_report() {
       (( index++ ))
     done
     printf '\n## Package and provenance\n\n'
-    printf 'Application version: 0.1.1\nApplication SBOM version: 0.1.1\n'
+    printf 'Application version: %s\nApplication SBOM version: %s\n' "$release_version" "$release_version"
     printf 'Signing: ad-hoc structural verification only\nNotarization: NOT_RUN\n'
     printf 'Runtime inventory: MCP Swift SDK, Miller capability bridge, linked Sherpa-ONNX and ONNX Runtime wake code, five verified wake model/token files, Node.js, Pi overlay, openai, and partial-json\n'
     printf 'Wake Listening: deterministic integration evidence is included; owner-visible microphone, permission, custom-phrase, and audible-audio checks remain LIVE_NOT_RUN\n\n'
@@ -617,7 +620,17 @@ write_report() {
     printf 'Post-cleanup retained bytes (release inspection root plus this report): PENDING bytes\n\n'
     printf '## Cleanup boundary\n\n'
     printf 'The preserve-release check passed only with the canonical release root retained. Build/cache roots, Gateway dependencies, wake inputs, sockets, unknown artifacts, .DS_Store files, and measurement-owned processes were absent; baseline processes remained unchanged.\n\n'
-    printf 'Human microphone, audio, browser, clipboard, account, and real-provider rows remain NOT_RUN. No transcript text, audio, account secret, provider payload, socket, local filesystem location, or runtime log is retained in this report.\n'
+    printf 'Ordinary test wake-input check: PASS; scripts/test.sh used its no-wake scratch/cache roots and did not create a wake vendor, download, staging, or model-input root.\n\n'
+    printf '## Owner-visible M1 gate\n\n'
+    printf 'Gate result: LIVE_NOT_RUN\n\n'
+    printf 'The owner-visible M1 gate remains explicitly NOT RUN. The following exact checks require direct owner observation:\n\n'
+    printf -- '- external Codex readiness/timeout plus typed turn\n'
+    printf -- '- overlay/full-window selection and Command-C\n'
+    printf -- '- GPT-Live speech/transcript/interrupt/end/second session/cleanup\n'
+    printf -- '- default/custom wake phrase\n'
+    printf -- '- typed fallback with wake disabled and Live unavailable\n'
+    printf -- '- reset/removal/relaunch/no lingering helper or microphone owner\n\n'
+    printf 'No transcript text, audio, account secret, provider payload, socket, local filesystem location, or runtime log is retained in this report.\n'
   } > "$report_tmp_path"
   local retained_bytes
   for _ in {1..3}; do
@@ -628,7 +641,9 @@ write_report() {
       "$report_tmp_path"
   done
   assert_cleanup_boundary
-  grep -q '^Marker: MILLER_V0_1_1_READY_HUMAN_NOT_RUN$' "$report_tmp_path"
+  grep -q '^Marker: MILLER_V0_1_2_READY_HUMAN_NOT_RUN$' "$report_tmp_path"
+  grep -q '^Terminal result: HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN$' "$report_tmp_path"
+  grep -q '^Gate result: LIVE_NOT_RUN$' "$report_tmp_path"
   ! grep -E 'release-(closed|approved)|MILLER_.*(CLOSED|APPROVED)' "$report_tmp_path" >/dev/null
   [[ ! -e "$report_path" && ! -L "$report_path" ]] || return 1
   mv -- "$report_tmp_path" "$report_path"
@@ -702,4 +717,4 @@ record_check cleanup_proof "$cleanup_proof_status" "$((cleanup_proof_finished_ms
 
 write_report
 [[ "$report_committed" == true ]]
-printf 'MILLER_V0_1_1_READY_HUMAN_NOT_RUN\n'
+printf 'HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN\n'
