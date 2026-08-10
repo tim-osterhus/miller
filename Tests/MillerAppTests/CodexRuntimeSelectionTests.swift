@@ -184,6 +184,30 @@ struct CodexRuntimeSelectionTests {
 
     @Test
     @MainActor
+    func settingsModelReportsRejectedRuntimeInsteadOfNotInstalled() throws {
+        let fixture = try RuntimeSelectionFixture()
+        defer { fixture.cleanup() }
+        let rejected = try fixture.executable(named: "rejected-codex")
+        let suite = "miller-codex-runtime-settings-rejected-\(UUID().uuidString.lowercased())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = CodexRuntimePreferences(defaults: defaults)
+        preferences.save(path: rejected.path)
+
+        let model = CodexRuntimeSettingsModel(
+            preferences: preferences,
+            resolver: CodexRuntimeResolver(
+                automaticCandidates: [],
+                verify: { _ in throw CodexRuntimeSelectionError.invalidCandidate }
+            )
+        )
+
+        #expect(model.displayPath == nil)
+        #expect(model.status == "Unsupported Codex executable")
+    }
+
+    @Test
+    @MainActor
     func settingsSelectionValidatesBeforeSavingAndRequestsRelaunch() throws {
         let fixture = try RuntimeSelectionFixture()
         defer { fixture.cleanup() }

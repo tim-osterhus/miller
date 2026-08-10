@@ -420,6 +420,24 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func releaseProvenanceNamesAdHocSigningWithoutCallingBundleUnsigned() throws {
+        let packageScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "scripts/package-dev-app.sh"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(
+            packageScript.contains(
+                "This release candidate is not Developer ID-signed and is not notarized."
+            )
+        )
+        #expect(packageScript.contains("This unsigned release candidate") == false)
+        #expect(packageScript.contains("Signing status: ad-hoc structural verification only."))
+    }
+
+    @Test
     func headlessQualificationDeclaresTheDeterministicMatrixAndSafeMarker() throws {
         let script = try String(
             contentsOf: repositoryRoot.appendingPathComponent(

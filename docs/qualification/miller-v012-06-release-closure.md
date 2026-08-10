@@ -26,6 +26,13 @@ inventory, SPDX/provenance checks, package/file measurements, and cleanup:
 `v0.1.2-headless-report.md`. The owner-visible protocol is
 `v0.1.2-human-protocol.md`.
 
+Packet 5's earlier route-fixture observation is explicitly superseded by the
+later exact v0.1.2 headless run (`./scripts/run-headless-release-qualification.sh`)
+at release HEAD `5dc99351d83027abdb9f9b1fe176b044444d0ed7`, whose committed
+report records PASS for the route and Pi-provider checks. Packet 5 remains
+`LIVE_NOT_RUN` for owner-visible microphone, custom-phrase, and wake behavior;
+Packet 3 remains `INCONCLUSIVE`.
+
 The release package must retain only the verified `Miller.app` and its sibling
 inventory under `.artifacts/release/`. Build/cache roots, Gateway dependencies,
 wake downloads/extraction/staging roots, temporary App Server/helper/test roots,

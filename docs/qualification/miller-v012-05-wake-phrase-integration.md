@@ -45,12 +45,19 @@ microphone owner, lifecycle races and stale callbacks, one Live start and one
 handoff, failure/interrupt cleanup, sleep/inactive/device loss/shutdown, and
 package inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The linked full serial suite passed 949 tests. The
-headless qualification also passed its full serial suite, package verifier,
-provenance check, idle launch checks, and preserve-release cleanup proof; its
-three route fixtures returned status 79 and the Pi-provider fixture returned
-status 1 in this environment, so those fixture rows are not claimed as a
-qualification pass.
+in the parent handoff. The linked full serial suite passed 949 tests.
+
+The earlier route-fixture observation—three route fixtures returned status 79
+and the Pi-provider fixture returned status 1 in that environment—is retained
+as historical evidence and explicitly superseded for deterministic headless
+evidence by the later exact v0.1.2 run
+(`./scripts/run-headless-release-qualification.sh`) at release HEAD
+`5dc99351d83027abdb9f9b1fe176b044444d0ed7`. Its committed
+`v0.1.2-headless-report.md` records PASS for the three route checks and the
+Pi-provider check. This supersession is headless evidence only; it does not
+qualify a human wake run, and the owner-visible microphone, permission,
+custom-phrase, audible handoff, Live, and recovery rows remain
+`LIVE_NOT_RUN`.
 
 ## Measurements
 

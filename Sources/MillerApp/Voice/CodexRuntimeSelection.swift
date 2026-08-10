@@ -198,12 +198,16 @@ final class CodexRuntimeSettingsModel: ObservableObject {
     ) {
         self.preferences = preferences
         self.resolver = resolver
-        if let selected = resolver.resolve(savedPath: preferences.loadPath()) {
+        switch resolver.resolveReadiness(savedPath: preferences.loadPath()) {
+        case let .available(selected):
             displayPath = selected.executableURL.path
             status = selected.source == .saved ? "Selected" : "Detected"
-        } else {
+        case .missing:
             displayPath = nil
             status = "Not installed"
+        case .rejected:
+            displayPath = nil
+            status = "Unsupported Codex executable"
         }
     }
 
