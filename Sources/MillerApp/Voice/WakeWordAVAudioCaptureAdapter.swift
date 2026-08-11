@@ -162,7 +162,7 @@ final class WakeWordCaptureLifecycleFence: @unchecked Sendable {
 struct WakeWordAudioEngineBoundary: @unchecked Sendable {
     typealias InstallTap = (
         AVAudioFrameCount,
-        AVAudioFormat,
+        AVAudioFormat?,
         @escaping AVAudioNodeTapBlock
     ) -> Void
 
@@ -282,10 +282,6 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                         sampleRate: 16_000,
                         channels: 1,
                         interleaved: true
-                      ),
-                      let converter = AVAudioConverter(
-                        from: inputFormat,
-                        to: target
                       )
                 else { throw WakeWordCaptureStartError.inputDeviceUnavailable }
 
@@ -303,11 +299,10 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                         snapshot,
                         generation: generation,
                         callback: callback,
-                        converter: converter,
                         target: target
                     )
                 }
-                audioEngineBoundary.installTap(1_024, inputFormat, tap)
+                audioEngineBoundary.installTap(1_024, nil, tap)
                 audioEngineBoundary.prepare()
                 do {
                     try audioEngineBoundary.start()
@@ -315,7 +310,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                     audioEngineBoundary.removeTap()
                     throw WakeWordCaptureStartError.captureFailed
                 }
-                self.converter = converter
+                self.converter = nil
             }
         } catch {
             lifecycleFence.invalidate()
@@ -372,11 +367,22 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         _ snapshot: WakeWordAudioBufferSnapshot,
         generation: UInt64,
         callback: (@Sendable (ContiguousArray<Int16>) -> Void)?,
-        converter: AVAudioConverter,
         target: AVAudioFormat
     ) {
         guard lifecycleFence.accepts(generation: generation) else { return }
         do {
+            let converter: AVAudioConverter
+            if let current = self.converter,
+               current.inputFormat == snapshot.buffer.format {
+                converter = current
+            } else {
+                guard let current = AVAudioConverter(
+                    from: snapshot.buffer.format,
+                    to: target
+                ) else { throw WakeWordCaptureStartError.captureFailed }
+                self.converter = current
+                converter = current
+            }
             let converted = try Self.convert(
                 snapshot.buffer,
                 using: converter,

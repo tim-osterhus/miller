@@ -180,6 +180,75 @@ struct WakeWordCaptureAdapterTests {
 
     @Test
     @MainActor
+    func restartNegotiatesNativeTapAndConvertsTheDeliveredFormat() async throws {
+        let initialFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let postLiveFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let deliveredFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 24_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let audio = InjectedWakeAudioEngine(format: initialFormat)
+        let adapter = WakeWordAVAudioCaptureAdapter(
+            ownership: MicrophoneOwnership(),
+            permissionStatus: { .authorized },
+            requestPermission: { .authorized },
+            inputAvailable: { true },
+            audioEngineBoundary: audio.boundary
+        )
+        let received = WakeSampleDeliveryProbe()
+        let failures = WakeCaptureFailureProbe()
+        adapter.onSamples = { samples in
+            received.record(samples, deliveredOnMainThread: Thread.isMainThread)
+        }
+        adapter.setFailureHandler { failures.record($0) }
+
+        _ = try await adapter.startWakeMonitoring()
+        await adapter.stopWakeMonitoring()
+        audio.setOutputFormat(postLiveFormat)
+        _ = try await adapter.startWakeMonitoring()
+
+        let nativeTapNegotiation = audio.installedTapFormats.map { $0 == nil }
+        #expect(nativeTapNegotiation == [true, true])
+        guard nativeTapNegotiation == [true, true] else { return }
+
+        audio.setOutputFormat(deliveredFormat)
+        let currentTap = try #require(audio.installedTaps.last)
+        audio.invoke(
+            currentTap,
+            with: try audio.makeBuffer(
+                format: deliveredFormat,
+                frameCount: 1_024
+            )
+        )
+        try await waitForSampleCount(1, in: received)
+
+        #expect(received.deliveries == [
+            .init(
+                sampleCount: 480,
+                firstSample: 0,
+                deliveredOnMainThread: true
+            ),
+        ])
+        #expect(failures.reasons.isEmpty)
+        #expect(adapter.isWakeMonitoring)
+
+        await adapter.stopWakeMonitoring()
+    }
+
+    @Test
+    @MainActor
     func startedAdapterReportsOversizedTapBufferAndStopsMonitoring() async throws {
         let audio = InjectedWakeAudioEngine()
         let adapter = WakeWordAVAudioCaptureAdapter(
@@ -310,18 +379,26 @@ private final class UncheckedSendableBox<Value>: @unchecked Sendable {
 
 private final class InjectedWakeAudioEngine: @unchecked Sendable {
     private let lock = NSLock()
-    private let format = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: 16_000,
-        channels: 1,
-        interleaved: true
-    )!
+    private var format: AVAudioFormat
     private var taps = [AVAudioNodeTapBlock]()
+    private var tapFormats = [AVAudioFormat?]()
+
+    init(format: AVAudioFormat? = nil) {
+        self.format = format ?? AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        )!
+    }
 
     lazy var boundary = WakeWordAudioEngineBoundary(
-        outputFormat: { [unowned self] in format },
-        installTap: { [unowned self] _, _, tap in
-            lock.withLock { taps.append(tap) }
+        outputFormat: { [unowned self] in lock.withLock { format } },
+        installTap: { [unowned self] _, format, tap in
+            lock.withLock {
+                taps.append(tap)
+                tapFormats.append(format)
+            }
         },
         removeTap: {},
         prepare: {},
@@ -333,7 +410,19 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
         lock.withLock { taps }
     }
 
-    func makeBuffer(frameCount: AVAudioFrameCount = 480) throws -> AVAudioPCMBuffer {
+    var installedTapFormats: [AVAudioFormat?] {
+        lock.withLock { tapFormats }
+    }
+
+    func setOutputFormat(_ format: AVAudioFormat) {
+        lock.withLock { self.format = format }
+    }
+
+    func makeBuffer(
+        format: AVAudioFormat? = nil,
+        frameCount: AVAudioFrameCount = 480
+    ) throws -> AVAudioPCMBuffer {
+        let format = format ?? lock.withLock { self.format }
         let buffer = try #require(AVAudioPCMBuffer(
             pcmFormat: format,
             frameCapacity: frameCount
