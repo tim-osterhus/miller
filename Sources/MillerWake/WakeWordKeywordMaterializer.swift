@@ -5,6 +5,9 @@ public enum WakeWordKeywordMaterializerError: Error, Equatable, Sendable {
     case tokensFileMissing
     case malformedTokensFile
     case tokensFileTooLarge
+    case bpeModelMissing
+    case malformedBPEModel
+    case bpeModelTooLarge
     case unsafePath
     case writeFailed
     case rollbackFailed
@@ -14,6 +17,148 @@ enum WakeWordKeywordMaterializerFaultInjection: Sendable {
     case none
     case failAfterInstall
     case failAfterInstallAndRollback
+}
+
+private enum SentencePieceScoreParser {
+    private struct Reader {
+        let bytes: [UInt8]
+        var index = 0
+
+        var isAtEnd: Bool { index == bytes.count }
+
+        mutating func readVarint() throws -> UInt64 {
+            var value: UInt64 = 0
+            var shift: UInt64 = 0
+            for byteIndex in 0..<10 {
+                guard index < bytes.count else { throw malformed }
+                let byte = bytes[index]
+                index += 1
+                if byteIndex == 9 {
+                    guard byte & 0x80 == 0, byte & 0x7f <= 1 else {
+                        throw malformed
+                    }
+                }
+                value |= UInt64(byte & 0x7f) << shift
+                if byte & 0x80 == 0 { return value }
+                shift += 7
+            }
+            throw malformed
+        }
+
+        mutating func readLengthDelimited() throws -> [UInt8] {
+            let length = try readVarint()
+            guard length <= UInt64(bytes.count - index) else { throw malformed }
+            let end = index + Int(length)
+            defer { index = end }
+            return Array(bytes[index..<end])
+        }
+
+        mutating func readFloat() throws -> Float {
+            guard bytes.count - index >= 4 else { throw malformed }
+            let bits = UInt32(bytes[index])
+                | UInt32(bytes[index + 1]) << 8
+                | UInt32(bytes[index + 2]) << 16
+                | UInt32(bytes[index + 3]) << 24
+            index += 4
+            return Float(bitPattern: bits)
+        }
+
+        mutating func skip(wireType: UInt64) throws {
+            switch wireType {
+            case 0:
+                _ = try readVarint()
+            case 1:
+                guard bytes.count - index >= 8 else { throw malformed }
+                index += 8
+            case 2:
+                _ = try readLengthDelimited()
+            case 5:
+                guard bytes.count - index >= 4 else { throw malformed }
+                index += 4
+            default:
+                throw malformed
+            }
+        }
+    }
+
+    private static var malformed: WakeWordKeywordMaterializerError {
+        .malformedBPEModel
+    }
+
+    static func parse(
+        _ data: Data,
+        allowedTokens: Set<String>
+    ) throws -> [String: Float] {
+        var reader = Reader(bytes: Array(data))
+        var scores = [String: Float]()
+        var modelType: UInt64?
+        while !reader.isAtEnd {
+            let tag = try reader.readVarint()
+            let field = tag >> 3
+            let wire = tag & 7
+            if field == 1, wire == 2 {
+                let piece = try parsePiece(reader.readLengthDelimited())
+                if piece.type == 1,
+                   piece.score.isFinite,
+                   allowedTokens.contains(piece.token)
+                {
+                    scores[piece.token] = piece.score
+                }
+            } else if field == 2, wire == 2 {
+                modelType = try parseModelType(reader.readLengthDelimited())
+            } else {
+                try reader.skip(wireType: wire)
+            }
+        }
+        guard modelType == 1, !scores.isEmpty else { throw malformed }
+        return scores
+    }
+
+    private static func parseModelType(_ bytes: [UInt8]) throws -> UInt64? {
+        var reader = Reader(bytes: bytes)
+        var modelType: UInt64?
+        while !reader.isAtEnd {
+            let tag = try reader.readVarint()
+            let field = tag >> 3
+            let wire = tag & 7
+            if field == 3, wire == 0 {
+                modelType = try reader.readVarint()
+            } else {
+                try reader.skip(wireType: wire)
+            }
+        }
+        return modelType
+    }
+
+    private static func parsePiece(
+        _ bytes: [UInt8]
+    ) throws -> (token: String, score: Float, type: UInt64) {
+        var reader = Reader(bytes: bytes)
+        var token: String?
+        var score: Float?
+        var type: UInt64 = 1
+        while !reader.isAtEnd {
+            let tag = try reader.readVarint()
+            let field = tag >> 3
+            let wire = tag & 7
+            switch (field, wire) {
+            case (1, 2):
+                guard let value = String(
+                    bytes: try reader.readLengthDelimited(),
+                    encoding: .utf8
+                ) else { throw malformed }
+                token = value
+            case (2, 5):
+                score = try reader.readFloat()
+            case (3, 0):
+                type = try reader.readVarint()
+            default:
+                try reader.skip(wireType: wire)
+            }
+        }
+        guard let token, !token.isEmpty, let score else { throw malformed }
+        return (token, score, type)
+    }
 }
 
 public struct WakeWordMaterializedPhrase: Equatable, Sendable {
@@ -33,21 +178,25 @@ public struct WakeWordMaterializedPhrase: Equatable, Sendable {
 public struct WakeWordKeywordMaterializer: Sendable {
     public static let maximumTokensFileBytes = 2 * 1024 * 1024
     public static let maximumVocabularyEntries = 100_000
+    public static let maximumBPEModelBytes = 2 * 1024 * 1024
     public static let keywordFileName = "wake-keywords.txt"
 
     private let tokensFile: URL
     private let applicationSupportDirectory: URL
     private let keywordFileName: String
     private let vocabulary: [String]
+    private let tokenScores: [String: Float]
     private let faultInjection: WakeWordKeywordMaterializerFaultInjection
 
     public init(
         tokensFile: URL,
+        bpeModel: URL? = nil,
         applicationSupportDirectory: URL,
         keywordFileName: String = Self.keywordFileName
     ) throws {
         try self.init(
             tokensFile: tokensFile,
+            bpeModel: bpeModel,
             applicationSupportDirectory: applicationSupportDirectory,
             keywordFileName: keywordFileName,
             faultInjection: .none
@@ -56,6 +205,7 @@ public struct WakeWordKeywordMaterializer: Sendable {
 
     init(
         tokensFile: URL,
+        bpeModel: URL? = nil,
         applicationSupportDirectory: URL,
         keywordFileName: String = Self.keywordFileName,
         faultInjection: WakeWordKeywordMaterializerFaultInjection
@@ -71,14 +221,13 @@ public struct WakeWordKeywordMaterializer: Sendable {
         self.tokensFile = tokensFile
         self.applicationSupportDirectory = applicationSupportDirectory
         self.keywordFileName = keywordFileName
-        let data: Data
-        do {
-            data = try Data(contentsOf: tokensFile)
-        } catch {
-            throw WakeWordKeywordMaterializerError.tokensFileMissing
-        }
-        guard data.count <= Self.maximumTokensFileBytes,
-              let text = String(data: data, encoding: .utf8),
+        let data = try Self.readBoundedRegularFile(
+            at: tokensFile,
+            maximumBytes: Self.maximumTokensFileBytes,
+            missing: .tokensFileMissing,
+            tooLarge: .tokensFileTooLarge
+        )
+        guard let text = String(data: data, encoding: .utf8),
               !text.utf8.contains(0)
         else { throw WakeWordKeywordMaterializerError.tokensFileTooLarge }
         let parsed = try Self.parseVocabulary(text)
@@ -89,7 +238,70 @@ public struct WakeWordKeywordMaterializer: Sendable {
         var ordered = Array(repeating: "", count: maximumID + 1)
         for (token, id) in parsed { ordered[id] = token }
         vocabulary = ordered
+        if let bpeModel {
+            guard bpeModel.isFileURL else {
+                throw WakeWordKeywordMaterializerError.unsafePath
+            }
+            let modelData = try Self.readBoundedRegularFile(
+                at: bpeModel,
+                maximumBytes: Self.maximumBPEModelBytes,
+                missing: .bpeModelMissing,
+                tooLarge: .bpeModelTooLarge
+            )
+            tokenScores = try SentencePieceScoreParser.parse(
+                modelData,
+                allowedTokens: Set(parsed.keys)
+            )
+        } else {
+            tokenScores = [:]
+        }
         self.faultInjection = faultInjection
+    }
+
+    private static func readBoundedRegularFile(
+        at url: URL,
+        maximumBytes: Int,
+        missing: WakeWordKeywordMaterializerError,
+        tooLarge: WakeWordKeywordMaterializerError
+    ) throws -> Data {
+        guard url.isFileURL else {
+            throw WakeWordKeywordMaterializerError.unsafePath
+        }
+        let descriptor = url.path.withCString {
+            Darwin.open($0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else {
+            if errno == ELOOP || errno == ENOTDIR {
+                throw WakeWordKeywordMaterializerError.unsafePath
+            }
+            throw missing
+        }
+        defer { Darwin.close(descriptor) }
+
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else { throw missing }
+        guard (info.st_mode & S_IFMT) == S_IFREG else {
+            throw WakeWordKeywordMaterializerError.unsafePath
+        }
+        guard info.st_size >= 0, info.st_size <= maximumBytes else {
+            throw tooLarge
+        }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw missing
+            }
+            guard data.count + count <= maximumBytes else { throw tooLarge }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 
     public var url: URL {
@@ -100,7 +312,10 @@ public struct WakeWordKeywordMaterializer: Sendable {
     }
 
     public func materialize(_ phrase: String) throws -> WakeWordMaterializedPhrase {
-        let compiler = WakeWordPhraseCompiler(tokens: vocabulary)
+        let compiler = WakeWordPhraseCompiler(
+            tokens: vocabulary,
+            tokenScores: tokenScores
+        )
         let normalized = try compiler.normalize(phrase)
         let tokens = try compiler.tokenize(normalized)
         let contents = Data((tokens.joined(separator: " ") + "\n").utf8)

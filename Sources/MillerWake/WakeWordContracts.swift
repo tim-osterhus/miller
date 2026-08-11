@@ -148,9 +148,11 @@ public struct WakeWordPhraseCompiler: Sendable {
     public let maximumUTF8Bytes: Int
     public let maximumTokens: Int
     private let tokenIDs: [String: Int]
+    private let scoredTokens: [(token: String, characters: [Character], score: Float)]
 
     public init(
         tokens: [String],
+        tokenScores: [String: Float] = [:],
         maximumUTF8Bytes: Int = 128,
         maximumTokens: Int = 64
     ) {
@@ -160,6 +162,12 @@ public struct WakeWordPhraseCompiler: Sendable {
             if result[entry.element] == nil {
                 result[entry.element] = entry.offset
             }
+        }
+        scoredTokens = tokens.compactMap { token in
+            guard let score = tokenScores[token], score.isFinite else {
+                return nil
+            }
+            return (token, Array(token), score)
         }
     }
 
@@ -187,6 +195,9 @@ public struct WakeWordPhraseCompiler: Sendable {
 
     public func tokenize(_ phrase: String) throws -> [String] {
         let normalized = try normalize(phrase)
+        if !scoredTokens.isEmpty {
+            return try tokenizeSentencePiece(normalized)
+        }
         var result = [String]()
         for word in normalized.split(separator: " ") {
             let wholeToken = "▁\(word)"
@@ -204,6 +215,45 @@ public struct WakeWordPhraseCompiler: Sendable {
             guard result.count <= maximumTokens else {
                 throw WakeWordPhraseError.tooManyTokens
             }
+        }
+        return result
+    }
+
+    private func tokenizeSentencePiece(_ normalized: String) throws -> [String] {
+        let input = Array("▁" + normalized.uppercased().replacingOccurrences(
+            of: " ", with: "▁"
+        ))
+        var bestScores = Array<Float?>(repeating: nil, count: input.count + 1)
+        var bestPaths = Array<[String]?>(repeating: nil, count: input.count + 1)
+        bestScores[0] = 0
+        bestPaths[0] = []
+
+        for start in input.indices {
+            guard let currentScore = bestScores[start],
+                  let currentPath = bestPaths[start]
+            else { continue }
+            for candidate in scoredTokens {
+                let end = start + candidate.characters.count
+                guard end <= input.count,
+                      input[start..<end].elementsEqual(candidate.characters)
+                else { continue }
+                let score = currentScore + candidate.score
+                if bestScores[end] == nil || score > bestScores[end]! {
+                    bestScores[end] = score
+                    bestPaths[end] = currentPath + [candidate.token]
+                }
+            }
+        }
+
+        guard let result = bestPaths[input.count] else {
+            let reachable = bestScores.indices.last(where: { bestScores[$0] != nil }) ?? 0
+            let failed = reachable < input.count && input[reachable] != "▁"
+                ? String(input[reachable]).lowercased()
+                : normalized
+            throw WakeWordPhraseError.unsupportedToken(failed)
+        }
+        guard result.count <= maximumTokens else {
+            throw WakeWordPhraseError.tooManyTokens
         }
         return result
     }

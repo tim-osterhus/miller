@@ -3011,6 +3011,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         if let wakeModelPaths {
             wakeMaterializer = try? WakeWordKeywordMaterializer(
                 tokensFile: wakeModelPaths.tokens,
+                bpeModel: wakeModelPaths.tokens.deletingLastPathComponent()
+                    .appendingPathComponent("bpe.model", isDirectory: false),
                 applicationSupportDirectory: wakeModelPaths.keywords
                     .deletingLastPathComponent()
             )
