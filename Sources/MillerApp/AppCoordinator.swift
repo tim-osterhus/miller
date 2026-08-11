@@ -10,17 +10,25 @@ import MillerStorage
 import MillerWake
 import SwiftUI
 
-private func loadWakeTuning(
+func loadWakeTuning(
     from repository: SQLitePreferenceRepository
 ) async throws -> SherpaWakeWordTuning {
     let keywordScore = try await repository.value(for: .wakeKeywordScore)
     let detectionThreshold = try await repository.value(
         for: .wakeDetectionThreshold
     )
-    return SherpaWakeWordTuning(
+    if let tuning = SherpaWakeWordTuning(
         keywordScore: keywordScore,
         keywordThreshold: detectionThreshold
-    ) ?? .default
+    ) {
+        return tuning
+    }
+    let tuning = SherpaWakeWordTuning.default
+    try await repository.setWakeTuning(
+        keywordScore: tuning.keywordScore,
+        detectionThreshold: tuning.keywordThreshold
+    )
+    return tuning
 }
 
 enum AccessibilityLabel {

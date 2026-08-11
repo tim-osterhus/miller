@@ -48,7 +48,7 @@ handoff, failure/interrupt cleanup, sleep/device loss/shutdown, focus
 independence, persisted tuning defaults and rollback, and package
 inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The current full serial suite passed 986 tests.
+in the parent handoff. The current full serial suite passed 988 tests.
 
 The earlier route-fixture observation—three route fixtures returned status 79
 and the Pi-provider fixture returned status 1 in that environment—is retained

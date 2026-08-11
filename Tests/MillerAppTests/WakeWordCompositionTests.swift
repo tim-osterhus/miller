@@ -7,6 +7,57 @@ import Testing
 
 @Suite("Wakeword production composition")
 struct WakeWordCompositionTests {
+    @Test @MainActor
+    func legacyInvalidTuningIsDurablyNormalizedWhenLoaded() async throws {
+        let fixture = try WakeTuningPreferenceFixture()
+        defer { fixture.remove() }
+        try await fixture.repository.setWakeTuning(
+            keywordScore: 0.0,
+            detectionThreshold: 0.5
+        )
+
+        let tuning = try await loadWakeTuning(from: fixture.repository)
+        let settings = WakeWordSettingsController(
+            enable: { .monitoring },
+            disable: { .disabled }
+        )
+        await settings.restorePersistedPreferences(
+            enabled: false,
+            phrase: "Hey Miller",
+            tuning: tuning
+        )
+
+        #expect(tuning == .default)
+        #expect(settings.tuning == .default)
+        #expect(try await fixture.repository.value(for: .wakeKeywordScore) == 5.0)
+        #expect(
+            try await fixture.repository.value(for: .wakeDetectionThreshold)
+                == 0.05
+        )
+        await fixture.repository.close()
+    }
+
+    @Test
+    func validPersistedTuningIsNotChangedWhenLoaded() async throws {
+        let fixture = try WakeTuningPreferenceFixture()
+        defer { fixture.remove() }
+        try await fixture.repository.setWakeTuning(
+            keywordScore: 7.0,
+            detectionThreshold: 0.08
+        )
+
+        let tuning = try await loadWakeTuning(from: fixture.repository)
+
+        #expect(tuning.keywordScore == 7.0)
+        #expect(tuning.keywordThreshold == 0.08)
+        #expect(try await fixture.repository.value(for: .wakeKeywordScore) == 7.0)
+        #expect(
+            try await fixture.repository.value(for: .wakeDetectionThreshold)
+                == 0.08
+        )
+        await fixture.repository.close()
+    }
+
     @Test
     func applicationFocusIsNotAWakeLifecycleGateAndStoredTuningIsComposed() throws {
         let source = try String(
@@ -129,6 +180,29 @@ struct WakeWordCompositionTests {
         #expect(recorder.startCount == 2)
         #expect(production.state == .monitoring)
         #expect(!integration.liveSessionActive)
+    }
+}
+
+private final class WakeTuningPreferenceFixture {
+    let root: URL
+    let repository: SQLitePreferenceRepository
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "miller-wake-tuning-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        repository = try SQLitePreferenceRepository(
+            path: root.appendingPathComponent("miller.sqlite3").path
+        )
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
     }
 }
 
