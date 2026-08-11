@@ -202,6 +202,9 @@ struct WakeWordAudioEngineBoundary: @unchecked Sendable {
     }
 }
 
+typealias WakeWordAudioEngineBoundaryFactory =
+    @Sendable () -> WakeWordAudioEngineBoundary
+
 @MainActor
 final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
@@ -212,11 +215,12 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     private let requestPermission: @Sendable () async -> MicrophonePermission
     private let inputAvailable: (@Sendable () -> Bool)?
     private let audioQueue: DispatchQueue
-    private let audioEngineBoundary: WakeWordAudioEngineBoundary
+    private let audioEngineBoundaryFactory: WakeWordAudioEngineBoundaryFactory
     private let lifecycleFence = WakeWordCaptureLifecycleFence()
     private let chunker = WakeWordPCM16Chunker()
     private var generation: UInt64 = 0
     private var lease: MicrophoneOwnership.Lease?
+    private var audioEngineBoundary: WakeWordAudioEngineBoundary?
     private var converter: AVAudioConverter?
     private var invalidationTask: Task<Void, Never>?
     private var failureHandler:
@@ -231,15 +235,15 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
             await SystemMicrophonePermission.request()
         },
         inputAvailable: (@Sendable () -> Bool)? = nil,
-        engine: AVAudioEngine = AVAudioEngine(),
-        audioEngineBoundary: WakeWordAudioEngineBoundary? = nil
+        audioEngineBoundaryFactory: @escaping WakeWordAudioEngineBoundaryFactory = {
+            WakeWordAudioEngineBoundary.live(engine: AVAudioEngine())
+        }
     ) {
         self.ownership = ownership
         self.permissionStatus = permissionStatus
         self.requestPermission = requestPermission
         self.inputAvailable = inputAvailable
-        self.audioEngineBoundary = audioEngineBoundary
-            ?? WakeWordAudioEngineBoundary.live(engine: engine)
+        self.audioEngineBoundaryFactory = audioEngineBoundaryFactory
         audioQueue = DispatchQueue(label: "MillerWake.capture")
     }
 
@@ -258,7 +262,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         guard permission == .authorized else {
             throw WakeWordCaptureStartError.permissionDenied
         }
-        guard inputAvailable?() ?? inputIsAvailable() else {
+        if let inputAvailable, !inputAvailable() {
             throw WakeWordCaptureStartError.inputDeviceUnavailable
         }
         let lease: MicrophoneOwnership.Lease
@@ -272,6 +276,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         let generation = self.generation
         let callback = onSamples
         let lifecycleFence = self.lifecycleFence
+        let audioEngineBoundary = audioEngineBoundaryFactory()
         lifecycleFence.prepare(generation: generation)
         do {
             try audioQueue.sync {
@@ -304,21 +309,21 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                 }
                 audioEngineBoundary.installTap(1_024, nil, tap)
                 audioEngineBoundary.prepare()
-                do {
-                    try audioEngineBoundary.start()
-                } catch {
-                    audioEngineBoundary.removeTap()
-                    throw WakeWordCaptureStartError.captureFailed
-                }
+                try audioEngineBoundary.start()
                 self.converter = nil
             }
         } catch {
+            audioQueue.sync {
+                audioEngineBoundary.removeTap()
+                audioEngineBoundary.stop()
+            }
             lifecycleFence.invalidate()
             lease.release()
             throw (error as? WakeWordCaptureStartError)
                 ?? WakeWordCaptureStartError.captureFailed
         }
 
+        self.audioEngineBoundary = audioEngineBoundary
         self.lease = lease
         isWakeMonitoring = true
         lifecycleFence.activate(generation: generation)
@@ -352,9 +357,11 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         isWakeMonitoring = false
         invalidationTask?.cancel()
         invalidationTask = nil
+        let audioEngineBoundary = self.audioEngineBoundary
+        self.audioEngineBoundary = nil
         audioQueue.sync {
-            audioEngineBoundary.removeTap()
-            audioEngineBoundary.stop()
+            audioEngineBoundary?.removeTap()
+            audioEngineBoundary?.stop()
             converter = nil
         }
         chunker.reset()
@@ -412,7 +419,8 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     }
 
     private func inputIsAvailable() -> Bool {
-        audioQueue.sync {
+        guard let audioEngineBoundary else { return false }
+        return audioQueue.sync {
             audioEngineBoundary.outputFormat().sampleRate > 0
         }
     }

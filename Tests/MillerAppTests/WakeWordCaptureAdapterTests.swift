@@ -138,7 +138,7 @@ struct WakeWordCaptureAdapterTests {
             permissionStatus: { .authorized },
             requestPermission: { .authorized },
             inputAvailable: { true },
-            audioEngineBoundary: audio.boundary
+            audioEngineBoundaryFactory: { audio.boundary }
         )
         let received = WakeSampleDeliveryProbe()
         adapter.onSamples = { samples in
@@ -205,7 +205,7 @@ struct WakeWordCaptureAdapterTests {
             permissionStatus: { .authorized },
             requestPermission: { .authorized },
             inputAvailable: { true },
-            audioEngineBoundary: audio.boundary
+            audioEngineBoundaryFactory: { audio.boundary }
         )
         let received = WakeSampleDeliveryProbe()
         let failures = WakeCaptureFailureProbe()
@@ -249,6 +249,69 @@ struct WakeWordCaptureAdapterTests {
 
     @Test
     @MainActor
+    func restartCreatesFreshEngineForTheCurrentHardwareRoute() async throws {
+        let route48k = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let route16k = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let audio = InjectedWakeAudioEngineFactory(format: route48k)
+        let adapter = WakeWordAVAudioCaptureAdapter(
+            ownership: MicrophoneOwnership(),
+            permissionStatus: { .authorized },
+            requestPermission: { .authorized },
+            inputAvailable: { true },
+            audioEngineBoundaryFactory: audio.makeBoundary
+        )
+        let received = WakeSampleDeliveryProbe()
+        adapter.onSamples = { samples in
+            received.record(samples, deliveredOnMainThread: Thread.isMainThread)
+        }
+
+        _ = try await adapter.startWakeMonitoring()
+        weak var releasedFirstEngine: InjectedWakeAudioEngine?
+        do {
+            let firstEngine = try #require(audio.liveEngines.first)
+            releasedFirstEngine = firstEngine
+            #expect(firstEngine.outputSampleRate == 48_000)
+            await adapter.stopWakeMonitoring()
+            #expect(firstEngine.stopCount == 1)
+        }
+        #expect(releasedFirstEngine == nil)
+
+        audio.setHardwareFormat(route16k)
+        _ = try await adapter.startWakeMonitoring()
+        #expect(audio.creationCount == 2)
+        let secondEngine = try #require(audio.liveEngines.last)
+        #expect(secondEngine.outputSampleRate == 16_000)
+        let currentTap = try #require(secondEngine.installedTaps.last)
+        secondEngine.invoke(
+            currentTap,
+            with: try secondEngine.makeBuffer(frameCount: 480)
+        )
+        try await waitForSampleCount(1, in: received)
+
+        #expect(received.deliveries == [
+            .init(
+                sampleCount: 480,
+                firstSample: 0,
+                deliveredOnMainThread: true
+            ),
+        ])
+        #expect(adapter.isWakeMonitoring)
+
+        await adapter.stopWakeMonitoring()
+    }
+
+    @Test
+    @MainActor
     func startedAdapterReportsOversizedTapBufferAndStopsMonitoring() async throws {
         let audio = InjectedWakeAudioEngine()
         let adapter = WakeWordAVAudioCaptureAdapter(
@@ -256,7 +319,7 @@ struct WakeWordCaptureAdapterTests {
             permissionStatus: { .authorized },
             requestPermission: { .authorized },
             inputAvailable: { true },
-            audioEngineBoundary: audio.boundary
+            audioEngineBoundaryFactory: { audio.boundary }
         )
         let failures = WakeCaptureFailureProbe()
         adapter.setFailureHandler { failures.record($0) }
@@ -284,7 +347,7 @@ struct WakeWordCaptureAdapterTests {
             permissionStatus: { .authorized },
             requestPermission: { .authorized },
             inputAvailable: { true },
-            audioEngineBoundary: audio.boundary
+            audioEngineBoundaryFactory: { audio.boundary }
         )
         let failures = WakeCaptureFailureProbe()
         adapter.setFailureHandler { failures.record($0) }
@@ -382,6 +445,7 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
     private var format: AVAudioFormat
     private var taps = [AVAudioNodeTapBlock]()
     private var tapFormats = [AVAudioFormat?]()
+    private var stops = 0
 
     init(format: AVAudioFormat? = nil) {
         self.format = format ?? AVAudioFormat(
@@ -392,19 +456,21 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
         )!
     }
 
-    lazy var boundary = WakeWordAudioEngineBoundary(
-        outputFormat: { [unowned self] in lock.withLock { format } },
-        installTap: { [unowned self] _, format, tap in
-            lock.withLock {
-                taps.append(tap)
-                tapFormats.append(format)
-            }
-        },
-        removeTap: {},
-        prepare: {},
-        start: {},
-        stop: {}
-    )
+    var boundary: WakeWordAudioEngineBoundary {
+        WakeWordAudioEngineBoundary(
+            outputFormat: { [self] in lock.withLock { format } },
+            installTap: { [self] _, format, tap in
+                lock.withLock {
+                    taps.append(tap)
+                    tapFormats.append(format)
+                }
+            },
+            removeTap: {},
+            prepare: {},
+            start: {},
+            stop: { [self] in lock.withLock { stops += 1 } }
+        )
+    }
 
     var installedTaps: [AVAudioNodeTapBlock] {
         lock.withLock { taps }
@@ -412,6 +478,14 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
 
     var installedTapFormats: [AVAudioFormat?] {
         lock.withLock { tapFormats }
+    }
+
+    var outputSampleRate: Double {
+        lock.withLock { format.sampleRate }
+    }
+
+    var stopCount: Int {
+        lock.withLock { stops }
     }
 
     func setOutputFormat(_ format: AVAudioFormat) {
@@ -472,6 +546,46 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
             completed.signal()
         }
         completed.wait()
+    }
+}
+
+private final class InjectedWakeAudioEngineFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var format: AVAudioFormat
+    private var engineReferences = [WeakInjectedWakeAudioEngine]()
+    private var creations = 0
+
+    init(format: AVAudioFormat) {
+        self.format = format
+    }
+
+    var creationCount: Int {
+        lock.withLock { creations }
+    }
+
+    var liveEngines: [InjectedWakeAudioEngine] {
+        lock.withLock { engineReferences.compactMap(\.value) }
+    }
+
+    func setHardwareFormat(_ format: AVAudioFormat) {
+        lock.withLock { self.format = format }
+    }
+
+    func makeBoundary() -> WakeWordAudioEngineBoundary {
+        lock.withLock {
+            let engine = InjectedWakeAudioEngine(format: format)
+            creations += 1
+            engineReferences.append(.init(engine))
+            return engine.boundary
+        }
+    }
+}
+
+private final class WeakInjectedWakeAudioEngine {
+    weak var value: InjectedWakeAudioEngine?
+
+    init(_ value: InjectedWakeAudioEngine) {
+        self.value = value
     }
 }
 
