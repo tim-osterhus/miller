@@ -296,9 +296,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                         lifecycleFence.accepts(generation: generation)
                     },
                     onFailure: { [weak self] in
-                        Task { @MainActor [weak self] in
-                            await self?.report(.capture)
-                        }
+                        self?.report(.capture, generation: generation)
                     }
                 ) { [weak self] snapshot in
                     self?.process(
@@ -335,13 +333,13 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self, self.isWakeMonitoring else { return }
                 if self.permissionStatus() != .authorized {
-                    await self.report(.microphonePermission)
+                    self.report(.microphonePermission)
                     return
                 }
                 let inputStillAvailable = self.inputAvailable?()
                     ?? self.inputIsAvailable()
                 if !inputStillAvailable {
-                    await self.report(.inputDevice)
+                    self.report(.inputDevice)
                     return
                 }
             }
@@ -350,6 +348,10 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     }
 
     func stopWakeMonitoring() async {
+        stopWakeMonitoringImmediately()
+    }
+
+    private func stopWakeMonitoringImmediately() {
         generation &+= 1
         lifecycleFence.invalidate()
         isWakeMonitoring = false
@@ -387,16 +389,20 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                 callback?(frame)
             }
         } catch {
-            Task { @MainActor [weak self] in
-                await self?.report(.capture)
-            }
+            report(.capture, generation: generation)
         }
     }
 
-    private func report(_ reason: WakeWordUnavailableReason) async {
+    private func report(
+        _ reason: WakeWordUnavailableReason,
+        generation: UInt64? = nil
+    ) {
+        if let generation {
+            guard lifecycleFence.accepts(generation: generation) else { return }
+        }
         guard isWakeMonitoring else { return }
         failureHandler?(reason)
-        await stopWakeMonitoring()
+        stopWakeMonitoringImmediately()
     }
 
     private func inputIsAvailable() -> Bool {

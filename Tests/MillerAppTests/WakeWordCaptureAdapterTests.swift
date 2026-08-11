@@ -207,6 +207,50 @@ struct WakeWordCaptureAdapterTests {
     }
 
     @Test
+    @MainActor
+    func staleTapFailureCannotStopTheCurrentGeneration() async throws {
+        let audio = InjectedWakeAudioEngine()
+        let adapter = WakeWordAVAudioCaptureAdapter(
+            ownership: MicrophoneOwnership(),
+            permissionStatus: { .authorized },
+            requestPermission: { .authorized },
+            inputAvailable: { true },
+            audioEngineBoundary: audio.boundary
+        )
+        let failures = WakeCaptureFailureProbe()
+        adapter.setFailureHandler { failures.record($0) }
+
+        _ = try await adapter.startWakeMonitoring()
+        let oldTap = try #require(audio.installedTaps.first)
+        audio.invokeAndWait(
+            oldTap,
+            with: try audio.makeBuffer(frameCount: 16_385)
+        )
+
+        await adapter.stopWakeMonitoring()
+        _ = try await adapter.startWakeMonitoring()
+        try await Task.sleep(for: .milliseconds(25))
+
+        #expect(adapter.isWakeMonitoring)
+        #expect(failures.reasons.isEmpty)
+
+        let currentTap = try #require(audio.installedTaps.last)
+        audio.invokeAndWait(
+            currentTap,
+            with: try audio.makeBuffer(frameCount: 16_385)
+        )
+        for _ in 0..<100 {
+            if failures.reasons == [.capture], !adapter.isWakeMonitoring {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(failures.reasons == [.capture])
+        #expect(!adapter.isWakeMonitoring)
+    }
+
+    @Test
     func lifecycleFenceRejectsInactiveAndStaleRealtimeBuffers() {
         let fence = WakeWordCaptureLifecycleFence()
 
@@ -323,6 +367,19 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
             for index in 0..<Int(invocation.value.1.frameLength) {
                 invocation.value.1.int16ChannelData?[0][index] = invocation.value.2
             }
+            completed.signal()
+        }
+        completed.wait()
+    }
+
+    func invokeAndWait(
+        _ tap: @escaping AVAudioNodeTapBlock,
+        with buffer: AVAudioPCMBuffer
+    ) {
+        let invocation = UncheckedSendableBox((tap, buffer))
+        let completed = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "MillerWakeTests.failure-tap").async {
+            invocation.value.0(invocation.value.1, AVAudioTime())
             completed.signal()
         }
         completed.wait()
