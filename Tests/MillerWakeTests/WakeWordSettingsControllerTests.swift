@@ -4,7 +4,7 @@ import Testing
 @Suite("Wakeword settings")
 struct WakeWordSettingsControllerTests {
     @Test @MainActor
-    func persistedEnabledStateCanBeRestoredWithoutUserDefaults() async {
+    func persistedEnabledStateCanBeRestoredWithoutUserDefaults() async throws {
         let settings = WakeWordSettingsController(
             initialPhrase: "Hey Miller",
             enable: { .monitoring },
@@ -13,11 +13,17 @@ struct WakeWordSettingsControllerTests {
 
         await settings.restorePersistedPreferences(
             enabled: true,
-            phrase: "Custom Miller"
+            phrase: "Custom Miller",
+            tuning: try #require(SherpaWakeWordTuning(
+                keywordScore: 7.5,
+                keywordThreshold: 0.08
+            ))
         )
 
         #expect(settings.isEnabled)
         #expect(settings.phrase == "Custom Miller")
+        #expect(settings.keywordScore == 7.5)
+        #expect(settings.detectionThreshold == 0.08)
         #expect(settings.state == .monitoring)
     }
 
@@ -37,6 +43,46 @@ struct WakeWordSettingsControllerTests {
 
         #expect(controller.phrase == "Hey Miller")
         #expect(controller.errorMessage?.isEmpty == false)
+    }
+
+    @Test @MainActor
+    func invalidOrFailedTuningUpdateKeepsTheLastWorkingValues() async throws {
+        let controller = WakeWordSettingsController(
+            initialTuning: try #require(SherpaWakeWordTuning(
+                keywordScore: 5.0,
+                keywordThreshold: 0.05
+            )),
+            enable: { .monitoring },
+            disable: { .disabled },
+            saveTuning: { _ in throw WakeWordDetectorError.unavailable }
+        )
+
+        controller.updateTuning(keywordScore: 0, detectionThreshold: 0.1)
+        #expect(controller.keywordScore == 5.0)
+        #expect(controller.detectionThreshold == 0.05)
+        #expect(controller.errorMessage?.isEmpty == false)
+
+        controller.updateTuning(keywordScore: 8.0, detectionThreshold: 0.1)
+        await waitUntil { !controller.isWorking }
+        #expect(controller.keywordScore == 5.0)
+        #expect(controller.detectionThreshold == 0.05)
+        #expect(controller.errorMessage?.isEmpty == false)
+    }
+
+    @Test @MainActor
+    func validTuningUpdatePublishesOnlyAfterTheSerializedSave() async {
+        let controller = WakeWordSettingsController(
+            enable: { .monitoring },
+            disable: { .disabled },
+            saveTuning: { $0 }
+        )
+
+        controller.updateTuning(keywordScore: 7.0, detectionThreshold: 0.08)
+        await waitUntil { !controller.isWorking }
+
+        #expect(controller.keywordScore == 7.0)
+        #expect(controller.detectionThreshold == 0.08)
+        #expect(controller.errorMessage == nil)
     }
 }
 

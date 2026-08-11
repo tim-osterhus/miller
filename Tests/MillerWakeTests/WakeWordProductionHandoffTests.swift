@@ -21,23 +21,55 @@ struct WakeWordProductionHandoffTests {
     }
 
     @Test @MainActor
-    func sleepSupersedesAnEarlierInactiveSuspension() async {
+    func detectorReloadUsesRequestedSherpaTuning() async throws {
         let recorder = HandoffRecorderProbe()
+        let factory = HandoffTunedDetectorFactory()
         let controller = WakeWordProductionController(
             recorder: recorder,
-            detectorFactory: { HandoffDetectorProbe() }
+            tunedDetectorFactory: { tuning in
+                try MainActor.assumeIsolated { try factory.make(tuning: tuning) }
+            }
         )
+        let requested = try #require(SherpaWakeWordTuning(
+            keywordScore: 7.0,
+            keywordThreshold: 0.08
+        ))
 
         await controller.setEnabled(true)
-        await controller.suspend(.inactiveSession)
-        await controller.suspend(.sleep)
+        _ = try await controller.applyDetectorTuningFromSettings(requested)
 
-        #expect(controller.state == .suspended(.sleep))
-        #expect(!recorder.isWakeMonitoring)
+        #expect(factory.createdTunings == [.default, requested])
+        #expect(controller.state == .monitoring)
+        #expect(recorder.startCount == 2)
     }
 
     @Test @MainActor
-    func activeWakeWaitsForBothLifecycleGatesBeforeRearming() async {
+    func failedTuningReloadRestoresTheLastWorkingDetector() async throws {
+        let recorder = HandoffRecorderProbe()
+        let factory = HandoffTunedDetectorFactory(rejectedKeywordScore: 8.0)
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            tunedDetectorFactory: { tuning in
+                try MainActor.assumeIsolated { try factory.make(tuning: tuning) }
+            }
+        )
+        let rejected = try #require(SherpaWakeWordTuning(
+            keywordScore: 8.0,
+            keywordThreshold: 0.1
+        ))
+
+        await controller.setEnabled(true)
+        await #expect(throws: (any Error).self) {
+            _ = try await controller.applyDetectorTuningFromSettings(rejected)
+        }
+
+        #expect(factory.createdTunings == [.default, rejected, .default])
+        #expect(controller.state == .monitoring)
+        #expect(recorder.isWakeMonitoring)
+    }
+
+    @Test @MainActor
+    func activeWakeWaitsForSystemWakeBeforeRearming() async {
         let recorder = HandoffRecorderProbe()
         let controller = WakeWordProductionController(
             recorder: recorder,
@@ -45,15 +77,8 @@ struct WakeWordProductionHandoffTests {
         )
 
         await controller.setEnabled(true)
-        await controller.setApplicationActive(false)
         await controller.setSystemAwake(false)
         await controller.setSystemAwake(true)
-        await controller.resumeAfterLiveCleanup()
-
-        #expect(controller.state == .suspended(.sleep))
-        #expect(recorder.startCount == 1)
-
-        await controller.setApplicationActive(true)
         await controller.resumeAfterLiveCleanup()
 
         #expect(controller.state == .monitoring)
@@ -61,7 +86,7 @@ struct WakeWordProductionHandoffTests {
     }
 
     @Test @MainActor
-    func liveCleanupCannotRestartCaptureWhileInactiveOrAsleep() async {
+    func liveCleanupCannotRestartCaptureWhileAsleep() async {
         let recorder = HandoffRecorderProbe()
         let controller = WakeWordProductionController(
             recorder: recorder,
@@ -69,41 +94,17 @@ struct WakeWordProductionHandoffTests {
         )
 
         await controller.setEnabled(true)
-        await controller.setApplicationActive(false)
         await controller.setSystemAwake(false)
-        await controller.resumeAfterLiveCleanup()
-        await controller.setSystemAwake(true)
         await controller.resumeAfterLiveCleanup()
 
         #expect(controller.state == .suspended(.sleep))
         #expect(recorder.startCount == 1)
 
-        await controller.setApplicationActive(true)
+        await controller.setSystemAwake(true)
         await controller.resumeAfterLiveCleanup()
 
         #expect(controller.state == .monitoring)
         #expect(recorder.startCount == 2)
-    }
-
-    @Test @MainActor
-    func enablingWhileInactiveDefersCaptureUntilTheActiveWakeEvent() async {
-        let recorder = HandoffRecorderProbe()
-        let controller = WakeWordProductionController(
-            recorder: recorder,
-            detectorFactory: { HandoffDetectorProbe() }
-        )
-
-        await controller.setApplicationActive(false)
-        await controller.setEnabled(true)
-
-        #expect(controller.state == .disabled)
-        #expect(recorder.startCount == 0)
-
-        await controller.setApplicationActive(true)
-        await controller.resumeAfterLiveCleanup()
-
-        #expect(controller.state == .monitoring)
-        #expect(recorder.startCount == 1)
     }
 
     @Test @MainActor
@@ -137,6 +138,24 @@ struct WakeWordProductionHandoffTests {
         #expect(snapshot.reason == .silence)
         #expect(snapshot.sampleCount > 0)
         #expect(snapshot.sampleCount <= 32_000)
+    }
+}
+
+@MainActor
+private final class HandoffTunedDetectorFactory {
+    private let rejectedKeywordScore: Double?
+    private(set) var createdTunings = [SherpaWakeWordTuning]()
+
+    init(rejectedKeywordScore: Double? = nil) {
+        self.rejectedKeywordScore = rejectedKeywordScore
+    }
+
+    func make(tuning: SherpaWakeWordTuning) throws -> HandoffDetectorProbe {
+        createdTunings.append(tuning)
+        if tuning.keywordScore == rejectedKeywordScore {
+            throw WakeWordDetectorError.unavailable
+        }
+        return HandoffDetectorProbe()
     }
 }
 

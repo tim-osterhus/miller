@@ -61,11 +61,11 @@ public extension MillerPreferenceKey where Value == String {
 
 public extension MillerPreferenceKey where Value == Double {
     static var wakeDetectionThreshold: Self {
-        Self(rawValue: "wake_detection_threshold", defaultValue: 0.5)
+        Self(rawValue: "wake_detection_threshold", defaultValue: 0.05)
     }
 
     static var wakeKeywordScore: Self {
-        Self(rawValue: "wake_keyword_score", defaultValue: 0.0)
+        Self(rawValue: "wake_keyword_score", defaultValue: 5.0)
     }
 }
 
@@ -116,19 +116,7 @@ public actor SQLitePreferenceRepository {
         _ value: Value,
         for key: MillerPreferenceKey<Value>
     ) throws where Value: Codable & Sendable {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data: Data
-        do {
-            data = try encoder.encode(value)
-        } catch {
-            throw PreferenceRepositoryError.malformedValue
-        }
-        guard data.count <= Self.maximumValueBytes,
-              let json = String(data: data, encoding: .utf8)
-        else {
-            throw PreferenceRepositoryError.valueTooLarge
-        }
+        let json = try Self.encodedJSON(value)
         try preflightWrite()
         try database.transaction {
             try database.execute(
@@ -145,6 +133,33 @@ public actor SQLitePreferenceRepository {
                     .text(Self.timestamp()),
                 ]
             )
+        }
+    }
+
+    public func setWakeTuning(
+        keywordScore: Double,
+        detectionThreshold: Double
+    ) throws {
+        let scoreJSON = try Self.encodedJSON(keywordScore)
+        let thresholdJSON = try Self.encodedJSON(detectionThreshold)
+        let updatedAt = Self.timestamp()
+        try preflightWrite()
+        try database.transaction {
+            for (key, json) in [
+                (MillerPreferenceKey<Double>.wakeKeywordScore.rawValue, scoreJSON),
+                (MillerPreferenceKey<Double>.wakeDetectionThreshold.rawValue, thresholdJSON),
+            ] {
+                try database.execute(
+                    """
+                    INSERT INTO miller_preferences(key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    bindings: [.text(key), .text(json), .text(updatedAt)]
+                )
+            }
         }
     }
 
@@ -179,6 +194,24 @@ public actor SQLitePreferenceRepository {
         if let simulatedWriteFailure {
             throw simulatedWriteFailure
         }
+    }
+
+    private static func encodedJSON<Value: Encodable>(
+        _ value: Value
+    ) throws -> String {
+        let data: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(value)
+        } catch {
+            throw PreferenceRepositoryError.malformedValue
+        }
+        guard data.count <= maximumValueBytes,
+              let json = String(data: data, encoding: .utf8) else {
+            throw PreferenceRepositoryError.valueTooLarge
+        }
+        return json
     }
 
     private static func timestamp(_ date: Date = Date()) -> String {

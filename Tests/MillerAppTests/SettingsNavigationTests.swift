@@ -128,6 +128,15 @@ struct SettingsNavigationTests {
     }
 
     @Test
+    func voiceSettingsExposeExistingSherpaTuningControls() throws {
+        let source = try settingsSource(named: "VoiceSettingsTab.swift")
+
+        #expect(source.contains("Keyword score"))
+        #expect(source.contains("Detection threshold"))
+        #expect(source.contains("wakeSettings.updateTuning"))
+    }
+
+    @Test
     func credentialInputsAreConfinedToApprovedTabs() throws {
         for section in SettingsSection.allCases where !section.mayContainCredentialFields {
             let source = try settingsSource(named: section.sourceFileName)

@@ -250,13 +250,16 @@ struct PrivacyDataSettingsTests {
                 try await preferences.set(false, for: .wakewordEnabled)
                 try await preferences.set("Hey Miller", for: .wakePhrase)
                 try await preferences.set("", for: .wakeMicrophoneID)
-                try await preferences.set(0.5, for: .wakeDetectionThreshold)
-                try await preferences.set(0.0, for: .wakeKeywordScore)
+                try await preferences.setWakeTuning(
+                    keywordScore: 5.0,
+                    detectionThreshold: 0.05
+                )
             },
             refreshUI: {
                 await settings.restorePersistedPreferences(
                     enabled: false,
-                    phrase: "Hey Miller"
+                    phrase: "Hey Miller",
+                    tuning: .default
                 )
             }
         )
@@ -269,10 +272,11 @@ struct PrivacyDataSettingsTests {
         #expect(try await preferences.value(for: .wakewordEnabled) == false)
         #expect(try await preferences.value(for: .wakePhrase) == "Hey Miller")
         #expect(try await preferences.value(for: .wakeMicrophoneID) == "")
-        #expect(try await preferences.value(for: .wakeDetectionThreshold) == 0.5)
-        #expect(try await preferences.value(for: .wakeKeywordScore) == 0.0)
+        #expect(try await preferences.value(for: .wakeDetectionThreshold) == 0.05)
+        #expect(try await preferences.value(for: .wakeKeywordScore) == 5.0)
         #expect(!settings.isEnabled)
         #expect(settings.phrase == "Hey Miller")
+        #expect(settings.tuning == .default)
         #expect(settings.state == .disabled)
         await preferences.close()
     }

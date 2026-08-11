@@ -65,7 +65,6 @@ public enum WakeWordSuspensionReason: String, Equatable, Sendable {
     case speaking
     case foregroundSession
     case sleep
-    case inactiveSession
     case deviceTransition
 }
 

@@ -50,9 +50,10 @@ wake bootstrap.
 An invalid custom phrase does not replace the working phrase or keyword file.
 Enter one bounded English phrase and save it again. Wake capture stops while
 manual Live Voice is active and rearms only after provider, WebKit, transcript,
-and admission cleanup. A sleep, inactive transition, device loss, or shutdown
-therefore shows a paused/unavailable state instead of pretending that capture
-continues. The owner-visible microphone and custom-phrase check is
+and admission cleanup. A sleep, device loss, or shutdown therefore shows a
+paused/unavailable state instead of pretending that capture continues. Moving
+focus away from Miller or closing Settings does not pause enabled wake
+listening. The owner-visible microphone and custom-phrase check is
 `LIVE_NOT_RUN` in the v0.1.2 release closure; deterministic tests do not prove
 speech detection or audible handoff.
 

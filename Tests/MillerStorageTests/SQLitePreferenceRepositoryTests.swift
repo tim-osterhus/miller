@@ -15,6 +15,8 @@ struct SQLitePreferenceRepositoryTests {
         let repository = try SQLitePreferenceRepository(path: fixture.path)
         #expect(try await repository.value(for: .voiceTranscriptSavingEnabled))
         #expect(try await repository.value(for: .selectedSettingsTab) == "general")
+        #expect(try await repository.value(for: .wakeKeywordScore) == 5.0)
+        #expect(try await repository.value(for: .wakeDetectionThreshold) == 0.05)
 
         try await repository.set(false, for: .voiceTranscriptSavingEnabled)
         #expect(!(try await repository.value(for: .voiceTranscriptSavingEnabled)))
@@ -67,5 +69,32 @@ struct SQLitePreferenceRepositoryTests {
             try await readOnly.set(false, for: .voiceTranscriptSavingEnabled)
         }
         #expect(try await repository.value(for: .voiceTranscriptSavingEnabled))
+    }
+
+    @Test
+    func wakeTuningWritesBothExistingKeysAtomically() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+
+        try await repository.setWakeTuning(
+            keywordScore: 7.0,
+            detectionThreshold: 0.08
+        )
+
+        #expect(try await repository.value(for: .wakeKeywordScore) == 7.0)
+        #expect(try await repository.value(for: .wakeDetectionThreshold) == 0.08)
+
+        let readOnly = try SQLitePreferenceRepository(
+            path: fixture.path,
+            simulatedWriteFailure: .writeFailed
+        )
+        await #expect(throws: SQLiteError.writeFailed) {
+            try await readOnly.setWakeTuning(
+                keywordScore: 9.0,
+                detectionThreshold: 0.2
+            )
+        }
+        #expect(try await repository.value(for: .wakeKeywordScore) == 7.0)
+        #expect(try await repository.value(for: .wakeDetectionThreshold) == 0.08)
     }
 }

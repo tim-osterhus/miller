@@ -7,9 +7,12 @@ public final class WakeWordSettingsController: ObservableObject {
         @MainActor @Sendable () async throws -> WakeWordState
     public typealias PhraseOperation =
         @MainActor @Sendable (String) async throws -> String
+    public typealias TuningOperation =
+        @MainActor @Sendable (SherpaWakeWordTuning) async throws -> SherpaWakeWordTuning
 
     @Published public private(set) var isEnabled: Bool
     @Published public private(set) var phrase: String
+    @Published public private(set) var tuning: SherpaWakeWordTuning
     @Published public private(set) var state: WakeWordState
     @Published public private(set) var isWorking = false
     @Published public private(set) var errorMessage: String?
@@ -18,6 +21,7 @@ public final class WakeWordSettingsController: ObservableObject {
     private let disableOperation: Operation
     private let retryOperation: Operation
     private let savePhraseOperation: PhraseOperation
+    private let saveTuningOperation: TuningOperation
     private var operationTask: Task<Void, Never>?
     private var pendingEnabled: Bool?
     private var stateProjection: AnyCancellable?
@@ -25,19 +29,23 @@ public final class WakeWordSettingsController: ObservableObject {
     public init(
         initialEnabled: Bool = false,
         initialPhrase: String = "Hey Miller",
+        initialTuning: SherpaWakeWordTuning = .default,
         initialState: WakeWordState = .disabled,
         enable: @escaping Operation,
         disable: @escaping Operation,
         retry: @escaping Operation = { .disabled },
-        savePhrase: @escaping PhraseOperation = { $0 }
+        savePhrase: @escaping PhraseOperation = { $0 },
+        saveTuning: @escaping TuningOperation = { $0 }
     ) {
         isEnabled = initialEnabled
         phrase = initialPhrase
+        tuning = initialTuning
         state = initialState
         enableOperation = enable
         disableOperation = disable
         retryOperation = retry
         savePhraseOperation = savePhrase
+        saveTuningOperation = saveTuning
     }
 
     deinit {
@@ -52,6 +60,9 @@ public final class WakeWordSettingsController: ObservableObject {
         }
         return Self.statusText(for: state)
     }
+
+    public var keywordScore: Double { tuning.keywordScore }
+    public var detectionThreshold: Double { tuning.keywordThreshold }
 
     public func setEnabled(_ requestedEnabled: Bool) {
         guard !isWorking, requestedEnabled != isEnabled else { return }
@@ -96,6 +107,36 @@ public final class WakeWordSettingsController: ObservableObject {
         }
     }
 
+    public func updateTuning(
+        keywordScore: Double,
+        detectionThreshold: Double
+    ) {
+        guard !isWorking else { return }
+        guard let requested = SherpaWakeWordTuning(
+            keywordScore: keywordScore,
+            keywordThreshold: detectionThreshold
+        ) else {
+            errorMessage = "Enter a positive keyword score and a detection threshold from 0 to 1."
+            return
+        }
+        guard requested != tuning else { return }
+        isWorking = true
+        errorMessage = nil
+        let operation = saveTuningOperation
+        operationTask = Task { @MainActor [weak self] in
+            do {
+                let saved = try await operation(requested)
+                guard !Task.isCancelled, let self else { return }
+                self.tuning = saved
+                self.isWorking = false
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.isWorking = false
+                self.errorMessage = Self.message(for: error)
+            }
+        }
+    }
+
     public func retry() {
         guard !isWorking else { return }
         isWorking = true
@@ -118,13 +159,15 @@ public final class WakeWordSettingsController: ObservableObject {
 
     public func restorePersistedPreferences(
         enabled: Bool,
-        phrase: String
+        phrase: String,
+        tuning: SherpaWakeWordTuning = .default
     ) async {
         operationTask?.cancel()
         operationTask = nil
         pendingEnabled = nil
         errorMessage = nil
         self.phrase = phrase
+        self.tuning = tuning
         guard enabled else {
             isEnabled = false
             state = .disabled
@@ -189,7 +232,7 @@ public final class WakeWordSettingsController: ObservableObject {
                 "Paused while Miller is working"
             case .deviceTransition:
                 "Input device unavailable"
-            case .sleep, .inactiveSession:
+            case .sleep:
                 "Wake listening paused"
             }
         }

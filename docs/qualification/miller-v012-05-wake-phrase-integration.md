@@ -5,8 +5,9 @@ permission, and custom-phrase gate: `LIVE_NOT_RUN`.
 
 ## Product contract
 
-- Wake Listening defaults off and stores its enabled flag and phrase in the
-  existing SQLite preference repository.
+- Wake Listening defaults off and stores its enabled flag, phrase, keyword
+  score, and detection threshold in the existing SQLite preference repository.
+  Keyword score defaults to 5.0 and detection threshold defaults to 0.05.
 - The first valid phrase is Hey Miller. The owner may replace it with one
   bounded English phrase. Normalization, tokenization, and Sherpa keyword-file
   materialization are local; invalid input preserves the last working phrase
@@ -17,8 +18,9 @@ permission, and custom-phrase gate: `LIVE_NOT_RUN`.
   hard limit transfers the bounded post-keyword PCM to exactly one Live
   admission and one existing WebKit outbound track.
 - Wake capture yields before Live and rearms only after provider, WebKit,
-  transcript, and admission cleanup. Disable, shutdown, sleep, inactive state,
-  device loss, and permission failure release capture and publish state.
+  transcript, and admission cleanup. Disable, shutdown, sleep, device loss,
+  and permission failure release capture and publish state. Application focus
+  changes and closing Settings leave enabled wake capture active.
 - PCM is never persisted or logged. The private keyword file is owner-only:
   a `0700` directory and `0600` file, with symlink-safe temporary write,
   fsync, atomic replacement, and rollback.
@@ -42,10 +44,11 @@ roots, or private generated keyword files. Ordinary tests use
 The focused suites cover phrase bounds and unsupported input, materializer
 permissions and rollback, missing model/input/permission/retry paths, one
 microphone owner, lifecycle races and stale callbacks, one Live start and one
-handoff, failure/interrupt cleanup, sleep/inactive/device loss/shutdown, and
-package inventory/provenance/SBOM/notices/cleanup. The final run records exact
+handoff, failure/interrupt cleanup, sleep/device loss/shutdown, focus
+independence, persisted tuning defaults and rollback, and package
+inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The linked full serial suite passed 949 tests.
+in the parent handoff. The current full serial suite passed 986 tests.
 
 The earlier route-fixture observation—three route fixtures returned status 79
 and the Pi-provider fixture returned status 1 in that environment—is retained
@@ -88,4 +91,5 @@ The following rows remain `LIVE_NOT_RUN` and are not inferred from tests:
 - owner custom-phrase save and relaunch;
 - audible one-shot post-keyword command handoff;
 - real Live provider admission, interruption, failure, cleanup, and rearm;
-- observed sleep/inactive/device-loss recovery on the owner machine.
+- observed sleep/device-loss recovery and background-focus listening on the
+  owner machine.

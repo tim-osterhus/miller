@@ -6,6 +6,8 @@ struct VoiceSettingsTab: View {
     @ObservedObject var model: AppPresentationModel
     @ObservedObject var wakeSettings: WakeWordSettingsController
     @State private var phraseDraft = ""
+    @State private var keywordScoreDraft = ""
+    @State private var detectionThresholdDraft = ""
 
     init(
         model: AppPresentationModel,
@@ -51,6 +53,29 @@ struct VoiceSettingsTab: View {
                             )
                         }
 
+                        LabeledContent("Keyword score") {
+                            TextField("Keyword score", text: $keywordScoreDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+                        LabeledContent("Detection threshold") {
+                            TextField(
+                                "Detection threshold",
+                                text: $detectionThresholdDraft
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                        }
+                        Button("Save tuning") {
+                            wakeSettings.updateTuning(
+                                keywordScore: Double(keywordScoreDraft) ?? .nan,
+                                detectionThreshold: Double(
+                                    detectionThresholdDraft
+                                ) ?? .nan
+                            )
+                        }
+                        .disabled(wakeSettings.isWorking)
+
                         LabeledContent("Status") {
                             Text(wakeSettings.statusText)
                         }
@@ -78,10 +103,24 @@ struct VoiceSettingsTab: View {
             .padding()
         }
         .accessibilityLabel(section.accessibilityLabel)
-        .onAppear { phraseDraft = wakeSettings.phrase }
+        .onAppear { restoreDrafts() }
         .onChange(of: wakeSettings.phrase) { _, phrase in
             phraseDraft = phrase
         }
+        .onChange(of: wakeSettings.tuning) { _, _ in restoreTuningDrafts() }
+        .onChange(of: wakeSettings.errorMessage) { _, message in
+            if message != nil { restoreTuningDrafts() }
+        }
+    }
+
+    private func restoreDrafts() {
+        phraseDraft = wakeSettings.phrase
+        restoreTuningDrafts()
+    }
+
+    private func restoreTuningDrafts() {
+        keywordScoreDraft = String(wakeSettings.keywordScore)
+        detectionThresholdDraft = String(wakeSettings.detectionThreshold)
     }
 
     private var isRetryAvailable: Bool {

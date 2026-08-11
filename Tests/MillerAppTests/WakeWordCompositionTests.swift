@@ -7,6 +7,30 @@ import Testing
 
 @Suite("Wakeword production composition")
 struct WakeWordCompositionTests {
+    @Test
+    func applicationFocusIsNotAWakeLifecycleGateAndStoredTuningIsComposed() throws {
+        let source = try String(
+            contentsOf: repositoryRoot()
+                .appendingPathComponent("Sources/MillerApp/AppCoordinator.swift"),
+            encoding: .utf8
+        )
+
+        #expect(!source.contains("NSApplication.didResignActiveNotification"))
+        #expect(!source.contains("NSApplication.didBecomeActiveNotification"))
+        #expect(source.contains("tunedDetectorFactory: { tuning in"))
+        #expect(source.contains("loadWakeTuning"))
+        #expect(source.contains("setWakeTuning"))
+
+        let productionSource = try String(
+            contentsOf: repositoryRoot().appendingPathComponent(
+                "Sources/MillerWake/WakeWordProductionController.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(!productionSource.contains("applicationIsActive"))
+        #expect(!productionSource.contains("setApplicationActive"))
+    }
+
     @Test @MainActor
     func detectedWakeOpensMillerAndAdmitsOneWakeLive() async {
         let integration = WakeWordLiveIntegration()
@@ -106,6 +130,13 @@ struct WakeWordCompositionTests {
         #expect(production.state == .monitoring)
         #expect(!integration.liveSessionActive)
     }
+}
+
+private func repositoryRoot() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
 }
 
 private actor WakeLiveAdmissionRecorder {

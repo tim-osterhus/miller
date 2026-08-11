@@ -344,6 +344,7 @@ After a match, the coordinator owns a bounded post-keyword PCM buffer. An empty
 timeout rearms without opening Live. Silence or the hard limit transfers that
 buffer once to the existing WebKit Live peer, then wake capture remains
 suspended until provider, WebKit, transcript, and admission cleanup completes.
-Manual Live suspends wake first. Disable, shutdown, sleep, inactive state,
-device loss, and permission failure release capture and publish a truthful
-state. No audio is persisted or logged.
+Manual Live suspends wake first. Disable, shutdown, sleep, device loss, and
+permission failure release capture and publish a truthful state. Application
+focus and Settings-window visibility do not suspend enabled wake listening. No
+audio is persisted or logged.

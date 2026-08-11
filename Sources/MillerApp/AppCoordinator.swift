@@ -10,6 +10,19 @@ import MillerStorage
 import MillerWake
 import SwiftUI
 
+private func loadWakeTuning(
+    from repository: SQLitePreferenceRepository
+) async throws -> SherpaWakeWordTuning {
+    let keywordScore = try await repository.value(for: .wakeKeywordScore)
+    let detectionThreshold = try await repository.value(
+        for: .wakeDetectionThreshold
+    )
+    return SherpaWakeWordTuning(
+        keywordScore: keywordScore,
+        keywordThreshold: detectionThreshold
+    ) ?? .default
+}
+
 enum AccessibilityLabel {
     static let status = "Miller status"
     static let input = "Message Miller"
@@ -3035,13 +3048,13 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         )
         let wakeProduction = WakeWordProductionController(
             recorder: wakeRecorder,
-            detectorFactory: {
+            tunedDetectorFactory: { tuning in
                 guard let wakeModelPaths else {
                     throw WakeWordDetectorError.unavailable
                 }
                 return try SherpaWakeWordDetector(
                     paths: wakeModelPaths,
-                    tuning: .default
+                    tuning: tuning
                 )
             },
             onWakeDetected: { [weak wakeIntegration] in
@@ -3056,6 +3069,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 guard let wakeMaterializer else {
                     throw WakeWordDetectorError.unavailable
                 }
+                let tuning = try await loadWakeTuning(from: preferenceRepository)
+                _ = try await wakeProduction
+                    .applyDetectorTuningFromSettings(tuning)
                 let phrase = try await preferenceRepository.value(for: .wakePhrase)
                 let materialized = try wakeMaterializer.materialize(phrase)
                 do {
@@ -3084,13 +3100,19 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 let phrase = try await preferenceRepository.value(for: .wakePhrase)
                 let materialized = try wakeMaterializer.materialize(phrase)
                 do {
+                    let tuning = try await loadWakeTuning(
+                        from: preferenceRepository
+                    )
                     let state: WakeWordState
                     if wakeProduction.state == .disabled
                         || wakeProduction.state == .unavailable(.model)
                     {
+                        _ = try await wakeProduction
+                            .applyDetectorTuningFromSettings(tuning)
                         state = try await wakeProduction.enableFromSettings()
                     } else {
-                        state = try await wakeProduction.reloadDetector()
+                        state = try await wakeProduction
+                            .applyDetectorTuningFromSettings(tuning)
                     }
                     return state
                 } catch {
@@ -3120,6 +3142,26 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     try? await preferenceRepository.set(
                         previousPhrase,
                         for: .wakePhrase
+                    )
+                    throw error
+                }
+            },
+            saveTuning: { [preferenceRepository, wakeProduction] tuning in
+                let previous = (try? await loadWakeTuning(
+                    from: preferenceRepository
+                )) ?? .default
+                do {
+                    try await preferenceRepository.setWakeTuning(
+                        keywordScore: tuning.keywordScore,
+                        detectionThreshold: tuning.keywordThreshold
+                    )
+                    _ = try await wakeProduction
+                        .applyDetectorTuningFromSettings(tuning)
+                    return tuning
+                } catch {
+                    try? await preferenceRepository.setWakeTuning(
+                        keywordScore: previous.keywordScore,
+                        detectionThreshold: previous.keywordThreshold
                     )
                     throw error
                 }
@@ -3486,17 +3528,16 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                             try await preferenceRepository.set(
                                 "", for: .wakeMicrophoneID
                             )
-                            try await preferenceRepository.set(
-                                0.5, for: .wakeDetectionThreshold
-                            )
-                            try await preferenceRepository.set(
-                                0.0, for: .wakeKeywordScore
+                            try await preferenceRepository.setWakeTuning(
+                                keywordScore: 5.0,
+                                detectionThreshold: 0.05
                             )
                         },
                         refreshUI: {
                             await wakeSettings.restorePersistedPreferences(
                                 enabled: false,
-                                phrase: "Hey Miller"
+                                phrase: "Hey Miller",
+                                tuning: .default
                             )
                         }
                     )
@@ -3593,31 +3634,6 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             }
         }
         wakeLifecycleObservers.append(
-            NotificationCenter.default.addObserver(
-                forName: NSApplication.didResignActiveNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.wakeProduction.setApplicationActive(false)
-                }
-            }
-        )
-        wakeLifecycleObservers.append(
-            NotificationCenter.default.addObserver(
-                forName: NSApplication.didBecomeActiveNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    await self.wakeProduction.setApplicationActive(true)
-                    guard !self.wakeIntegration.liveSessionActive else { return }
-                    await self.wakeProduction.resumeAfterLiveCleanup()
-                }
-            }
-        )
-        wakeLifecycleObservers.append(
             NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.willSleepNotification,
                 object: nil,
@@ -3673,9 +3689,13 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             let wakePhrase = (try? await preferenceRepository.value(
                 for: .wakePhrase
             )) ?? "Hey Miller"
+            let wakeTuning = (try? await loadWakeTuning(
+                from: preferenceRepository
+            )) ?? .default
             await wakeSettings.restorePersistedPreferences(
                 enabled: wakeEnabled,
-                phrase: wakePhrase
+                phrase: wakePhrase,
+                tuning: wakeTuning
             )
         }
     }

@@ -35,8 +35,9 @@ name Sherpa-ONNX, ONNX Runtime, and those exact assets.
 
 Wake uses one AVAudioEngine capture owner and a process-local microphone lease.
 The lease is released before Live starts. Permission failure, input-device
-loss, inactive/sleep state, disable, or shutdown stops the engine and clears
-callbacks. Generation checks reject stale samples and late callbacks.
+loss, sleep, disable, or shutdown stops the engine and clears callbacks;
+ordinary application-focus changes do not. Generation checks reject stale
+samples and late callbacks.
 Prepared command PCM is bounded and can be injected into the existing WebKit
 outbound track once; no second process or speech backend is created.
 
