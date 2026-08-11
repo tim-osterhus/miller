@@ -21,14 +21,29 @@ struct WakeWordAudioBufferSnapshot: @unchecked Sendable {
         copying source: AVAudioPCMBuffer,
         maximumFrameCount: AVAudioFrameCount
     ) {
-        guard source.frameLength <= maximumFrameCount,
+        guard source.frameLength <= maximumFrameCount else { return nil }
+        self.init(
+            copying: source,
+            frameOffset: 0,
+            frameCount: source.frameLength
+        )
+    }
+
+    nonisolated init?(
+        copying source: AVAudioPCMBuffer,
+        frameOffset: AVAudioFrameCount,
+        frameCount: AVAudioFrameCount
+    ) {
+        guard frameCount > 0,
+              frameOffset <= source.frameLength,
+              frameCount <= source.frameLength - frameOffset,
               let buffer = AVAudioPCMBuffer(
                 pcmFormat: source.format,
-                frameCapacity: source.frameLength
+                frameCapacity: frameCount
               )
         else { return nil }
 
-        buffer.frameLength = source.frameLength
+        buffer.frameLength = frameCount
         let sourceBuffers = UnsafeMutableAudioBufferListPointer(
             source.mutableAudioBufferList
         )
@@ -40,12 +55,21 @@ struct WakeWordAudioBufferSnapshot: @unchecked Sendable {
         }
         for index in sourceBuffers.indices {
             let sourceBuffer = sourceBuffers[index]
-            let byteCount = Int(sourceBuffer.mDataByteSize)
+            let sourceByteCount = Int(sourceBuffer.mDataByteSize)
+            guard source.frameLength > 0,
+                  sourceByteCount % Int(source.frameLength) == 0
+            else { return nil }
+            let bytesPerFrame = sourceByteCount / Int(source.frameLength)
+            let sourceOffset = Int(frameOffset) * bytesPerFrame
+            let byteCount = Int(frameCount) * bytesPerFrame
             guard byteCount <= Int(destinationBuffers[index].mDataByteSize),
                   let sourceData = sourceBuffer.mData,
                   let destinationData = destinationBuffers[index].mData
             else { return nil }
-            destinationData.copyMemory(from: sourceData, byteCount: byteCount)
+            destinationData.copyMemory(
+                from: sourceData.advanced(by: sourceOffset),
+                byteCount: byteCount
+            )
             destinationBuffers[index].mDataByteSize = UInt32(byteCount)
         }
         self.buffer = buffer
@@ -54,20 +78,55 @@ struct WakeWordAudioBufferSnapshot: @unchecked Sendable {
 
 enum WakeWordRealtimeAudioTap {
     nonisolated static func make(
-        maximumFrameCount: AVAudioFrameCount = 1_024,
+        chunkFrameCount: AVAudioFrameCount = 1_024,
+        maximumBufferFrameCount: AVAudioFrameCount = 16_384,
+        maximumBufferByteCount: Int = 1_048_576,
         shouldCapture: @escaping @Sendable () -> Bool = { true },
+        onFailure: @escaping @MainActor @Sendable () -> Void = {},
         receive: @escaping @MainActor @Sendable (
             WakeWordAudioBufferSnapshot
         ) -> Void
     ) -> AVAudioNodeTapBlock {
         { buffer, _ in
-            guard shouldCapture(),
-                  let snapshot = WakeWordAudioBufferSnapshot(
+            guard shouldCapture() else { return }
+            let buffers = UnsafeMutableAudioBufferListPointer(
+                buffer.mutableAudioBufferList
+            )
+            let totalByteCount = buffers.reduce(0) {
+                $0 + Int($1.mDataByteSize)
+            }
+            guard chunkFrameCount > 0,
+                  maximumBufferFrameCount >= chunkFrameCount,
+                  buffer.frameLength > 0,
+                  buffer.frameLength <= maximumBufferFrameCount,
+                  totalByteCount <= maximumBufferByteCount
+            else {
+                WakeWordRealtimeHandoff.deliver((), to: { _ in onFailure() })
+                return
+            }
+
+            var snapshots = [WakeWordAudioBufferSnapshot]()
+            var offset: AVAudioFrameCount = 0
+            while offset < buffer.frameLength {
+                let frameCount = min(
+                    chunkFrameCount,
+                    buffer.frameLength - offset
+                )
+                guard let snapshot = WakeWordAudioBufferSnapshot(
                     copying: buffer,
-                    maximumFrameCount: maximumFrameCount
-                  )
-            else { return }
-            WakeWordRealtimeHandoff.deliver(snapshot, to: receive)
+                    frameOffset: offset,
+                    frameCount: frameCount
+                ) else {
+                    WakeWordRealtimeHandoff.deliver((), to: { _ in onFailure() })
+                    return
+                }
+                snapshots.append(snapshot)
+                offset += frameCount
+            }
+            for snapshot in snapshots {
+                guard shouldCapture() else { return }
+                WakeWordRealtimeHandoff.deliver(snapshot, to: receive)
+            }
         }
     }
 }
@@ -100,6 +159,49 @@ final class WakeWordCaptureLifecycleFence: @unchecked Sendable {
     }
 }
 
+struct WakeWordAudioEngineBoundary: @unchecked Sendable {
+    typealias InstallTap = (
+        AVAudioFrameCount,
+        AVAudioFormat,
+        @escaping AVAudioNodeTapBlock
+    ) -> Void
+
+    let outputFormat: () -> AVAudioFormat
+    let installTap: InstallTap
+    let removeTap: () -> Void
+    let prepare: () -> Void
+    let start: () throws -> Void
+    let stop: () -> Void
+
+    static func live(engine: AVAudioEngine) -> Self {
+        Self(
+            outputFormat: {
+                engine.inputNode.outputFormat(forBus: 0)
+            },
+            installTap: { bufferSize, format, tap in
+                engine.inputNode.installTap(
+                    onBus: 0,
+                    bufferSize: bufferSize,
+                    format: format,
+                    block: tap
+                )
+            },
+            removeTap: {
+                engine.inputNode.removeTap(onBus: 0)
+            },
+            prepare: {
+                engine.prepare()
+            },
+            start: {
+                try engine.start()
+            },
+            stop: {
+                engine.stop()
+            }
+        )
+    }
+}
+
 @MainActor
 final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
@@ -110,7 +212,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     private let requestPermission: @Sendable () async -> MicrophonePermission
     private let inputAvailable: (@Sendable () -> Bool)?
     private let audioQueue: DispatchQueue
-    private let engine: AVAudioEngine
+    private let audioEngineBoundary: WakeWordAudioEngineBoundary
     private let lifecycleFence = WakeWordCaptureLifecycleFence()
     private let chunker = WakeWordPCM16Chunker()
     private var generation: UInt64 = 0
@@ -129,13 +231,15 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
             await SystemMicrophonePermission.request()
         },
         inputAvailable: (@Sendable () -> Bool)? = nil,
-        engine: AVAudioEngine = AVAudioEngine()
+        engine: AVAudioEngine = AVAudioEngine(),
+        audioEngineBoundary: WakeWordAudioEngineBoundary? = nil
     ) {
         self.ownership = ownership
         self.permissionStatus = permissionStatus
         self.requestPermission = requestPermission
         self.inputAvailable = inputAvailable
-        self.engine = engine
+        self.audioEngineBoundary = audioEngineBoundary
+            ?? WakeWordAudioEngineBoundary.live(engine: engine)
         audioQueue = DispatchQueue(label: "MillerWake.capture")
     }
 
@@ -171,8 +275,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         lifecycleFence.prepare(generation: generation)
         do {
             try audioQueue.sync {
-                let input = engine.inputNode
-                let inputFormat = input.outputFormat(forBus: 0)
+                let inputFormat = audioEngineBoundary.outputFormat()
                 guard inputFormat.sampleRate > 0,
                       let target = AVAudioFormat(
                         commonFormat: .pcmFormatInt16,
@@ -186,11 +289,16 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                       )
                 else { throw WakeWordCaptureStartError.inputDeviceUnavailable }
 
-                input.removeTap(onBus: 0)
+                audioEngineBoundary.removeTap()
                 let tap = WakeWordRealtimeAudioTap.make(
-                    maximumFrameCount: 1_024,
+                    chunkFrameCount: 1_024,
                     shouldCapture: {
                         lifecycleFence.accepts(generation: generation)
+                    },
+                    onFailure: { [weak self] in
+                        Task { @MainActor [weak self] in
+                            await self?.report(.capture)
+                        }
                     }
                 ) { [weak self] snapshot in
                     self?.process(
@@ -201,17 +309,12 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                         target: target
                     )
                 }
-                input.installTap(
-                    onBus: 0,
-                    bufferSize: 1_024,
-                    format: inputFormat,
-                    block: tap
-                )
-                engine.prepare()
+                audioEngineBoundary.installTap(1_024, inputFormat, tap)
+                audioEngineBoundary.prepare()
                 do {
-                    try engine.start()
+                    try audioEngineBoundary.start()
                 } catch {
-                    input.removeTap(onBus: 0)
+                    audioEngineBoundary.removeTap()
                     throw WakeWordCaptureStartError.captureFailed
                 }
                 self.converter = converter
@@ -253,8 +356,8 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         invalidationTask?.cancel()
         invalidationTask = nil
         audioQueue.sync {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+            audioEngineBoundary.removeTap()
+            audioEngineBoundary.stop()
             converter = nil
         }
         chunker.reset()
@@ -298,7 +401,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
 
     private func inputIsAvailable() -> Bool {
         audioQueue.sync {
-            engine.inputNode.outputFormat(forBus: 0).sampleRate > 0
+            audioEngineBoundary.outputFormat().sampleRate > 0
         }
     }
 
