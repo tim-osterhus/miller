@@ -261,6 +261,84 @@ struct CodexProfileTests {
     }
 
     @Test
+    func liveAdmissionRefreshPersistsCredentialWithoutReadinessProbes() async throws {
+        _ = NSApplication.shared
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("miller.sqlite3")
+        let cache = root.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(
+            at: cache,
+            withIntermediateDirectories: true
+        )
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex OAuth",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let repository = try SQLiteConversationRepository(path: database.path)
+        try await repository.saveProviderProfile(profile)
+        let credentials = KeychainCredentialStore()
+        try await credentials.store(
+            CredentialEnvelope(
+                providerKind: .codexOAuth,
+                payload: Data(
+                    #"{"kind":"oauth","access":"old-access","refresh":"old-refresh","expires_at":null}"#.utf8
+                )
+            ),
+            for: profile.credentialReference
+        )
+        let supervisor = GatewaySupervisor(configuration: authenticationConfiguration(
+            cacheURL: cache
+        ))
+        let counts = ReadinessCallCounts()
+        let controller = ProviderSettingsController(
+            repository: repository,
+            credentials: credentials,
+            supervisor: supervisor,
+            databaseURL: database,
+            cacheURL: cache,
+            codexTypedReadiness: { _ in
+                await counts.recordLocal()
+                return .init(state: .ready)
+            },
+            codexTypedRemoteReadiness: { _ in
+                await counts.recordRemote()
+                return .init(state: .ready)
+            }
+        )
+        defer {
+            Task {
+                await supervisor.shutdown()
+                await repository.close()
+                try? await credentials.delete(for: profile.credentialReference)
+            }
+        }
+        _ = try await controller.restoreSelectedProfile()
+
+        try await controller.refreshCodexCredentialForLiveAdmission()
+
+        let refreshed = try await credentials.load(for: profile.credentialReference)
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: refreshed.payload) as? [String: Any]
+        )
+        #expect(payload["access"] as? String == "synthetic-test-access")
+        #expect(
+            try await repository.credentialIsInvalidated(
+                reference: profile.credentialReference
+            ) == false
+        )
+        #expect(await counts.values().local == 0)
+        #expect(await counts.values().remote == 0)
+
+        try await controller.refreshCodexAuthentication(hasActiveTurn: false)
+        #expect(await counts.values().remote == 1)
+    }
+
+    @Test
     func snapshotDiscardsReadinessFromAProfileGenerationThatMutatedDuringProbe() async throws {
         _ = NSApplication.shared
         let root = try makeRoot()
@@ -454,6 +532,26 @@ struct CodexProfileTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Gateway/src/fake-helper.mjs")
+    }
+
+    private func authenticationConfiguration(
+        cacheURL: URL
+    ) -> GatewayProcess.Configuration {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return GatewayProcess.Configuration(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [
+                "--import", "./Gateway/tests/auth-test-adapter.mjs",
+                "./Gateway/src/server.mjs",
+            ],
+            workingDirectoryURL: repository,
+            environment: [
+                "LANG": "C", "LC_ALL": "C", "TMPDIR": cacheURL.path,
+            ]
+        )
     }
 
     private func makeRoot() throws -> URL {

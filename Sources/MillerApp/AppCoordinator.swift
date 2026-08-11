@@ -3208,9 +3208,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     try await repository.credentialIsInvalidated(reference: reference)
                 },
                 refreshCredential: { [providerController] in
-                    try await providerController.refreshCodexAuthentication(
-                        hasActiveTurn: false
-                    )
+                    try await providerController
+                        .refreshCodexCredentialForLiveAdmission()
                 },
                 providerCallbacks: {
                     [capabilityController,
@@ -4452,6 +4451,24 @@ actor ProviderSettingsController {
 
     func refreshCodexAuthentication(hasActiveTurn: Bool) async throws {
         invalidateCodexReadiness()
+        let profile = try await refreshCodexCredential(
+            hasActiveTurn: hasActiveTurn
+        )
+        let generation = readinessGeneration
+        let observed = await remoteReadiness(for: profile)
+        if readinessGeneration == generation {
+            cachedRemoteCodexReadiness = (profile.id, observed)
+        }
+    }
+
+    func refreshCodexCredentialForLiveAdmission() async throws {
+        invalidateCodexReadiness()
+        _ = try await refreshCodexCredential(hasActiveTurn: false)
+    }
+
+    private func refreshCodexCredential(
+        hasActiveTurn: Bool
+    ) async throws -> ProviderProfile {
         guard !hasActiveTurn else { throw ProviderProfileError.activeTurn }
         guard let profile = try await repository.selectedProviderProfile(),
               profile.kind == .codexOAuth
@@ -4471,11 +4488,7 @@ actor ProviderSettingsController {
                 )
             }
         )
-        let generation = readinessGeneration
-        let observed = await remoteReadiness(for: profile)
-        if readinessGeneration == generation {
-            cachedRemoteCodexReadiness = (profile.id, observed)
-        }
+        return profile
     }
 
     func restoreSelectedProfile() async throws {

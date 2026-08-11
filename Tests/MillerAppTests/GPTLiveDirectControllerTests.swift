@@ -153,6 +153,39 @@ struct GPTLiveDirectControllerTests {
         #expect(result)
         await refresh.release()
     }
+
+    @Test
+    func failedCredentialRefreshStopsAdmissionBeforeCredentialLoad() async throws {
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let credentialLoads = DirectControllerCounter()
+        let peer = DirectControllerPeer()
+        let controller = try GPTLiveController(
+            helperURL: nil,
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-direct-live-test"),
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in
+                await credentialLoads.increment()
+                throw GPTLiveCredentialError.invalidCredential
+            }),
+            refreshCredential: { throw DirectControllerRefreshFailure() },
+            microphonePermission: { .authorized },
+            makePeer: { peer },
+            makeDirectSession: { peer in DirectGPTLiveSession(peer: peer) }
+        )
+
+        await #expect(throws: DirectControllerRefreshFailure.self) {
+            try await controller.dependencies().start { _ in }
+        }
+        #expect(await credentialLoads.value == 0)
+        #expect(peer.operations.isEmpty)
+    }
 }
 
 private actor DirectControllerCredentialAdmission {
@@ -258,6 +291,8 @@ private func waitUntilDirectControllerAsync(
 }
 
 private struct DirectControllerTimeout: Error {}
+
+private struct DirectControllerRefreshFailure: Error {}
 
 private actor DirectControllerCounter {
     private(set) var value = 0
