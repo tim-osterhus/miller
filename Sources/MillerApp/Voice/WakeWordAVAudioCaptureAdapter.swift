@@ -5,6 +5,101 @@ import MillerWake
 
 typealias WakeWordCaptureError = WakeWordCaptureStartError
 
+enum WakeWordRealtimeHandoff {
+    nonisolated static func deliver<Value: Sendable>(
+        _ value: Value,
+        to operation: @escaping @MainActor @Sendable (Value) -> Void
+    ) {
+        DispatchQueue.main.async { operation(value) }
+    }
+}
+
+struct WakeWordAudioBufferSnapshot: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+
+    nonisolated init?(
+        copying source: AVAudioPCMBuffer,
+        maximumFrameCount: AVAudioFrameCount
+    ) {
+        guard source.frameLength <= maximumFrameCount,
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: source.format,
+                frameCapacity: source.frameLength
+              )
+        else { return nil }
+
+        buffer.frameLength = source.frameLength
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
+            source.mutableAudioBufferList
+        )
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(
+            buffer.mutableAudioBufferList
+        )
+        guard sourceBuffers.count == destinationBuffers.count else {
+            return nil
+        }
+        for index in sourceBuffers.indices {
+            let sourceBuffer = sourceBuffers[index]
+            let byteCount = Int(sourceBuffer.mDataByteSize)
+            guard byteCount <= Int(destinationBuffers[index].mDataByteSize),
+                  let sourceData = sourceBuffer.mData,
+                  let destinationData = destinationBuffers[index].mData
+            else { return nil }
+            destinationData.copyMemory(from: sourceData, byteCount: byteCount)
+            destinationBuffers[index].mDataByteSize = UInt32(byteCount)
+        }
+        self.buffer = buffer
+    }
+}
+
+enum WakeWordRealtimeAudioTap {
+    nonisolated static func make(
+        maximumFrameCount: AVAudioFrameCount = 1_024,
+        shouldCapture: @escaping @Sendable () -> Bool = { true },
+        receive: @escaping @MainActor @Sendable (
+            WakeWordAudioBufferSnapshot
+        ) -> Void
+    ) -> AVAudioNodeTapBlock {
+        { buffer, _ in
+            guard shouldCapture(),
+                  let snapshot = WakeWordAudioBufferSnapshot(
+                    copying: buffer,
+                    maximumFrameCount: maximumFrameCount
+                  )
+            else { return }
+            WakeWordRealtimeHandoff.deliver(snapshot, to: receive)
+        }
+    }
+}
+
+final class WakeWordCaptureLifecycleFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var active = false
+
+    func prepare(generation: UInt64) {
+        lock.withLock {
+            self.generation = generation
+            active = false
+        }
+    }
+
+    func activate(generation: UInt64) {
+        lock.withLock {
+            guard self.generation == generation else { return }
+            active = true
+        }
+    }
+
+    func invalidate() {
+        lock.withLock { active = false }
+    }
+
+    func accepts(generation: UInt64) -> Bool {
+        lock.withLock { active && self.generation == generation }
+    }
+}
+
 @MainActor
 final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
@@ -16,10 +111,9 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     private let inputAvailable: (@Sendable () -> Bool)?
     private let audioQueue: DispatchQueue
     private let engine: AVAudioEngine
-    private let stateLock = NSLock()
+    private let lifecycleFence = WakeWordCaptureLifecycleFence()
     private let chunker = WakeWordPCM16Chunker()
     private var generation: UInt64 = 0
-    private var physicalRunning = false
     private var lease: MicrophoneOwnership.Lease?
     private var converter: AVAudioConverter?
     private var invalidationTask: Task<Void, Never>?
@@ -73,6 +167,8 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         generation &+= 1
         let generation = self.generation
         let callback = onSamples
+        let lifecycleFence = self.lifecycleFence
+        lifecycleFence.prepare(generation: generation)
         do {
             try audioQueue.sync {
                 let input = engine.inputNode
@@ -91,34 +187,26 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                 else { throw WakeWordCaptureStartError.inputDeviceUnavailable }
 
                 input.removeTap(onBus: 0)
+                let tap = WakeWordRealtimeAudioTap.make(
+                    maximumFrameCount: 1_024,
+                    shouldCapture: {
+                        lifecycleFence.accepts(generation: generation)
+                    }
+                ) { [weak self] snapshot in
+                    self?.process(
+                        snapshot,
+                        generation: generation,
+                        callback: callback,
+                        converter: converter,
+                        target: target
+                    )
+                }
                 input.installTap(
                     onBus: 0,
                     bufferSize: 1_024,
-                    format: inputFormat
-                ) { [weak self] buffer, _ in
-                    guard let self,
-                          self.stateLock.withLock({
-                              self.physicalRunning && self.generation == generation
-                          })
-                    else { return }
-                    do {
-                        let converted = try Self.convert(
-                            buffer,
-                            using: converter,
-                            to: target
-                        )
-                        for frame in self.chunker.append(converted) {
-                            guard self.stateLock.withLock({
-                                self.physicalRunning && self.generation == generation
-                            }) else { return }
-                            callback?(frame)
-                        }
-                    } catch {
-                        Task { @MainActor [weak self] in
-                            await self?.report(.capture)
-                        }
-                    }
-                }
+                    format: inputFormat,
+                    block: tap
+                )
                 engine.prepare()
                 do {
                     try engine.start()
@@ -129,14 +217,15 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                 self.converter = converter
             }
         } catch {
+            lifecycleFence.invalidate()
             lease.release()
             throw (error as? WakeWordCaptureStartError)
                 ?? WakeWordCaptureStartError.captureFailed
         }
 
         self.lease = lease
-        stateLock.withLock { physicalRunning = true }
         isWakeMonitoring = true
+        lifecycleFence.activate(generation: generation)
         invalidationTask?.cancel()
         invalidationTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -159,7 +248,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
 
     func stopWakeMonitoring() async {
         generation &+= 1
-        stateLock.withLock { physicalRunning = false }
+        lifecycleFence.invalidate()
         isWakeMonitoring = false
         invalidationTask?.cancel()
         invalidationTask = nil
@@ -172,6 +261,33 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         let lease = self.lease
         self.lease = nil
         lease?.release()
+    }
+
+    private func process(
+        _ snapshot: WakeWordAudioBufferSnapshot,
+        generation: UInt64,
+        callback: (@Sendable (ContiguousArray<Int16>) -> Void)?,
+        converter: AVAudioConverter,
+        target: AVAudioFormat
+    ) {
+        guard lifecycleFence.accepts(generation: generation) else { return }
+        do {
+            let converted = try Self.convert(
+                snapshot.buffer,
+                using: converter,
+                to: target
+            )
+            for frame in chunker.append(converted) {
+                guard lifecycleFence.accepts(generation: generation) else {
+                    return
+                }
+                callback?(frame)
+            }
+        } catch {
+            Task { @MainActor [weak self] in
+                await self?.report(.capture)
+            }
+        }
     }
 
     private func report(_ reason: WakeWordUnavailableReason) async {
