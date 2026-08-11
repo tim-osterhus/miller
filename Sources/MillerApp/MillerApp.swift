@@ -9,6 +9,7 @@ struct MillerApplication {
     static func main() {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
+        application.mainMenu = MillerApplicationMenu.makeMainMenu()
         let delegate = AppDelegate()
         application.delegate = delegate
         application.run()

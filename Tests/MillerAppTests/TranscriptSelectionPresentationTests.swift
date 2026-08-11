@@ -33,6 +33,32 @@ struct TranscriptSelectionPresentationTests {
 
     @Test
     @MainActor
+    func plainTypedAndLiveTranscriptTextUsesDynamicSystemTextColor() {
+        for (text, identifier) in [
+            ("Typed user message", "miller.test.typed-user"),
+            ("Live transcript", "miller.test.live"),
+        ] {
+            let surface = SelectableTranscriptSurface(
+                text: text,
+                accessibilityIdentifier: identifier,
+                selectionBegan: {}
+            )
+            let fullRange = NSRange(location: 0, length: surface.attributedText.length)
+            var effectiveRange = NSRange()
+            let color = surface.attributedText.attribute(
+                .foregroundColor,
+                at: 0,
+                longestEffectiveRange: &effectiveRange,
+                in: fullRange
+            ) as? NSColor
+
+            #expect(color == NSColor.textColor)
+            #expect(effectiveRange == fullRange)
+        }
+    }
+
+    @Test
+    @MainActor
     func nativeTranscriptResponderCopiesOnlyTheActiveMessageSelection() {
         let textView = TranscriptNSTextView()
         textView.isEditable = false
@@ -43,12 +69,23 @@ struct TranscriptSelectionPresentationTests {
         textView.setSelectedRange(NSRange(location: 11, length: 11))
 
         let pasteboard = NSPasteboard.general
-        let previousItems = pasteboard.pasteboardItems
+        let previousItems = pasteboard.pasteboardItems?.map { item in
+            item.types.compactMap { type in
+                item.data(forType: type).map { (type: type, data: $0) }
+            }
+        }
         pasteboard.clearContents()
         defer {
             pasteboard.clearContents()
             if let previousItems {
-                pasteboard.writeObjects(previousItems)
+                let restoredItems = previousItems.map { contents in
+                    let item = NSPasteboardItem()
+                    for content in contents {
+                        item.setData(content.data, forType: content.type)
+                    }
+                    return item
+                }
+                pasteboard.writeObjects(restoredItems)
             }
         }
 

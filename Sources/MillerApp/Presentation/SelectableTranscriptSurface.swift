@@ -58,7 +58,10 @@ struct SelectableTranscriptSurface: View {
         selectionBegan: @escaping TranscriptSelectionAction
     ) {
         self.init(
-            attributedText: NSAttributedString(string: text),
+            attributedText: NSAttributedString(
+                string: text,
+                attributes: [.foregroundColor: NSColor.textColor]
+            ),
             accessibilityIdentifier: accessibilityIdentifier,
             accessibilityLabel: accessibilityLabel,
             selectionBegan: selectionBegan
