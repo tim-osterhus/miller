@@ -59,7 +59,7 @@ struct TranscriptSelectionPresentationTests {
 
     @Test
     @MainActor
-    func nativeTranscriptResponderCopiesOnlyTheActiveMessageSelection() {
+    func nativeTranscriptWritesOnlyTheActiveSelectionToAnIsolatedPasteboard() throws {
         let textView = TranscriptNSTextView()
         textView.isEditable = false
         textView.isSelectable = true
@@ -68,32 +68,13 @@ struct TranscriptSelectionPresentationTests {
         )
         textView.setSelectedRange(NSRange(location: 11, length: 11))
 
-        let pasteboard = NSPasteboard.general
-        let previousItems = pasteboard.pasteboardItems?.map { item in
-            item.types.compactMap { type in
-                item.data(forType: type).map { (type: type, data: $0) }
-            }
-        }
-        pasteboard.clearContents()
-        defer {
-            pasteboard.clearContents()
-            if let previousItems {
-                let restoredItems = previousItems.map { contents in
-                    let item = NSPasteboardItem()
-                    for content in contents {
-                        item.setData(content.data, forType: content.type)
-                    }
-                    return item
-                }
-                pasteboard.writeObjects(restoredItems)
-            }
-        }
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let selectionType = try #require(textView.writablePasteboardTypes.first)
 
+        #expect(pasteboard.name != .general)
         #expect(
-            textView.tryToPerform(
-                #selector(NSText.copy(_:)),
-                with: nil
-            )
+            textView.writeSelection(to: pasteboard, type: selectionType)
         )
         #expect(pasteboard.string(forType: .string) == "second line")
         #expect(textView.selectedRange == NSRange(location: 11, length: 11))
