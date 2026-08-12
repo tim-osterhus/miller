@@ -195,6 +195,35 @@ struct WakeWordProductionHandoffTests {
     }
 
     @Test @MainActor
+    func canceledLiveCleanupDoesNotRearmAfterSettlingDelay() async {
+        let recorder = SettlingHandoffRecorderProbe()
+        let handoffSleep = HandoffSleepGate()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() },
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            },
+            handoffSleep: { await handoffSleep.wait() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.suspend(.foregroundSession)
+
+        let rearm = Task { @MainActor in
+            await controller.resumeAfterLiveCleanup()
+        }
+        await handoffSleep.waitUntilEntered()
+        rearm.cancel()
+        await handoffSleep.release()
+        await rearm.value
+
+        #expect(controller.state == .suspended(.foregroundSession))
+        #expect(recorder.startCount == 1)
+        #expect(recorder.isWakeMonitoring == false)
+    }
+
+    @Test @MainActor
     func wakeDetectionStopsRecorderBeforeCallback() async {
         let recorder = HandoffRecorderProbe()
         let detector = HandoffDetectorProbe()

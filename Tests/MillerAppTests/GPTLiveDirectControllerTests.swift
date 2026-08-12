@@ -77,6 +77,87 @@ struct GPTLiveDirectControllerTests {
     }
 
     @Test
+    func wakeRearmCannotObserveControllerEndBeforeLiveLeaseRelease() async throws {
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let ownership = MicrophoneOwnership()
+        let peer = DirectControllerPeer()
+        let socket = DirectControllerSocket()
+        let controller = try GPTLiveController(
+            helperURL: nil,
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-direct-live-test"),
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            makePeer: { peer },
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(
+                    peer: peer,
+                    callCreator: GPTLiveCallCreator(loader: DirectControllerLoader()),
+                    sidebandConnector: GPTLiveSidebandConnector(
+                        factory: { _, _ in socket },
+                        sleep: { _ in }
+                    ),
+                    configuration: configuration
+                )
+            },
+            microphoneOwnership: ownership
+        )
+        let dependencies = controller.dependencies()
+        let order = DirectControllerLeaseOrderProbe()
+        let run = Task {
+            try? await dependencies.start(LiveVoiceStartContext.wakeword) { event in
+                if case .state(.listening) = event {
+                    Task(priority: .high) {
+                        await dependencies.end()
+                        let wakeLease = try? ownership.acquire(.wake)
+                        wakeLease?.release()
+                        await order.recordEnd(wakeLeaseAcquired: wakeLease != nil)
+                    }
+                }
+            }
+        }
+
+        try await waitUntilDirectControllerAsync { await order.endCompleted }
+        await run.value
+
+        #expect(await order.wakeLeaseAcquired)
+    }
+
+    @Test
+    func controllerCompletionReleasesLiveLeaseBeforeResumingStopWaiters() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MillerApp/Voice/GPTLiveController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let completion = try #require(source.range(of: "private func finishStart()"))
+        let finishStartSource = String(source[completion.lowerBound...])
+        let release = try #require(
+            finishStartSource.range(of: "releaseLiveMicrophoneLeaseIfNeeded()")
+        )
+        let waiterResume = try #require(
+            finishStartSource.range(of: "for waiter in waiters { waiter.resume() }")
+        )
+
+        #expect(release.lowerBound < waiterResume.lowerBound)
+    }
+
+    @Test
     func wakeDirectSessionRequestsExactlyOneProviderResponseAfterPeerConnection() async throws {
         let profile = try ProviderProfile(
             kind: .codexOAuth,
@@ -545,4 +626,14 @@ private actor DirectControllerRefreshGate {
 private actor DirectControllerCompletionProbe {
     private(set) var completed = false
     func complete() { completed = true }
+}
+
+private actor DirectControllerLeaseOrderProbe {
+    private(set) var wakeLeaseAcquired = false
+    private(set) var endCompleted = false
+
+    func recordEnd(wakeLeaseAcquired: Bool) {
+        self.wakeLeaseAcquired = wakeLeaseAcquired
+        endCompleted = true
+    }
 }

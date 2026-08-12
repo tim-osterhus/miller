@@ -6,10 +6,10 @@ import Foundation
 typealias WakeWordEventScheduler = @Sendable (
     @escaping @MainActor @Sendable () async -> Void
 ) -> Void
-typealias WakeWordHandoffSleep = @Sendable () async -> Void
+typealias WakeWordHandoffSleep = @Sendable () async throws -> Void
 
 private let defaultWakeWordHandoffSleep: WakeWordHandoffSleep = {
-    try? await Task.sleep(for: .milliseconds(150))
+    try await Task.sleep(for: .milliseconds(150))
 }
 
 public typealias WakeWordAdmissionHandler =
@@ -280,10 +280,17 @@ public final class WakeWordProductionController: ObservableObject {
         defer { finishLifecycleOperation(operationEpoch) }
         await waitForEarlierLifecycleOperations(operationEpoch)
         guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
-        await handoffSleep()
+        do {
+            try await handoffSleep()
+        } catch is CancellationError {
+            return
+        } catch {
+            return
+        }
         guard acceptsLifecycleOperation(operationEpoch),
               isEnabled,
-              systemIsAwake else {
+              systemIsAwake,
+              !Task.isCancelled else {
             return
         }
         await startMonitoringIfEligible(operationEpoch: operationEpoch)

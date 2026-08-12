@@ -66,10 +66,12 @@ public actor DirectGPTLiveSession {
     private var consultTask: Task<Void, Never>?
     private var consultToken: GPTLiveCancellationToken?
     private var expiryTask: Task<Void, Never>?
+    private var peerMonitor: Task<Void, Never>?
     private var peerClosed = false
     private var runGeneration: UInt64 = 0
     private var hasRun = false
     private var stopRequested = false
+    private var terminalFailure: GPTLiveSessionError?
     private var transcript: [GPTLiveTranscriptEntry] = []
     private var partialRole: GPTLiveTranscriptRole?
     private var contract = LiveSessionContract()
@@ -112,6 +114,7 @@ public actor DirectGPTLiveSession {
         let generation = runGeneration
         self.identity = identity
         stopRequested = false
+        terminalFailure = nil
         peerClosed = false
         transcript.removeAll()
         partialRole = nil
@@ -127,6 +130,8 @@ public actor DirectGPTLiveSession {
             continuation = nil
             expiryTask?.cancel()
             expiryTask = nil
+            peerMonitor?.cancel()
+            peerMonitor = nil
             consultTask?.cancel()
             consultTask = nil
             consultToken?.cancel()
@@ -135,6 +140,7 @@ public actor DirectGPTLiveSession {
             sideband = nil
             self.identity = nil
             cleanupPendingHandler = nil
+            terminalFailure = nil
         }
 
         let operation = Task { [weak self] in
@@ -159,6 +165,7 @@ public actor DirectGPTLiveSession {
             })
         } catch is CancellationError {
             await cleanup()
+            if let terminalFailure { throw terminalFailure }
             if stopRequested { return }
             throw CancellationError()
         } catch {
@@ -245,18 +252,25 @@ public actor DirectGPTLiveSession {
                     Task { await self?.enqueue(.terminal(.protocolViolation), generation: generation) }
                 }
             },
-            onTerminal: { terminal in
+            onTerminal: { [weak self] terminal in
                 inputContinuation?.yield(.terminal(terminal))
+                Task {
+                    await self?.handleSidebandTerminal(terminal, generation: generation)
+                }
             }
         )
         guard terminal == nil else { throw GPTLiveSessionError.sidebandStartup }
         try await peer.applyAnswerAndWaitForConnected(call.answerSDP)
+        if let terminalFailure { throw terminalFailure }
         guard !stopRequested else { return }
         guard connected.terminal == nil else { throw GPTLiveSessionError.sidebandStartup }
+        beginPeerMonitor(generation: generation)
+        if let terminalFailure { throw terminalFailure }
         if requestInitialResponse {
             try Task.checkCancellation()
             guard !stopRequested else { return }
-            try await peer.requestResponse()
+            try await requestResponse(generation: generation)
+            if let terminalFailure { throw terminalFailure }
             guard !stopRequested else { return }
         }
         try contract.accept(.started(threadID: identity.threadID), generation: identity.generation)
@@ -552,7 +566,52 @@ public actor DirectGPTLiveSession {
         continuation?.yield(.terminal(.error))
     }
 
+    private func handleSidebandTerminal(
+        _ terminal: GPTLiveSidebandTerminal,
+        generation: UInt64
+    ) async {
+        guard runGeneration == generation,
+              identity != nil,
+              !stopRequested,
+              terminalFailure == nil else { return }
+        switch terminal {
+        case .closed:
+            terminalFailure = .sidebandClosed
+        case .error, .protocolViolation:
+            terminalFailure = .protocolFailure
+        }
+        operationTask?.cancel()
+        await cleanup()
+    }
+
+    private func beginPeerMonitor(generation: UInt64) {
+        guard let monitor = peer as? any LiveAudioPeerConnectionMonitoring else { return }
+        peerMonitor?.cancel()
+        peerMonitor = Task { [weak self, monitor] in
+            do {
+                try await monitor.waitForConnectionFailure()
+                await self?.handlePeerConnectionFailure(generation: generation)
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.handlePeerConnectionFailure(generation: generation)
+            }
+        }
+    }
+
+    private func handlePeerConnectionFailure(generation: UInt64) async {
+        guard runGeneration == generation,
+              identity != nil,
+              !stopRequested,
+              terminalFailure == nil else { return }
+        terminalFailure = .protocolFailure
+        operationTask?.cancel()
+        await cleanup()
+    }
+
     private func cleanup() async {
+        peerMonitor?.cancel()
+        peerMonitor = nil
         expiryTask?.cancel()
         expiryTask = nil
         consultTask?.cancel()
@@ -563,6 +622,7 @@ public actor DirectGPTLiveSession {
             await sideband.close()
             self.sideband = nil
         }
+        await cancelResponseRequest(generation: runGeneration)
         guard !peerClosed else { return }
         peerClosed = true
         let pendingDelay = cleanupPendingDelay
@@ -577,6 +637,19 @@ public actor DirectGPTLiveSession {
         }
         await closeTask.value
         pendingTask.cancel()
+    }
+
+    private func requestResponse(generation: UInt64) async throws {
+        if let fencedPeer = peer as? any LiveAudioPeerResponseFencing {
+            try await fencedPeer.requestResponse(for: generation)
+        } else {
+            try await peer.requestResponse()
+        }
+    }
+
+    private func cancelResponseRequest(generation: UInt64) async {
+        guard let fencedPeer = peer as? any LiveAudioPeerResponseFencing else { return }
+        await fencedPeer.cancelResponseRequest(for: generation)
     }
 
     private func reportCleanupPending(

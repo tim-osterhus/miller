@@ -126,6 +126,10 @@ protocol WebKitLivePeerScriptEvaluating: AnyObject, Sendable {
     ) async throws -> String
 
     func requestResponse() async throws -> String
+
+    func requestResponse(generation: UInt64) async throws -> String
+
+    func invalidateResponse(generation: UInt64) async
 }
 
 @MainActor
@@ -133,10 +137,17 @@ extension WebKitLivePeerScriptEvaluating {
     func requestResponse() async throws -> String {
         throw LiveAudioPeerError.unavailable
     }
+
+    func requestResponse(generation: UInt64) async throws -> String {
+        try await requestResponse()
+    }
+
+    func invalidateResponse(generation: UInt64) async {}
 }
 
 @MainActor
-final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
+final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
+    LiveAudioPeerResponseFencing {
     static let baseOrigin = URL(string: "https://miller.invalid/")!
     static let maximumSDPBytes = 65_536
     private static let maximumResultBytes = 65_536
@@ -154,6 +165,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
     private let evaluator: any WebKitLivePeerScriptEvaluating
     private let operationTimeout: Duration
     private var state: State = .idle
+    private var activeResponseGeneration: UInt64?
 
     init(
         evaluator: any WebKitLivePeerScriptEvaluating,
@@ -217,9 +229,20 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
     }
 
     func requestResponse() async throws {
+        try await requestResponse(for: 0)
+    }
+
+    func requestResponse(for generation: UInt64) async throws {
         guard state == .connected else { throw LiveAudioPeerError.invalidState }
+        guard activeResponseGeneration == nil else {
+            throw LiveAudioPeerError.invalidState
+        }
+        activeResponseGeneration = generation
         do {
-            guard try await callResponse() == "ok" else {
+            let result = try await callResponse(generation: generation)
+            guard result == "ok",
+                  state == .connected,
+                  activeResponseGeneration == generation else {
                 await close()
                 throw LiveAudioPeerError.connectionFailed
             }
@@ -233,6 +256,15 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
             await close()
             throw LiveAudioPeerError.connectionFailed
         }
+        if activeResponseGeneration == generation {
+            activeResponseGeneration = nil
+        }
+    }
+
+    func cancelResponseRequest(for generation: UInt64) async {
+        guard activeResponseGeneration == generation else { return }
+        activeResponseGeneration = nil
+        await evaluator.invalidateResponse(generation: generation)
     }
 
     func setMuted(_ muted: Bool) async throws {
@@ -275,6 +307,10 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
 
     func close() async {
         guard state != .closed else { return }
+        if let generation = activeResponseGeneration {
+            activeResponseGeneration = nil
+            await evaluator.invalidateResponse(generation: generation)
+        }
         state = .closed
         _ = try? await call(.close)
     }
@@ -341,7 +377,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
         return result
     }
 
-    private func callResponse() async throws -> String {
+    private func callResponse(generation: UInt64) async throws -> String {
         let race = WebKitLivePeerCallRace<String>()
         let timeout = operationTimeout
         let result = try await withTaskCancellationHandler(operation: {
@@ -349,7 +385,9 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
                 race.install(continuation)
                 Task { @MainActor [evaluator] in
                     do {
-                        race.resolve(.success(try await evaluator.requestResponse()))
+                        race.resolve(.success(
+                            try await evaluator.requestResponse(generation: generation)
+                        ))
                     } catch {
                         race.resolve(.failure(error))
                     }
@@ -390,6 +428,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
       let channel = null;
       let audio = null;
       let closed = false;
+      const responseGeneration = { value: null };
       const connected = () => pc && pc.connectionState === "connected";
       const waitForConnected = () => new Promise((resolve, reject) => {
         if (connected()) { resolve(); return; }
@@ -454,15 +493,30 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
           await waitForConnected();
           return "connected";
         },
-        async requestResponse() {
-          if (!pc || !channel || closed || !connected()) {
+        async requestResponse(generation) {
+          if (!pc || !channel || closed || !connected()
+              || responseGeneration.value !== null) {
             throw new Error("invalid state");
           }
-          await waitForDataChannelOpen();
-          if (closed || !connected() || channel.readyState !== "open") {
-            throw new Error("invalid state");
+          responseGeneration.value = generation;
+          try {
+            await waitForDataChannelOpen();
+            if (closed || !connected() || channel.readyState !== "open"
+                || responseGeneration.value !== generation) {
+              throw new Error("invalid state");
+            }
+            channel.send(JSON.stringify({type: "response.create"}));
+            return "ok";
+          } finally {
+            if (responseGeneration.value === generation) {
+              responseGeneration.value = null;
+            }
           }
-          channel.send(JSON.stringify({type: "response.create"}));
+        },
+        invalidateResponse(generation) {
+          if (responseGeneration.value === generation) {
+            responseGeneration.value = null;
+          }
           return "ok";
         },
         async setMuted(muted) {
@@ -477,6 +531,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
         async close() {
           if (closed) return "ok";
           closed = true;
+          responseGeneration.value = null;
           if (localStream) for (const track of localStream.getTracks()) track.stop();
           if (outboundStream) for (const track of outboundStream.getTracks()) track.stop();
           if (microphoneSource) microphoneSource.disconnect();
@@ -583,15 +638,29 @@ private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScrip
     }
 
     func requestResponse() async throws -> String {
+        try await requestResponse(generation: 0)
+    }
+
+    func requestResponse(generation: UInt64) async throws -> String {
         try await pageReadiness.waitUntilReady()
         let result = try await view.callAsyncJavaScript(
-            "return await window.millerLive.requestResponse()",
-            arguments: [:],
+            "return await window.millerLive.requestResponse(generation)",
+            arguments: ["generation": generation],
             in: nil,
             contentWorld: .page
         )
         guard let result = result as? String else { throw LiveAudioPeerError.connectionFailed }
         return result
+    }
+
+    func invalidateResponse(generation: UInt64) async {
+        guard (try? await pageReadiness.waitUntilReady()) != nil else { return }
+        _ = try? await view.callAsyncJavaScript(
+            "return window.millerLive.invalidateResponse(generation)",
+            arguments: ["generation": generation],
+            in: nil,
+            contentWorld: .page
+        )
     }
 
 }

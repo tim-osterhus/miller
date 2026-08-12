@@ -75,6 +75,58 @@ struct LiveAudioSessionTests {
     }
 
     @Test @MainActor
+    func omittedResponseRequestFailsClosed() async {
+        let peer = OmittedResponsePeer()
+
+        await #expect(throws: LiveAudioPeerError.unavailable) {
+            try await peer.requestResponse()
+        }
+    }
+
+    @Test @MainActor
+    func stoppingInFlightWakeResponseFencesTheLateHelperPeerSend() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let peer = BlockingResponseSessionPeer()
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "wait-stop"],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(100)
+        ))
+        let session = LiveAudioSession(
+            client: CodexAppServerClient(process: process),
+            peer: peer
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "helper-stop-in-flight", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("synthetic".utf8), accountID: "account-1", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntilLiveAudioSession { peer.responseStarted }
+        let ending = Task { await session.end() }
+        try await waitUntilLiveAudioSession { peer.responseInvalidationCount == 1 }
+        peer.releaseResponse()
+        await ending.value
+        await run.value
+
+        #expect(peer.responseSent == false)
+        #expect(peer.responseInvalidationCount == 1)
+    }
+
+    @Test @MainActor
     func wakeHelperSessionRequestsExactlyOneResponseAfterPeerConnection() async throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -184,6 +236,49 @@ private final class PermissionTestPeer: LiveAudioPeer {
     func requestResponse() async throws { operations.append(.response) }
     func setMuted(_ muted: Bool) async throws {}
     func close() async { operations.append(.close) }
+}
+
+@MainActor
+private final class OmittedResponsePeer: LiveAudioPeer {
+    nonisolated init() {}
+
+    func prepareOffer() async throws -> String { liveAudioSessionSyntheticOffer }
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {}
+    func setMuted(_ muted: Bool) async throws {}
+    func close() async {}
+}
+
+@MainActor
+private final class BlockingResponseSessionPeer: LiveAudioPeerResponseFencing {
+    private var responseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var responseStarted = false
+    private(set) var responseSent = false
+    private(set) var responseInvalidationCount = 0
+    private var responseInvalidated = false
+
+    func prepareOffer() async throws -> String { liveAudioSessionSyntheticOffer }
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {}
+    func requestResponse() async throws {
+        responseStarted = true
+        await withCheckedContinuation { responseContinuation = $0 }
+        if !responseInvalidated {
+            responseSent = true
+        }
+    }
+    func requestResponse(for generation: UInt64) async throws {
+        try await requestResponse()
+    }
+    func cancelResponseRequest(for generation: UInt64) async {
+        guard !responseInvalidated else { return }
+        responseInvalidated = true
+        responseInvalidationCount += 1
+    }
+    func setMuted(_ muted: Bool) async throws {}
+    func close() async {}
+    func releaseResponse() {
+        responseContinuation?.resume()
+        responseContinuation = nil
+    }
 }
 
 @MainActor

@@ -181,6 +181,7 @@ actor GPTLiveController {
     private var hasAttachedPeer = false
     private var credentialRefreshRace: GPTLiveCredentialRefreshRace?
     private var startCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var liveMicrophoneLease: MicrophoneOwnership.Lease?
 
     init(
         helperURL: URL?,
@@ -330,6 +331,7 @@ actor GPTLiveController {
         } catch {
             throw LiveAudioError.microphoneUnavailable
         }
+        liveMicrophoneLease = lease
         defer { lease?.release() }
         try await start(receive: receive, context: context)
     }
@@ -673,6 +675,7 @@ actor GPTLiveController {
     }
 
     private func finishStart() {
+        releaseLiveMicrophoneLeaseIfNeeded()
         session = nil
         directSession = nil
         startInProgress = false
@@ -682,6 +685,12 @@ actor GPTLiveController {
         let waiters = startCompletionWaiters
         startCompletionWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+    }
+
+    private func releaseLiveMicrophoneLeaseIfNeeded() {
+        let lease = liveMicrophoneLease
+        liveMicrophoneLease = nil
+        lease?.release()
     }
 
     private func releaseAttachedPeerIfNeeded() async {

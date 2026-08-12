@@ -20,7 +20,17 @@ public protocol LiveAudioPeer: Sendable {
 }
 
 public extension LiveAudioPeer {
-    func requestResponse() async throws {}
+    func requestResponse() async throws {
+        throw LiveAudioPeerError.unavailable
+    }
+}
+
+/// Narrow acknowledgement fence used by sessions that can invalidate a
+/// response request while the peer is still completing its asynchronous send.
+@MainActor
+public protocol LiveAudioPeerResponseFencing: LiveAudioPeer {
+    func requestResponse(for generation: UInt64) async throws
+    func cancelResponseRequest(for generation: UInt64) async
 }
 
 /// Optional post-admission failure observation for peers that can report a

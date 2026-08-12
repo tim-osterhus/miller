@@ -306,6 +306,103 @@ struct DirectGPTLiveSessionTests {
     }
 
     @Test
+    func stoppingInFlightWakeResponseFencesTheLatePeerSend() async throws {
+        let peer = BlockingResponsePeer()
+        let socket = DirectSessionSocket()
+        let session = DirectGPTLiveSession(
+            peer: peer,
+            callCreator: GPTLiveCallCreator(loader: DirectSessionLoader()),
+            sidebandConnector: GPTLiveSidebandConnector(factory: { _, _ in socket }, sleep: { _ in })
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "stop-in-flight-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("token".utf8), accountID: "account", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntil { await MainActor.run { peer.responseStarted } }
+        await session.end()
+        await MainActor.run { peer.releaseResponse() }
+        _ = await run.result
+
+        #expect(await MainActor.run { peer.responseSent == false })
+        #expect(await MainActor.run { peer.closeCount == 1 })
+        #expect(await MainActor.run { peer.responseInvalidationCount == 1 })
+    }
+
+    @Test
+    func terminalSidebandFailureFencesAnInFlightWakeResponse() async throws {
+        let peer = BlockingResponsePeer()
+        let socket = DirectSessionSocket()
+        let session = DirectGPTLiveSession(
+            peer: peer,
+            callCreator: GPTLiveCallCreator(loader: DirectSessionLoader()),
+            sidebandConnector: GPTLiveSidebandConnector(factory: { _, _ in socket }, sleep: { _ in })
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "terminal-in-flight-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("token".utf8), accountID: "account", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntil { await MainActor.run { peer.responseStarted } }
+        socket.emitClosure()
+        try await waitUntil {
+            await MainActor.run { peer.responseInvalidationCount == 1 }
+        }
+        await MainActor.run { peer.releaseResponse() }
+        _ = await run.result
+
+        #expect(await MainActor.run { peer.responseSent == false })
+    }
+
+    @Test
+    func terminalPeerConnectionFailureFencesAnInFlightWakeResponse() async throws {
+        let peer = BlockingResponsePeer()
+        let socket = DirectSessionSocket()
+        let session = DirectGPTLiveSession(
+            peer: peer,
+            callCreator: GPTLiveCallCreator(loader: DirectSessionLoader()),
+            sidebandConnector: GPTLiveSidebandConnector(factory: { _, _ in socket }, sleep: { _ in })
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "peer-failure-in-flight-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("token".utf8), accountID: "account", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntil {
+            await MainActor.run { peer.responseStarted && peer.monitorStarted }
+        }
+        await MainActor.run { peer.failConnection() }
+        try await waitUntil {
+            await MainActor.run { peer.responseInvalidationCount == 1 }
+        }
+        await MainActor.run { peer.releaseResponse() }
+        _ = await run.result
+
+        #expect(await MainActor.run { peer.responseSent == false })
+    }
+
+    @Test
     func slowPeerCleanupReportsPendingThenCompletes() async throws {
         let peer = BlockingClosePeer()
         let socket = DirectSessionSocket()
@@ -509,6 +606,64 @@ private final class BlockingAnswerPeer: LiveAudioPeer {
     func setMuted(_ muted: Bool) async throws {}
     func close() async {}
     func releaseAnswer() { answerContinuation?.resume(); answerContinuation = nil }
+}
+
+@MainActor
+private final class BlockingResponsePeer: LiveAudioPeerResponseFencing,
+    LiveAudioPeerConnectionMonitoring {
+    private var responseContinuation: CheckedContinuation<Void, Never>?
+    private var connectionFailureContinuation: CheckedContinuation<Void, Error>?
+    private(set) var responseStarted = false
+    private(set) var responseSent = false
+    private(set) var responseInvalidationCount = 0
+    private(set) var closeCount = 0
+    private(set) var monitorStarted = false
+    private var responseInvalidated = false
+
+    func prepareOffer() async throws -> String { "v=0\r\ns=-\r\n" }
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {}
+    func requestResponse() async throws {
+        responseStarted = true
+        await withCheckedContinuation { responseContinuation = $0 }
+        if !responseInvalidated {
+            responseSent = true
+        }
+    }
+    func requestResponse(for generation: UInt64) async throws {
+        try await requestResponse()
+    }
+    func cancelResponseRequest(for generation: UInt64) async {
+        guard !responseInvalidated else { return }
+        responseInvalidated = true
+        responseInvalidationCount += 1
+    }
+    func setMuted(_ muted: Bool) async throws {}
+    func close() async {
+        closeCount += 1
+        cancelConnectionMonitor()
+    }
+    func waitForConnectionFailure() async throws {
+        monitorStarted = true
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                connectionFailureContinuation = continuation
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in self?.cancelConnectionMonitor() }
+        })
+    }
+    func failConnection() {
+        connectionFailureContinuation?.resume(throwing: LiveAudioPeerError.connectionFailed)
+        connectionFailureContinuation = nil
+    }
+    func releaseResponse() {
+        responseContinuation?.resume()
+        responseContinuation = nil
+    }
+    private func cancelConnectionMonitor() {
+        connectionFailureContinuation?.resume(throwing: CancellationError())
+        connectionFailureContinuation = nil
+    }
 }
 
 @MainActor

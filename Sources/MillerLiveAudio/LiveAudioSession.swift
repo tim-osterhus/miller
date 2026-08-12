@@ -188,7 +188,10 @@ public actor LiveAudioSession {
                           !peerClosed
                     else { break }
                     initialResponseRequested = true
-                    try await peer.requestResponse()
+                    try await requestResponse(
+                        using: peer,
+                        generation: runGeneration
+                    )
                 case .started:
                     await onActive()
                 case .outputAudio:
@@ -259,9 +262,30 @@ public actor LiveAudioSession {
     private func cleanup(playbackFirst: Bool = false) async {
         _ = playbackFirst
         cancelPeerMonitor()
-        guard !peerClosed, let peer else { return }
+        guard let peer else { return }
+        await cancelResponseRequest(using: peer, generation: runGeneration)
+        guard !peerClosed else { return }
         peerClosed = true
         await peer.close()
+    }
+
+    private func requestResponse(
+        using peer: any LiveAudioPeer,
+        generation: UInt64
+    ) async throws {
+        if let fencedPeer = peer as? any LiveAudioPeerResponseFencing {
+            try await fencedPeer.requestResponse(for: generation)
+        } else {
+            try await peer.requestResponse()
+        }
+    }
+
+    private func cancelResponseRequest(
+        using peer: any LiveAudioPeer,
+        generation: UInt64
+    ) async {
+        guard let fencedPeer = peer as? any LiveAudioPeerResponseFencing else { return }
+        await fencedPeer.cancelResponseRequest(for: generation)
     }
 
     private func finishRun(generation: UInt64) {

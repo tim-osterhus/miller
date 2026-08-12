@@ -162,6 +162,23 @@ struct WebKitLivePeerContractTests {
     }
 
     @Test
+    func closingAnInFlightResponseFencesTheFinalPeerSend() async throws {
+        let evaluator = BlockingResponseScriptEvaluator()
+        let peer = WebKitLivePeer(evaluator: evaluator)
+
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\ns=-\r\n")
+        let response = Task { try? await peer.requestResponse() }
+        await evaluator.waitUntilResponseStarted()
+
+        await peer.close()
+        evaluator.releaseResponse()
+        _ = await response.value
+
+        #expect(evaluator.responseSent == false)
+    }
+
+    @Test
     func peerTurnsMuteScriptFailureIntoATypedTerminalFailure() async throws {
         let evaluator = FakeScriptEvaluator(results: [
             .prepareOffer: syntheticOffer,
@@ -332,6 +349,62 @@ private final class FakeScriptEvaluator: WebKitLivePeerScriptEvaluating {
     func requestResponse() async throws -> String {
         responseCalls += 1
         return "ok"
+    }
+}
+
+@MainActor
+private final class BlockingResponseScriptEvaluator: WebKitLivePeerScriptEvaluating {
+    private var responseContinuation: CheckedContinuation<Void, Never>?
+    private var responseStartContinuation: CheckedContinuation<Void, Never>?
+    private(set) var responseStarted = false
+    private(set) var responseSent = false
+    private var responseInvalidated = false
+
+    func evaluate(
+        _ operation: WebKitLivePeerScriptOperation,
+        answer: String?
+    ) async throws -> String {
+        switch operation {
+        case .prepareOffer:
+            return syntheticOffer
+        case .applyAnswer:
+            return "connected"
+        case .close:
+            return "ok"
+        default:
+            throw FakeEvaluatorError.missingResult
+        }
+    }
+
+    func requestResponse() async throws -> String {
+        try await requestResponse(for: 1)
+    }
+
+    func requestResponse(for generation: UInt64) async throws -> String {
+        responseStarted = true
+        responseStartContinuation?.resume()
+        responseStartContinuation = nil
+        await withCheckedContinuation { responseContinuation = $0 }
+        if !responseInvalidated {
+            responseSent = true
+        }
+        return "ok"
+    }
+
+    func invalidateResponse(generation: UInt64) {
+        responseInvalidated = true
+    }
+
+    func waitUntilResponseStarted() async {
+        guard !responseStarted else { return }
+        await withCheckedContinuation { continuation in
+            responseStartContinuation = continuation
+        }
+    }
+
+    func releaseResponse() {
+        responseContinuation?.resume()
+        responseContinuation = nil
     }
 }
 
