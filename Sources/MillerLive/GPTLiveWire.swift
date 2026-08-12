@@ -23,6 +23,11 @@ public enum GPTLiveVoice: String, CaseIterable, Equatable, Sendable {
     case verse
 }
 
+public enum GPTLiveSessionInstructions {
+    public static let wakeAcknowledgement =
+        "Immediately acknowledge you’re ready and listening."
+}
+
 public struct GPTLiveConfiguration: Equatable, Sendable {
     public static let maximumInstructionsBytes = 8_000
     public static let delegationInstructions = """

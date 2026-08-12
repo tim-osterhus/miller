@@ -41,14 +41,15 @@ struct GPTLiveDirectControllerTests {
             },
             microphonePermission: { .authorized },
             makePeer: { peer },
-            makeDirectSession: { peer in
+            makeDirectSession: { peer, configuration in
                 DirectGPTLiveSession(
                     peer: peer,
                     callCreator: GPTLiveCallCreator(loader: DirectControllerLoader()),
                     sidebandConnector: GPTLiveSidebandConnector(
                         factory: { _, _ in socket },
                         sleep: { _ in }
-                    )
+                    ),
+                    configuration: configuration
                 )
             }
         )
@@ -57,7 +58,7 @@ struct GPTLiveDirectControllerTests {
         let dependencies = controller.dependencies()
         let states = DirectControllerStateProbe()
         let run = Task {
-            try? await dependencies.start { event in
+            try? await dependencies.start(LiveVoiceStartContext.manual) { event in
                 if case let .state(state) = event {
                     states.append(state)
                 }
@@ -72,6 +73,51 @@ struct GPTLiveDirectControllerTests {
         #expect(states.valuesSnapshot == [.connecting, .listening])
         #expect(await credentialLoads.value == 1)
         #expect(await credentialAdmission.events == [.refresh, .load])
+    }
+
+    @Test
+    func directFactoryReceivesWakeInstructionOnlyForWakeStarts() async throws {
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let configurations = DirectControllerConfigurationRecorder()
+        let controller = try GPTLiveController(
+            helperURL: nil,
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-direct-live-test"),
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            makePeer: { DirectControllerPeer(failPrepare: true) },
+            makeDirectSession: { peer, configuration in
+                configurations.record(configuration)
+                return DirectGPTLiveSession(peer: peer, configuration: configuration)
+            }
+        )
+
+        let dependencies = controller.dependencies()
+        try? await dependencies.start(LiveVoiceStartContext.wakeword) { _ in }
+        try? await dependencies.start(LiveVoiceStartContext.manual) { _ in }
+
+        let values = configurations.values
+        #expect(values.count == 2)
+        #expect(values[0].instructions.contains(
+            GPTLiveSessionInstructions.wakeAcknowledgement
+        ))
+        #expect(values[1].instructions.contains(
+            GPTLiveSessionInstructions.wakeAcknowledgement
+        ) == false)
     }
 
     @Test
@@ -96,10 +142,14 @@ struct GPTLiveDirectControllerTests {
             refreshCredential: { await refresh.wait() },
             microphonePermission: { .authorized },
             makePeer: { DirectControllerPeer() },
-            makeDirectSession: { peer in DirectGPTLiveSession(peer: peer) }
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(peer: peer, configuration: configuration)
+            }
         )
         let dependencies = controller.dependencies()
-        let run = Task { try? await dependencies.start { _ in } }
+        let run = Task {
+            try? await dependencies.start(LiveVoiceStartContext.manual) { _ in }
+        }
         try await waitUntilDirectControllerAsync { await refresh.entered }
 
         let end = Task {
@@ -136,12 +186,14 @@ struct GPTLiveDirectControllerTests {
             microphonePermission: { .authorized },
             credentialRefreshTimeout: .milliseconds(20),
             makePeer: { DirectControllerPeer() },
-            makeDirectSession: { peer in DirectGPTLiveSession(peer: peer) }
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(peer: peer, configuration: configuration)
+            }
         )
         let dependencies = controller.dependencies()
         let result = await Task {
             do {
-                try await dependencies.start { _ in }
+                try await dependencies.start(LiveVoiceStartContext.manual) { _ in }
                 return false
             } catch let error as LiveProcessError {
                 return error == .timeout
@@ -177,11 +229,13 @@ struct GPTLiveDirectControllerTests {
             refreshCredential: { throw DirectControllerRefreshFailure() },
             microphonePermission: { .authorized },
             makePeer: { peer },
-            makeDirectSession: { peer in DirectGPTLiveSession(peer: peer) }
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(peer: peer, configuration: configuration)
+            }
         )
 
         await #expect(throws: DirectControllerRefreshFailure.self) {
-            try await controller.dependencies().start { _ in }
+            try await controller.dependencies().start(LiveVoiceStartContext.manual) { _ in }
         }
         #expect(await credentialLoads.value == 0)
         #expect(peer.operations.isEmpty)
@@ -196,12 +250,27 @@ private actor DirectControllerCredentialAdmission {
     func record(_ event: Event) { events.append(event) }
 }
 
+private final class DirectControllerConfigurationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var values = [GPTLiveConfiguration]()
+
+    func record(_ configuration: GPTLiveConfiguration) {
+        lock.withLock { values.append(configuration) }
+    }
+}
+
 @MainActor
 private final class DirectControllerPeer: LiveAudioPeer {
     enum Operation: Equatable { case prepare, answer, close }
     private(set) var operations: [Operation] = []
+    private let failPrepare: Bool
+
+    nonisolated init(failPrepare: Bool = false) {
+        self.failPrepare = failPrepare
+    }
 
     func prepareOffer() async throws -> String {
+        if failPrepare { throw DirectControllerPeerFailure.prepare }
         operations.append(.prepare)
         return "v=0\r\ns=-\r\n"
     }
@@ -212,6 +281,10 @@ private final class DirectControllerPeer: LiveAudioPeer {
 
     func setMuted(_ muted: Bool) async throws {}
     func close() async { operations.append(.close) }
+}
+
+private enum DirectControllerPeerFailure: Error {
+    case prepare
 }
 
 private final class DirectControllerLoader: GPTLiveURLLoading, @unchecked Sendable {

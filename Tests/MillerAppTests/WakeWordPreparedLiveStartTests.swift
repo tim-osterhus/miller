@@ -1,62 +1,34 @@
 import Foundation
 import MillerCore
-import MillerLiveAudio
-import MillerWake
 import Testing
 @testable import MillerApp
 
-@Suite("Wakeword prepared Live start")
-struct WakeWordPreparedLiveStartTests {
+@Suite("Wakeword Live start context")
+struct WakeWordLiveStartContextTests {
     @Test
-    func preparedStartUsesTheSingleInjectedStartPath() async throws {
-        let expected = WakeWordPreparedCommandAudio(
-            id: UUID(),
-            generation: 2,
-            samples: ContiguousArray([1, 2]),
-            sampleRate: 16_000
-        )
-        let recorder = PreparedStartRecorder()
+    func dependenciesPassStartContextThroughTheOrdinaryStartClosure() async throws {
+        let recorder = LiveStartContextRecorder()
         let dependencies = LiveVoiceDependencies(
             initialAvailability: .available,
             availability: { .available },
-            start: { receive in
+            start: { context, receive in
+                await recorder.record(context)
                 await receive(.state(.connecting))
             },
             mute: { _ in },
             interrupt: {},
-            end: {},
-            startPrepared: { audio, receive in
-                await recorder.record(audio)
-                await receive(.state(.connecting))
-            }
+            end: {}
         )
 
-        try await dependencies.startPrepared(expected) { _ in }
+        try await dependencies.start(LiveVoiceStartContext.wakeword) { _ in }
+        try await dependencies.start(LiveVoiceStartContext.manual) { _ in }
 
-        #expect(await recorder.audio == expected)
+        #expect(await recorder.contexts == [.wakeword, .manual])
     }
 
     @Test @MainActor
-    func presentationModelRoutesWakeAudioToThePreparedStartClosure() async {
-        let expected = WakeWordPreparedCommandAudio(
-            id: UUID(),
-            generation: 3,
-            samples: ContiguousArray([4, 5, 6]),
-            sampleRate: 16_000
-        )
-        let recorder = PreparedStartRecorder()
-        let live = LiveVoiceDependencies(
-            initialAvailability: .available,
-            availability: { .available },
-            start: { _ in },
-            mute: { _ in },
-            interrupt: {},
-            end: {},
-            startPrepared: { audio, receive in
-                await recorder.record(audio)
-                await receive(.state(.closed))
-            }
-        )
+    func presentationModelMapsWakeAndManualActivationToStartContext() async {
+        let recorder = LiveStartContextRecorder()
         let model = AppPresentationModel(
             dependencies: HostDependencies(
                 submit: { _, _ in TurnID() },
@@ -68,16 +40,23 @@ struct WakeWordPreparedLiveStartTests {
                 unarchive: { _ in },
                 delete: { _ in }
             ),
-            liveVoice: live
+            liveVoice: .init(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { context, receive in
+                    await recorder.record(context)
+                    await receive(.state(.closed))
+                },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            )
         )
 
-        await model.startLiveVoice(
-            activationSource: .wakeword,
-            preparedAudio: expected
-        )
+        await model.startLiveVoice(activationSource: .wakeword)
+        await model.startLiveVoice()
 
-        #expect(await recorder.audio == expected)
-        #expect(model.voiceState == .closed)
+        #expect(await recorder.contexts == [.wakeword, .manual])
     }
 
     @Test @MainActor
@@ -98,7 +77,7 @@ struct WakeWordPreparedLiveStartTests {
             liveVoice: .init(
                 initialAvailability: .available,
                 availability: { .available },
-                start: { _ in },
+                start: { _, _ in },
                 mute: { _ in },
                 interrupt: {},
                 end: {}
@@ -143,7 +122,7 @@ struct WakeWordPreparedLiveStartTests {
             liveVoice: .init(
                 initialAvailability: .available,
                 availability: { .available },
-                start: { _ in },
+                start: { _, _ in },
                 mute: { _ in },
                 interrupt: {},
                 end: {}
@@ -184,7 +163,7 @@ struct WakeWordPreparedLiveStartTests {
             liveVoice: .init(
                 initialAvailability: .available,
                 availability: { .available },
-                start: { receive in await receive(.state(.closed)) },
+                start: { _, receive in await receive(.state(.closed)) },
                 mute: { _ in },
                 interrupt: {},
                 end: {}
@@ -199,11 +178,11 @@ struct WakeWordPreparedLiveStartTests {
     }
 }
 
-private actor PreparedStartRecorder {
-    private(set) var audio: WakeWordPreparedCommandAudio?
+private actor LiveStartContextRecorder {
+    private(set) var contexts = [LiveVoiceStartContext]()
 
-    func record(_ audio: WakeWordPreparedCommandAudio) {
-        self.audio = audio
+    func record(_ context: LiveVoiceStartContext) {
+        contexts.append(context)
     }
 }
 

@@ -207,11 +207,38 @@ struct CodexAppServerProtocolTests {
         let prompt = CodexRealtimePrompt.make(
             now: Date(timeIntervalSince1970: 0),
             timeZone: TimeZone(secondsFromGMT: 0)!,
-            additionalInstructions: "Portable skill [weather] — Weather\nUse trusted forecasts."
+            portableSkillInstructions: "Portable skill [weather] — Weather\nUse trusted forecasts."
         )
 
         #expect(prompt.contains("Portable skill [weather]"))
         #expect(prompt.contains("Use trusted forecasts."))
+    }
+
+    @Test
+    func realtimePromptKeepsWakeSessionInstructionSeparateFromPortableSkills() throws {
+        let wakeInstruction = GPTLiveSessionInstructions.wakeAcknowledgement
+        let prompt = CodexRealtimePrompt.make(
+            sessionInstructions: wakeInstruction,
+            portableSkillInstructions: "Portable skill [weather] — Weather\nUse trusted forecasts."
+        )
+
+        #expect(prompt.contains("Session instructions:\n\(wakeInstruction)"))
+        #expect(prompt.contains("Enabled portable skills for this session:"))
+        let skillsSection = try #require(
+            prompt.components(separatedBy: "Enabled portable skills for this session:")
+                .last
+        )
+        #expect(!skillsSection.contains(wakeInstruction))
+        #expect(!prompt.contains("initialItems"))
+        #expect(!prompt.contains("response.create"))
+        #expect(!prompt.contains("role: user"))
+    }
+
+    @Test
+    func manualRealtimePromptDoesNotAddWakeAcknowledgementInstruction() {
+        let prompt = CodexRealtimePrompt.make()
+
+        #expect(!prompt.contains(GPTLiveSessionInstructions.wakeAcknowledgement))
     }
 
     @Test

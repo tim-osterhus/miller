@@ -8,21 +8,15 @@ final class WakeWordLiveIntegration {
     var openMiller: @MainActor @Sendable () -> Void = {}
     private(set) var liveSessionActive = false
 
-    func wakeDetected() {
+    func wakeDetected() async {
         openMiller()
-    }
-
-    func commandAudio(_ audio: WakeWordPreparedCommandAudio) async {
         liveSessionActive = true
         guard let model else {
             liveSessionActive = false
             await production?.resumeAfterLiveCleanup()
             return
         }
-        await model.startLiveVoice(
-            activationSource: .wakeword,
-            preparedAudio: audio
-        )
+        await model.startLiveVoice(activationSource: .wakeword)
     }
 
     func prepareLiveStart(_ source: VoiceActivationSource) async -> Bool {

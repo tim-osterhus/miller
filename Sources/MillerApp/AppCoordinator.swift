@@ -1452,9 +1452,11 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func startLiveVoice(
-        activationSource: VoiceActivationSource = .manual,
-        preparedAudio: WakeWordPreparedCommandAudio? = nil
+        activationSource: VoiceActivationSource = .manual
     ) async {
+        let startContext: LiveVoiceStartContext = activationSource == .wakeword
+            ? .wakeword
+            : .manual
         guard canStartLiveVoice else {
             if activationSource == .wakeword {
                 liveVoiceFinishedDelivered = !(await prepareLiveStart(
@@ -1562,11 +1564,7 @@ final class AppPresentationModel: ObservableObject {
                     [weak self] event in
                     await self?.applyLiveEvent(event, generation: eventGeneration)
                 }
-                if let preparedAudio {
-                    try await liveVoice.startPrepared(preparedAudio, receive)
-                } else {
-                    try await liveVoice.start(receive)
-                }
+                try await liveVoice.start(startContext, receive)
             } onCancel: { [weak self] in
                 Task { @MainActor [weak self] in
                     await self?.cancelLiveVoiceStart(generation: startGeneration)
@@ -3066,10 +3064,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 )
             },
             onWakeDetected: { [weak wakeIntegration] in
-                wakeIntegration?.wakeDetected()
-            },
-            onCommandAudio: { [weak wakeIntegration] audio, _ in
-                await wakeIntegration?.commandAudio(audio)
+                await wakeIntegration?.wakeDetected()
             }
         )
         let wakeSettings = WakeWordSettingsController(

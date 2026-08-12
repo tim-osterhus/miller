@@ -213,6 +213,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private let existingMillerCapabilities: [CapabilityDescriptor]
     private let portableSkillRoot: String?
     private let portableSkillInstructions: String?
+    private let sessionInstructions: String?
     private let state = State()
 
     public init(
@@ -225,7 +226,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
         resolveProviderApprovalDetails: CodexProviderApprovalDetailsResolver? = nil,
         existingMillerCapabilities: [CapabilityDescriptor] = [],
         portableSkillRoot: String? = nil,
-        portableSkillInstructions: String? = nil
+        portableSkillInstructions: String? = nil,
+        sessionInstructions: String? = nil
     ) {
         self.process = process
         self.codec = codec ?? CodexAppServerProtocol(
@@ -239,6 +241,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
         self.existingMillerCapabilities = existingMillerCapabilities
         self.portableSkillRoot = portableSkillRoot
         self.portableSkillInstructions = portableSkillInstructions
+        self.sessionInstructions = sessionInstructions
     }
 
     public var sessionState: LiveSessionState { state.locked { $0.contract.state } }
@@ -1688,7 +1691,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
             threadID: helperThreadID,
             offerSDP: offerSDP,
             prompt: CodexRealtimePrompt.make(
-                additionalInstructions: portableSkillInstructions
+                sessionInstructions: sessionInstructions,
+                portableSkillInstructions: portableSkillInstructions
             )
         ))
         let answerSDP: String

@@ -113,7 +113,7 @@ struct WakeWordCompositionTests {
             liveVoice: .init(
                 initialAvailability: .available,
                 availability: { .available },
-                start: { receive in await receive(.state(.closed)) },
+                start: { _, receive in await receive(.state(.closed)) },
                 mute: { _ in },
                 interrupt: {},
                 end: {}
@@ -121,13 +121,7 @@ struct WakeWordCompositionTests {
         )
         integration.model = model
 
-        integration.wakeDetected()
-        await integration.commandAudio(.init(
-            id: UUID(),
-            generation: 1,
-            samples: ContiguousArray([1, 2, 3]),
-            sampleRate: 16_000
-        ))
+        await integration.wakeDetected()
 
         #expect(openCount == 1)
         #expect(await admissions.sources == [.wakeword])
@@ -161,7 +155,7 @@ struct WakeWordCompositionTests {
             liveVoice: .init(
                 initialAvailability: .available,
                 availability: { .available },
-                start: { receive in await receive(.state(.closed)) },
+                start: { _, receive in await receive(.state(.closed)) },
                 mute: { _ in },
                 interrupt: {},
                 end: {}

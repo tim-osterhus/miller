@@ -118,7 +118,8 @@ struct CodexAppServerClientTests {
         let client = CodexAppServerClient(
             process: process,
             portableSkillRoot: root.path,
-            portableSkillInstructions: "Portable skill [weather] — Weather\nUse forecasts."
+            portableSkillInstructions: "Portable skill [weather] — Weather\nUse forecasts.",
+            sessionInstructions: GPTLiveSessionInstructions.wakeAcknowledgement
         )
 
         let events = try await client.runUntilClosed(
@@ -138,7 +139,14 @@ struct CodexAppServerClientTests {
             $0["method"] as? String == "thread/realtime/start"
         })
         let params = try #require(start["params"] as? [String: Any])
-        #expect((params["prompt"] as? String)?.contains("Portable skill [weather]") == true)
+        let prompt = try #require(params["prompt"] as? String)
+        #expect(prompt.contains(GPTLiveSessionInstructions.wakeAcknowledgement))
+        #expect(prompt.contains("Portable skill [weather]"))
+        #expect(prompt.contains("Enabled portable skills for this session:"))
+        #expect(prompt.components(separatedBy: "Enabled portable skills for this session:")
+            .last?.contains(GPTLiveSessionInstructions.wakeAcknowledgement) == false)
+        #expect(params["initialItems"] == nil)
+        #expect(params["items"] == nil)
     }
 
     @Test

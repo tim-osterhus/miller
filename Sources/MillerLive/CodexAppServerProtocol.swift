@@ -22,7 +22,8 @@ public enum CodexRealtimePrompt {
     public static func make(
         now: Date = Date(),
         timeZone: TimeZone = .current,
-        additionalInstructions: String? = nil
+        sessionInstructions: String? = nil,
+        portableSkillInstructions: String? = nil
     ) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -36,10 +37,15 @@ public enum CodexRealtimePrompt {
         answering questions about the current date or time. Do not invent or substitute a \
         different current date or time. Respond naturally and concisely.
         """
-        guard let additionalInstructions, !additionalInstructions.isEmpty else {
-            return base
+        var prompt = base
+        if let sessionInstructions, !sessionInstructions.isEmpty {
+            prompt += "\n\nSession instructions:\n" + sessionInstructions
         }
-        return base + "\n\nEnabled portable skills for this session:\n" + additionalInstructions
+        if let portableSkillInstructions, !portableSkillInstructions.isEmpty {
+            prompt += "\n\nEnabled portable skills for this session:\n"
+                + portableSkillInstructions
+        }
+        return prompt
     }
 }
 
