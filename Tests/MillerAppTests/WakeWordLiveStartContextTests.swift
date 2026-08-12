@@ -1,7 +1,7 @@
 import Foundation
 import MillerCore
 import MillerLiveAudio
-import MillerWake
+@testable import MillerWake
 import Testing
 @testable import MillerApp
 
@@ -189,7 +189,11 @@ struct WakeWordLiveStartContextTests {
             onWakeDetectedWithAdmission: { admission in
                 capturedAdmission = admission
                 await integration.wakeDetected(admission)
-            }
+            },
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            },
+            handoffSleep: {}
         )
         integration.production = production
 
