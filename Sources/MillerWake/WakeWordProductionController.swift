@@ -7,8 +7,6 @@ typealias WakeWordEventScheduler = @Sendable (
     @escaping @MainActor @Sendable () async -> Void
 ) -> Void
 
-public typealias WakeWordDetectedHandler =
-    @MainActor @Sendable () async -> Void
 public typealias WakeWordAdmissionHandler =
     @MainActor @Sendable (WakeWordAdmission) async -> Void
 
@@ -50,28 +48,12 @@ public final class WakeWordProductionController: ObservableObject {
     private var isEnabled = false
     private var detectorTuning: SherpaWakeWordTuning
     private var systemIsAwake = true
-    private let onWakeDetected: WakeWordAdmissionHandler
+    private let wakeDetectionHandler: WakeWordAdmissionHandler
 
     public convenience init(
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
-        onWakeDetected: @escaping WakeWordDetectedHandler = {}
-    ) {
-        self.init(
-            recorder: recorder,
-            tunedDetectorFactory: { _ in try detectorFactory() },
-            initialTuning: .default,
-            onWakeDetectedWithAdmission: { _ in await onWakeDetected() },
-            eventScheduler: { operation in
-                Task { @MainActor in await operation() }
-            }
-        )
-    }
-
-    public convenience init(
-        recorder: any WakeWordCaptureOwning,
-        detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
-        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler
+        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler = { _ in }
     ) {
         self.init(
             recorder: recorder,
@@ -90,26 +72,7 @@ public final class WakeWordProductionController: ObservableObject {
             SherpaWakeWordTuning
         ) throws -> any WakeWordDetecting,
         initialTuning: SherpaWakeWordTuning = .default,
-        onWakeDetected: @escaping WakeWordDetectedHandler = {}
-    ) {
-        self.init(
-            recorder: recorder,
-            tunedDetectorFactory: tunedDetectorFactory,
-            initialTuning: initialTuning,
-            onWakeDetectedWithAdmission: { _ in await onWakeDetected() },
-            eventScheduler: { operation in
-                Task { @MainActor in await operation() }
-            }
-        )
-    }
-
-    public convenience init(
-        recorder: any WakeWordCaptureOwning,
-        tunedDetectorFactory: @escaping @Sendable (
-            SherpaWakeWordTuning
-        ) throws -> any WakeWordDetecting,
-        initialTuning: SherpaWakeWordTuning = .default,
-        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler
+        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler = { _ in }
     ) {
         self.init(
             recorder: recorder,
@@ -125,22 +88,7 @@ public final class WakeWordProductionController: ObservableObject {
     convenience init(
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
-        onWakeDetected: @escaping WakeWordDetectedHandler = {},
-        eventScheduler: @escaping WakeWordEventScheduler
-    ) {
-        self.init(
-            recorder: recorder,
-            tunedDetectorFactory: { _ in try detectorFactory() },
-            initialTuning: .default,
-            onWakeDetectedWithAdmission: { _ in await onWakeDetected() },
-            eventScheduler: eventScheduler
-        )
-    }
-
-    convenience init(
-        recorder: any WakeWordCaptureOwning,
-        detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
-        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler,
+        onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler = { _ in },
         eventScheduler: @escaping WakeWordEventScheduler
     ) {
         self.init(
@@ -164,7 +112,7 @@ public final class WakeWordProductionController: ObservableObject {
         self.recorder = recorder
         detectorFactory = tunedDetectorFactory
         detectorTuning = initialTuning
-        onWakeDetected = onWakeDetectedWithAdmission
+        wakeDetectionHandler = onWakeDetectedWithAdmission
         self.eventScheduler = eventScheduler
     }
 
@@ -487,7 +435,7 @@ public final class WakeWordProductionController: ObservableObject {
                 let admission = makeWakeAdmission(operationEpoch: triggerEpoch)
                 finishLifecycleOperation(triggerEpoch)
                 triggerFinished = true
-                await onWakeDetected(admission)
+                await wakeDetectionHandler(admission)
             case .detectorUnavailable(let generation):
                 guard eventCoordinator.accepts(generation) else { continue }
                 await handleDetectorRuntimeFailure(

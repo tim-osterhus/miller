@@ -4,6 +4,22 @@ import Testing
 
 @Suite("Wakeword production handoff")
 struct WakeWordProductionHandoffTests {
+    @Test
+    func productionRequiresAdmissionAwareWakeHandler() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "Sources/MillerWake/WakeWordProductionController.swift"
+            )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("onWakeDetectedWithAdmission"))
+        #expect(!source.contains("WakeWordDetectedHandler"))
+        #expect(!source.contains("onWakeDetected:"))
+    }
+
     @Test @MainActor
     func reloadDetectorReleasesTheOldGenerationBeforeRestarting() async throws {
         let recorder = HandoffRecorderProbe()

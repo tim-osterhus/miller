@@ -3248,6 +3248,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 makePeer: { [livePeerHost] in
                     try await MainActor.run { try livePeerHost.makePeer() }
                 },
+                authorizeStart: { [weak wakeIntegration] context in
+                    guard context == .wakeword else { return true }
+                    return await wakeIntegration?.validateLiveStart(.wakeword)
+                        ?? false
+                },
                 microphoneOwnership: microphoneOwnership,
                 releasePeer: { [livePeerHost] in
                     await MainActor.run { livePeerHost.removePeer() }

@@ -166,6 +166,8 @@ actor GPTLiveController {
     private let makeDirectSession: (
         @Sendable (any LiveAudioPeer, GPTLiveConfiguration) -> DirectGPTLiveSession
     )?
+    private let authorizeStart:
+        @MainActor @Sendable (LiveVoiceStartContext) async -> Bool
     private let microphoneOwnership: MicrophoneOwnership?
     private let releasePeer: @Sendable () async -> Void
     private let helperVerifier: @Sendable (URL) throws -> Void
@@ -218,6 +220,9 @@ actor GPTLiveController {
         makeDirectSession: (
             @Sendable (any LiveAudioPeer, GPTLiveConfiguration) -> DirectGPTLiveSession
         )? = nil,
+        authorizeStart: @escaping @MainActor @Sendable (
+            LiveVoiceStartContext
+        ) async -> Bool = { _ in true },
         microphoneOwnership: MicrophoneOwnership? = nil,
         releasePeer: @escaping @Sendable () async -> Void = {},
         helperVerifier: @escaping @Sendable (URL) throws -> Void = {
@@ -264,6 +269,7 @@ actor GPTLiveController {
         self.makeSession = makeSession
         self.makePeer = makePeer
         self.makeDirectSession = makeDirectSession
+        self.authorizeStart = authorizeStart
         self.microphoneOwnership = microphoneOwnership
         self.releasePeer = releasePeer
         self.helperVerifier = helperVerifier
@@ -317,6 +323,7 @@ actor GPTLiveController {
         context: LiveVoiceStartContext,
         receive: @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
     ) async throws {
+        guard await authorizeStart(context) else { return }
         let lease: MicrophoneOwnership.Lease?
         do {
             lease = try microphoneOwnership?.acquire(.live)
@@ -450,6 +457,7 @@ actor GPTLiveController {
                 }
             }
         }
+        guard await authorizeStart(context) else { return }
         let peer = try await makePeer?()
         hasAttachedPeer = peer != nil
         let sessionInstructions = context == .wakeword

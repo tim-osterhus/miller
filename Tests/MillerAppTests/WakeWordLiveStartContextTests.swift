@@ -1,5 +1,6 @@
 import Foundation
 import MillerCore
+import MillerLiveAudio
 import MillerWake
 import Testing
 @testable import MillerApp
@@ -153,10 +154,13 @@ struct WakeWordLiveStartContextTests {
 
         #expect(result.callbackFinished)
         #expect(result.providerStartCount == 0)
+        #expect(result.microphoneFree)
         #expect(result.rearmCount == 1)
         #expect(result.releaseCount == 1)
         #expect(result.state == .disabled)
         #expect(!result.liveSessionActive)
+        #expect(result.liveVoiceState == .closed)
+        #expect(!result.liveOperationActive)
     }
 
     @Test @MainActor
@@ -165,10 +169,13 @@ struct WakeWordLiveStartContextTests {
 
         #expect(result.callbackFinished)
         #expect(result.providerStartCount == 0)
+        #expect(result.microphoneFree)
         #expect(result.rearmCount == 1)
         #expect(result.releaseCount == 1)
         #expect(result.state == .suspended(.sleep))
         #expect(!result.liveSessionActive)
+        #expect(result.liveVoiceState == .closed)
+        #expect(!result.liveOperationActive)
     }
 
     @Test @MainActor
@@ -338,10 +345,13 @@ private enum WakeInvalidationAction {
 private struct WakeInvalidationResult {
     let callbackFinished: Bool
     let providerStartCount: Int
+    let microphoneFree: Bool
     let rearmCount: Int
     let releaseCount: Int
     let state: WakeWordState
     let liveSessionActive: Bool
+    let liveVoiceState: LiveVoiceState
+    let liveOperationActive: Bool
 }
 
 @MainActor
@@ -358,12 +368,49 @@ private func waitForWakeLiveSession(
 private func runInvalidatedWakeAdmission(
     _ action: WakeInvalidationAction
 ) async -> WakeInvalidationResult {
-    let gate = WakeInvalidationGate()
+    let gate = WakeInvalidationStartAuthorizationGate()
+    let ownership = MicrophoneOwnership()
     let provider = WakeInvalidationProviderProbe()
     let releaseProbe = WakeInvalidationReleaseProbe()
     let callback = WakeInvalidationCallbackProbe()
     let integration = WakeWordLiveIntegration()
     let recorder = WakeInvalidationRecorder()
+    let profile = try! ProviderProfile(
+        kind: .codexOAuth,
+        label: "Codex",
+        baseURL: nil,
+        model: "gpt-5.6-terra",
+        credentialReference: UUID(),
+        isSelected: true
+    )
+    let envelope = try! CredentialEnvelope(
+        providerKind: .codexOAuth,
+        payload: Data(
+            #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+        )
+    )
+    let liveController = try! GPTLiveController(
+        helperURL: nil,
+        temporaryParentURL: URL(fileURLWithPath: "/private/tmp"),
+        selectedProfile: { profile },
+        credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+        refreshCredential: {},
+        microphonePermission: { .authorized },
+        makePeer: {
+            await provider.start()
+            return WakeInvalidationPeer()
+        },
+        makeDirectSession: { peer, configuration in
+            DirectGPTLiveSession(peer: peer, configuration: configuration)
+        },
+        authorizeStart: { context in
+            guard context == .wakeword else { return true }
+            await gate.waitForAuthorization()
+            return await integration.validateLiveStart(.wakeword)
+        },
+        microphoneOwnership: ownership
+    )
+    let baseLiveVoice = liveController.dependencies()
     let production = WakeWordProductionController(
         recorder: recorder,
         detectorFactory: { WakeInvalidationDetector() },
@@ -385,7 +432,6 @@ private func runInvalidatedWakeAdmission(
             unarchive: { _ in },
             delete: { _ in },
             admitLive: { _, source in
-                await gate.waitForRelease()
                 return LiveAdmission(
                     conversationID: ConversationID(),
                     activationSource: source,
@@ -393,16 +439,13 @@ private func runInvalidatedWakeAdmission(
                 )
             }
         ),
-        liveVoice: .init(
+        liveVoice: LiveVoiceDependencies(
             initialAvailability: .available,
-            availability: { .available },
-            start: { _, receive in
-                await provider.start()
-                await receive(.state(.listening))
-            },
-            mute: { _ in },
-            interrupt: {},
-            end: {}
+            availability: baseLiveVoice.availability,
+            start: baseLiveVoice.start,
+            mute: baseLiveVoice.mute,
+            interrupt: baseLiveVoice.interrupt,
+            end: baseLiveVoice.end
         ),
         prepareLiveStart: { source in
             await integration.prepareLiveStart(source)
@@ -418,7 +461,7 @@ private func runInvalidatedWakeAdmission(
 
     await production.setEnabled(true)
     recorder.emit(ContiguousArray(repeating: 0, count: 480))
-    _ = await gate.waitUntilEntered()
+    #expect(await gate.waitUntilEntered())
 
     let actionTask = Task { @MainActor in
         switch action {
@@ -427,8 +470,9 @@ private func runInvalidatedWakeAdmission(
         case .sleep:
             await production.setSystemAwake(false)
         }
+        await gate.markInvalidationCompleted()
     }
-    for _ in 0..<8 { await Task.yield() }
+    #expect(await gate.waitUntilInvalidationCompleted())
     await gate.release()
     await actionTask.value
     let callbackFinished = await callback.waitUntilFinished()
@@ -436,35 +480,64 @@ private func runInvalidatedWakeAdmission(
     return WakeInvalidationResult(
         callbackFinished: callbackFinished,
         providerStartCount: await provider.startCount,
+        microphoneFree: isMicrophoneFree(ownership),
         rearmCount: recorder.startCount,
         releaseCount: await releaseProbe.count,
         state: production.state,
-        liveSessionActive: integration.liveSessionActive
+        liveSessionActive: integration.liveSessionActive,
+        liveVoiceState: model.voiceState,
+        liveOperationActive: model.isActiveOperation
     )
 }
 
-private actor WakeInvalidationGate {
-    private var entered = false
-    private var releaseContinuation: CheckedContinuation<Void, Never>?
+private func isMicrophoneFree(_ ownership: MicrophoneOwnership) -> Bool {
+    guard let lease = try? ownership.acquire(.wake) else { return false }
+    lease.release()
+    return true
+}
 
-    func waitForRelease() async {
+private actor WakeInvalidationStartAuthorizationGate {
+    private var entered = false
+    private var enteredContinuation: CheckedContinuation<Bool, Never>?
+    private var invalidationCompleted = false
+    private var invalidationContinuation: CheckedContinuation<Bool, Never>?
+    private var authorizationContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func waitForAuthorization() async {
         entered = true
+        enteredContinuation?.resume(returning: true)
+        enteredContinuation = nil
+        guard !released else { return }
         await withCheckedContinuation { continuation in
-            releaseContinuation = continuation
+            authorizationContinuation = continuation
         }
     }
 
     func waitUntilEntered() async -> Bool {
-        for _ in 0..<200 {
-            if entered { return true }
-            await Task.yield()
+        if entered { return true }
+        return await withCheckedContinuation { continuation in
+            enteredContinuation = continuation
         }
-        return false
+    }
+
+    func markInvalidationCompleted() {
+        invalidationCompleted = true
+        invalidationContinuation?.resume(returning: true)
+        invalidationContinuation = nil
+    }
+
+    func waitUntilInvalidationCompleted() async -> Bool {
+        if invalidationCompleted { return true }
+        return await withCheckedContinuation { continuation in
+            invalidationContinuation = continuation
+        }
     }
 
     func release() {
-        releaseContinuation?.resume()
-        releaseContinuation = nil
+        released = true
+        authorizationContinuation?.resume()
+        authorizationContinuation = nil
     }
 }
 
@@ -486,17 +559,19 @@ private actor WakeInvalidationReleaseProbe {
 
 private actor WakeInvalidationCallbackProbe {
     private(set) var finished = false
+    private var finishedContinuation: CheckedContinuation<Bool, Never>?
 
     func finish() {
         finished = true
+        finishedContinuation?.resume(returning: true)
+        finishedContinuation = nil
     }
 
     func waitUntilFinished() async -> Bool {
-        for _ in 0..<200 {
-            if finished { return true }
-            await Task.yield()
+        if finished { return true }
+        return await withCheckedContinuation { continuation in
+            finishedContinuation = continuation
         }
-        return false
     }
 }
 
@@ -527,4 +602,21 @@ private struct WakeInvalidationDetector: WakeWordDetecting {
     func process(frame: ContiguousArray<Int16>) throws -> Bool { true }
     func reset() throws {}
     func shutdown() {}
+}
+
+@MainActor
+private final class WakeInvalidationPeer: LiveAudioPeer {
+    nonisolated init() {}
+
+    func prepareOffer() async throws -> String {
+        throw WakeInvalidationPeerError.started
+    }
+
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {}
+    func setMuted(_ muted: Bool) async throws {}
+    func close() async {}
+}
+
+private enum WakeInvalidationPeerError: Error {
+    case started
 }
