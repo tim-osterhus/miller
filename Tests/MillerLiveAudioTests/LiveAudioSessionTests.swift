@@ -127,6 +127,68 @@ struct LiveAudioSessionTests {
     }
 
     @Test @MainActor
+    func helperTerminalEventFencesInFlightWakeResponseBeforeLateSend() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let marker = repository.appendingPathComponent(
+            ".artifacts/helper-terminal-during-response-\(UUID().uuidString.lowercased()).txt"
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let peer = BlockingResponseSessionPeer()
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "terminal-during-response", marker.path],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(100)
+        ))
+        let session = LiveAudioSession(
+            client: CodexAppServerClient(process: process),
+            peer: peer
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(
+                    requestID: "helper-terminal-in-flight", threadID: "thread", generation: 1
+                ),
+                credential: .init(
+                    accessToken: Data("synthetic".utf8), accountID: "account-1", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        let responseStarted = await eventuallyLiveAudioSession { peer.responseStarted }
+        #expect(responseStarted)
+        if responseStarted {
+            try Data("response-started\n".utf8).write(to: marker)
+        }
+        let terminalSent = await eventuallyLiveAudioSession {
+            (try? String(contentsOf: marker, encoding: .utf8))?.contains("terminal-sent\n") == true
+        }
+        #expect(terminalSent)
+        let invalidatedBeforeRelease = await eventuallyLiveAudioSession {
+            peer.responseInvalidationCount == 1
+        }
+
+        peer.releaseResponse()
+        await session.end()
+        await run.value
+
+        #expect(invalidatedBeforeRelease)
+        #expect(peer.responseSent == false)
+        #expect(peer.responseInvalidationCount == 1)
+        #expect(!process.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: process.temporaryRootURL.path))
+    }
+
+    @Test @MainActor
     func wakeHelperSessionRequestsExactlyOneResponseAfterPeerConnection() async throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -291,6 +353,18 @@ private func waitUntilLiveAudioSession(
         try await Task.sleep(for: .milliseconds(10))
     }
     throw LiveAudioPeerError.connectionFailed
+}
+
+@MainActor
+private func eventuallyLiveAudioSession(
+    _ predicate: @escaping @MainActor () -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while ContinuousClock.now < deadline {
+        if predicate() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return predicate()
 }
 
 private let liveAudioSessionSyntheticOffer = """

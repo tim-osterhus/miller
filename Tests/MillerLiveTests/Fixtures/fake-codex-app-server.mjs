@@ -1301,6 +1301,21 @@ lines.on("line", async (line) => {
       notify("thread/realtime/closed", { threadId: emittedThread, reason: "synthetic-complete" });
       return;
     }
+    if (mode === "terminal-during-response") {
+      const emittedThread = emitRealtimeStarted();
+      emitRealtimeAnswer(emittedThread);
+      send({ id: request.id, result: {} });
+      const terminal = setInterval(() => {
+        if (!pidPath || !fs.existsSync(pidPath)) return;
+        if (!fs.readFileSync(pidPath, "utf8").includes("response-started\n")) return;
+        clearInterval(terminal);
+        fs.appendFileSync(pidPath, "terminal-sent\n", { mode: 0o600 });
+        notify("thread/realtime/closed", {
+          threadId: emittedThread, reason: "synthetic-complete",
+        });
+      }, 5);
+      return;
+    }
     if (mode === "duplicate-realtime-started") {
       notify("thread/realtime/started", {
         threadId: request.params.threadId,

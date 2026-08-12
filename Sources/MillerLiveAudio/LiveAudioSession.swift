@@ -86,6 +86,7 @@ public actor LiveAudioSession {
     private var peerUsed = false
     private var peerClosed = false
     private var peerMonitor: Task<Void, Never>?
+    private var wakeResponseTask: Task<Void, Never>?
     private var terminalPeerFailure: LiveAudioPeerError?
 
     public init(
@@ -188,7 +189,7 @@ public actor LiveAudioSession {
                           !peerClosed
                     else { break }
                     initialResponseRequested = true
-                    try await requestResponse(
+                    beginWakeResponse(
                         using: peer,
                         generation: runGeneration
                     )
@@ -262,11 +263,31 @@ public actor LiveAudioSession {
     private func cleanup(playbackFirst: Bool = false) async {
         _ = playbackFirst
         cancelPeerMonitor()
+        wakeResponseTask?.cancel()
+        wakeResponseTask = nil
         guard let peer else { return }
         await cancelResponseRequest(using: peer, generation: runGeneration)
         guard !peerClosed else { return }
         peerClosed = true
         await peer.close()
+    }
+
+    private func beginWakeResponse(
+        using peer: any LiveAudioPeer,
+        generation: UInt64
+    ) {
+        wakeResponseTask = Task { [weak self, peer] in
+            do {
+                try Task.checkCancellation()
+                try await self?.requestResponse(using: peer, generation: generation)
+            } catch is CancellationError {
+                return
+            } catch let failure as LiveAudioPeerError {
+                await self?.terminateForPeerFailure(failure, generation: generation)
+            } catch {
+                await self?.terminateForPeerFailure(.connectionFailed, generation: generation)
+            }
+        }
     }
 
     private func requestResponse(
@@ -291,6 +312,8 @@ public actor LiveAudioSession {
     private func finishRun(generation: UInt64) {
         guard runGeneration == generation else { return }
         cancelPeerMonitor()
+        wakeResponseTask?.cancel()
+        wakeResponseTask = nil
         terminalPeerFailure = nil
         identity = nil
         let waiters = completionWaiters
