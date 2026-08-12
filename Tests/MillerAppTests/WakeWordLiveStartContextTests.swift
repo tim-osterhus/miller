@@ -1,5 +1,6 @@
 import Foundation
 import MillerCore
+import MillerWake
 import Testing
 @testable import MillerApp
 
@@ -147,6 +148,30 @@ struct WakeWordLiveStartContextTests {
     }
 
     @Test @MainActor
+    func disabledWakeAdmissionDoesNotReachTheLiveProvider() async {
+        let result = await runInvalidatedWakeAdmission(.disable)
+
+        #expect(result.callbackFinished)
+        #expect(result.providerStartCount == 0)
+        #expect(result.rearmCount == 1)
+        #expect(result.releaseCount == 1)
+        #expect(result.state == .disabled)
+        #expect(!result.liveSessionActive)
+    }
+
+    @Test @MainActor
+    func asleepWakeAdmissionDoesNotReachTheLiveProvider() async {
+        let result = await runInvalidatedWakeAdmission(.sleep)
+
+        #expect(result.callbackFinished)
+        #expect(result.providerStartCount == 0)
+        #expect(result.rearmCount == 1)
+        #expect(result.releaseCount == 1)
+        #expect(result.state == .suspended(.sleep))
+        #expect(!result.liveSessionActive)
+    }
+
+    @Test @MainActor
     func manualLiveWithoutWakeIntegrationDoesNotInvokeCleanupCallback() async {
         let callbacks = WakeLiveCleanupCallbacks()
         let model = AppPresentationModel(
@@ -208,4 +233,193 @@ private actor WakeLiveAdmissionProbe {
             await Task.yield()
         }
     }
+}
+
+private enum WakeInvalidationAction {
+    case disable
+    case sleep
+}
+
+private struct WakeInvalidationResult {
+    let callbackFinished: Bool
+    let providerStartCount: Int
+    let rearmCount: Int
+    let releaseCount: Int
+    let state: WakeWordState
+    let liveSessionActive: Bool
+}
+
+@MainActor
+private func runInvalidatedWakeAdmission(
+    _ action: WakeInvalidationAction
+) async -> WakeInvalidationResult {
+    let gate = WakeInvalidationGate()
+    let provider = WakeInvalidationProviderProbe()
+    let releaseProbe = WakeInvalidationReleaseProbe()
+    let callback = WakeInvalidationCallbackProbe()
+    let integration = WakeWordLiveIntegration()
+    let recorder = WakeInvalidationRecorder()
+    let production = WakeWordProductionController(
+        recorder: recorder,
+        detectorFactory: { WakeInvalidationDetector() },
+        onWakeDetectedWithAdmission: { admission in
+            await integration.wakeDetected(admission)
+            await callback.finish()
+        }
+    )
+    integration.production = production
+
+    let model = AppPresentationModel(
+        dependencies: HostDependencies(
+            submit: { _, _ in TurnID() },
+            stop: {},
+            loadTurn: { _ in nil },
+            loadConversations: { [] },
+            loadTurns: { _ in [] },
+            archive: { _ in },
+            unarchive: { _ in },
+            delete: { _ in },
+            admitLive: { _, source in
+                await gate.waitForRelease()
+                return LiveAdmission(
+                    conversationID: ConversationID(),
+                    activationSource: source,
+                    release: { await releaseProbe.release() }
+                )
+            }
+        ),
+        liveVoice: .init(
+            initialAvailability: .available,
+            availability: { .available },
+            start: { _, receive in
+                await provider.start()
+                await receive(.state(.listening))
+            },
+            mute: { _ in },
+            interrupt: {},
+            end: {}
+        ),
+        prepareLiveStart: { source in
+            await integration.prepareLiveStart(source)
+        },
+        liveVoiceFinished: {
+            await integration.liveVoiceFinished()
+        },
+        validateLiveStart: { source in
+            await integration.validateLiveStart(source)
+        }
+    )
+    integration.model = model
+
+    await production.setEnabled(true)
+    recorder.emit(ContiguousArray(repeating: 0, count: 480))
+    _ = await gate.waitUntilEntered()
+
+    let actionTask = Task { @MainActor in
+        switch action {
+        case .disable:
+            _ = await production.disableFromSettings()
+        case .sleep:
+            await production.setSystemAwake(false)
+        }
+    }
+    for _ in 0..<8 { await Task.yield() }
+    await gate.release()
+    await actionTask.value
+    let callbackFinished = await callback.waitUntilFinished()
+
+    return WakeInvalidationResult(
+        callbackFinished: callbackFinished,
+        providerStartCount: await provider.startCount,
+        rearmCount: recorder.startCount,
+        releaseCount: await releaseProbe.count,
+        state: production.state,
+        liveSessionActive: integration.liveSessionActive
+    )
+}
+
+private actor WakeInvalidationGate {
+    private var entered = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func waitForRelease() async {
+        entered = true
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async -> Bool {
+        for _ in 0..<200 {
+            if entered { return true }
+            await Task.yield()
+        }
+        return false
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor WakeInvalidationProviderProbe {
+    private(set) var startCount = 0
+
+    func start() {
+        startCount += 1
+    }
+}
+
+private actor WakeInvalidationReleaseProbe {
+    private(set) var count = 0
+
+    func release() {
+        count += 1
+    }
+}
+
+private actor WakeInvalidationCallbackProbe {
+    private(set) var finished = false
+
+    func finish() {
+        finished = true
+    }
+
+    func waitUntilFinished() async -> Bool {
+        for _ in 0..<200 {
+            if finished { return true }
+            await Task.yield()
+        }
+        return false
+    }
+}
+
+@MainActor
+private final class WakeInvalidationRecorder: WakeWordCaptureOwning {
+    var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    private(set) var isWakeMonitoring = false
+    private(set) var startCount = 0
+
+    func startWakeMonitoring() async throws -> UUID {
+        startCount += 1
+        isWakeMonitoring = true
+        return UUID()
+    }
+
+    func stopWakeMonitoring() async {
+        isWakeMonitoring = false
+    }
+
+    func emit(_ samples: ContiguousArray<Int16>) {
+        onSamples?(samples)
+    }
+}
+
+private struct WakeInvalidationDetector: WakeWordDetecting {
+    let requiredSampleRate = 16_000
+    let requiredFrameLength = 480
+    func process(frame: ContiguousArray<Int16>) throws -> Bool { true }
+    func reset() throws {}
+    func shutdown() {}
 }

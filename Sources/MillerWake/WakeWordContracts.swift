@@ -77,6 +77,39 @@ public enum WakeWordState: Equatable, Sendable {
     case stopping
 }
 
+/// Bounded authority handed to the Live integration for one detected wake.
+/// Its validity is generation-bound by the production controller, and its
+/// completion path is single-use so cleanup cannot rearm twice.
+@MainActor
+public final class WakeWordAdmission {
+    private let isCurrent: @MainActor @Sendable () -> Bool
+    private let completeOperation: @MainActor @Sendable () async -> Void
+    private var didComplete = false
+
+    init(
+        isCurrent: @escaping @MainActor @Sendable () -> Bool,
+        complete: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        self.isCurrent = isCurrent
+        completeOperation = complete
+    }
+
+    public var isValid: Bool {
+        !didComplete && isCurrent()
+    }
+
+    public func cancel() {
+        didComplete = true
+    }
+
+    public func complete() async {
+        guard !didComplete else { return }
+        didComplete = true
+        guard isCurrent() else { return }
+        await completeOperation()
+    }
+}
+
 public enum WakeWordCoordinatorEvent: Equatable, Sendable {
     case wakeDetected(generation: UInt64)
     case detectorUnavailable(generation: UInt64)

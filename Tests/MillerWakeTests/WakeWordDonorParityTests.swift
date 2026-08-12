@@ -65,6 +65,28 @@ struct WakeWordDonorParityTests {
     }
 
     @Test
+    func matchedAndTrailingAudioProducesOneEventAndDropsTheTail() throws {
+        let detector = DetectorProbe(process: { _ in true })
+        let coordinator = WakeWordCoordinator(detector: detector)
+        let generation = try #require(coordinator.beginStarting())
+        try coordinator.confirmMonitoring(generation: generation)
+
+        let events = coordinator.receive(
+            samples: ContiguousArray(repeating: 0, count: 960),
+            generation: generation
+        )
+        let laterEvents = coordinator.receive(
+            samples: ContiguousArray(repeating: 0, count: 480),
+            generation: generation
+        )
+
+        #expect(events == [.wakeDetected(generation: generation)])
+        #expect(laterEvents.isEmpty)
+        #expect(detector.processCount == 1)
+        #expect(coordinator.currentState() == .suspended(.processing))
+    }
+
+    @Test
     func suspensionRejectsThePreviousGeneration() throws {
         let detector = DetectorProbe()
         let coordinator = WakeWordCoordinator(detector: detector)
@@ -442,6 +464,7 @@ struct WakeWordDonorParityTests {
 private final class DetectorProbe: WakeWordDetecting, @unchecked Sendable {
     let requiredSampleRate = 16_000
     let requiredFrameLength = 480
+    private(set) var processCount = 0
     private(set) var shutdownCount = 0
     private let processOperation:
         @Sendable (ContiguousArray<Int16>) throws -> Bool
@@ -455,7 +478,8 @@ private final class DetectorProbe: WakeWordDetecting, @unchecked Sendable {
     }
 
     func process(frame: ContiguousArray<Int16>) throws -> Bool {
-        try processOperation(frame)
+        processCount += 1
+        return try processOperation(frame)
     }
     func reset() throws {}
     func shutdown() { shutdownCount += 1 }

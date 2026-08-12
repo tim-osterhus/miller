@@ -508,6 +508,9 @@ final class AppPresentationModel: ObservableObject {
     private let prepareLiveStart: @MainActor @Sendable (
         VoiceActivationSource
     ) async -> Bool
+    private let validateLiveStart: @MainActor @Sendable (
+        VoiceActivationSource
+    ) async -> Bool
     private let liveVoiceFinished: @MainActor @Sendable () async -> Void
     private let voiceHistoryAttachmentBuilder = VoiceHistoryAttachmentBuilder()
     private var turnObservation: Task<Void, Never>?
@@ -565,7 +568,10 @@ final class AppPresentationModel: ObservableObject {
         prepareLiveStart: @escaping @MainActor @Sendable (
             VoiceActivationSource
         ) async -> Bool = { _ in false },
-        liveVoiceFinished: @escaping @MainActor @Sendable () async -> Void = {}
+        liveVoiceFinished: @escaping @MainActor @Sendable () async -> Void = {},
+        validateLiveStart: @escaping @MainActor @Sendable (
+            VoiceActivationSource
+        ) async -> Bool = { _ in true }
     ) {
         self.dependencies = dependencies
         self.providerSettings = providerSettings
@@ -574,6 +580,7 @@ final class AppPresentationModel: ObservableObject {
         self.voiceHistory = voiceHistory
         self.capabilityController = capabilityController
         self.prepareLiveStart = prepareLiveStart
+        self.validateLiveStart = validateLiveStart
         self.liveVoiceFinished = liveVoiceFinished
         voiceState = liveVoice.initialAvailability
         liveVoiceAvailability = liveVoice.initialAvailability
@@ -1459,14 +1466,16 @@ final class AppPresentationModel: ObservableObject {
             : .manual
         guard canStartLiveVoice else {
             if activationSource == .wakeword {
-                liveVoiceFinishedDelivered = !(await prepareLiveStart(
-                    activationSource
-                ))
+                let prepared = await prepareLiveStart(activationSource)
+                liveVoiceFinishedDelivered = activationSource == .wakeword
+                    ? false : !prepared
                 await deliverLiveVoiceFinishedIfNeeded()
             }
             return
         }
-        liveVoiceFinishedDelivered = !(await prepareLiveStart(activationSource))
+        let prepared = await prepareLiveStart(activationSource)
+        liveVoiceFinishedDelivered = activationSource == .wakeword
+            ? false : !prepared
         guard canStartLiveVoice else {
             await deliverLiveVoiceFinishedIfNeeded()
             return
@@ -1484,12 +1493,18 @@ final class AppPresentationModel: ObservableObject {
                 liveVoiceStartTerminationRequested = false
             }
         }
+        guard await validateLiveStart(activationSource) else {
+            await abortLiveVoiceStart(startGeneration: startGeneration)
+            return
+        }
         do {
             let admission = try await dependencies.admitLive(
                 conversationID: selectedConversationID,
                 activationSource: activationSource
             )
-            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+            guard isCurrentLiveVoiceStart(startGeneration),
+                  !Task.isCancelled,
+                  await validateLiveStart(activationSource) else {
                 await abortLiveVoiceStart(startGeneration: startGeneration)
                 await admission.release()
                 return
@@ -1524,7 +1539,9 @@ final class AppPresentationModel: ObservableObject {
             do {
                 pendingVoiceCapabilityPreparation = try await capabilityController
                     .prepareLiveVoice(providerProfileID: profileID)
-                guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+                guard isCurrentLiveVoiceStart(startGeneration),
+                      !Task.isCancelled,
+                      await validateLiveStart(activationSource) else {
                     await abortLiveVoiceStart(startGeneration: startGeneration)
                     return
                 }
@@ -1543,7 +1560,9 @@ final class AppPresentationModel: ObservableObject {
                 return
             }
         }
-        guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+        guard isCurrentLiveVoiceStart(startGeneration),
+              !Task.isCancelled,
+              await validateLiveStart(activationSource) else {
             await abortLiveVoiceStart(startGeneration: startGeneration)
             return
         }
@@ -1571,7 +1590,9 @@ final class AppPresentationModel: ObservableObject {
                 }
             }
             liveVoiceStartProviderInFlight = false
-            guard isCurrentLiveVoiceStart(startGeneration), !Task.isCancelled else {
+            guard isCurrentLiveVoiceStart(startGeneration),
+                  !Task.isCancelled,
+                  await validateLiveStart(activationSource) else {
                 await terminateLiveVoiceProviderIfNeeded()
                 await abortLiveVoiceStart(startGeneration: startGeneration)
                 return
@@ -3063,8 +3084,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                     tuning: tuning
                 )
             },
-            onWakeDetected: { [weak wakeIntegration] in
-                await wakeIntegration?.wakeDetected()
+            onWakeDetectedWithAdmission: { [weak wakeIntegration] admission in
+                await wakeIntegration?.wakeDetected(admission)
             }
         )
         let wakeSettings = WakeWordSettingsController(
@@ -3353,6 +3374,9 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             },
             liveVoiceFinished: { [weak wakeIntegration] in
                 await wakeIntegration?.liveVoiceFinished()
+            },
+            validateLiveStart: { [weak wakeIntegration] source in
+                await wakeIntegration?.validateLiveStart(source) ?? false
             }
         )
         wakeIntegration.model = model

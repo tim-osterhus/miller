@@ -115,8 +115,12 @@ struct WakeWordProductionHandoffTests {
         let controller = WakeWordProductionController(
             recorder: recorder,
             detectorFactory: { detector },
-            onWakeDetected: {
-                callback.record(stopCompleted: recorder.stopCompleted)
+            onWakeDetectedWithAdmission: { admission in
+                callback.record(
+                    stopCompleted: recorder.stopCompleted,
+                    admissionValid: admission.isValid
+                )
+                admission.cancel()
             }
         )
 
@@ -127,6 +131,7 @@ struct WakeWordProductionHandoffTests {
 
         #expect(callback.count == 1)
         #expect(callback.sawCompletedStop)
+        #expect(callback.sawValidAdmission)
         #expect(recorder.stopCompleted)
         #expect(recorder.stopCount == 1)
         #expect(controller.state == .suspended(.processing))
@@ -180,10 +185,12 @@ private final class HandoffRecorderProbe: WakeWordCaptureOwning {
 private final class WakeTriggerProbe {
     private(set) var count = 0
     private(set) var sawCompletedStop = false
+    private(set) var sawValidAdmission = false
 
-    func record(stopCompleted: Bool) {
+    func record(stopCompleted: Bool, admissionValid: Bool) {
         count += 1
         sawCompletedStop = stopCompleted
+        sawValidAdmission = admissionValid
     }
 }
 
