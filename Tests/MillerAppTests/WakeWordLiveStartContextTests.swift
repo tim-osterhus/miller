@@ -172,6 +172,101 @@ struct WakeWordLiveStartContextTests {
     }
 
     @Test @MainActor
+    func sleepWakeWhileWakeLiveIsActiveRearmsAfterCleanupExactlyOnce() async {
+        let integration = WakeWordLiveIntegration()
+        let recorder = WakeInvalidationRecorder()
+        var capturedAdmission: WakeWordAdmission?
+        let production = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { WakeInvalidationDetector() },
+            onWakeDetectedWithAdmission: { admission in
+                capturedAdmission = admission
+                await integration.wakeDetected(admission)
+            }
+        )
+        integration.production = production
+
+        let model = AppPresentationModel(
+            dependencies: HostDependencies(
+                submit: { _, _ in TurnID() },
+                stop: {},
+                loadTurn: { _ in nil },
+                loadConversations: { [] },
+                loadTurns: { _ in [] },
+                archive: { _ in },
+                unarchive: { _ in },
+                delete: { _ in },
+                admitLive: { _, source in
+                    LiveAdmission(
+                        conversationID: ConversationID(),
+                        activationSource: source
+                    )
+                }
+            ),
+            liveVoice: .init(
+                initialAvailability: .available,
+                availability: { .available },
+                start: { _, receive in
+                    await receive(.state(.listening))
+                },
+                mute: { _ in },
+                interrupt: {},
+                end: {}
+            ),
+            prepareLiveStart: { source in
+                await integration.prepareLiveStart(source)
+            },
+            liveVoiceFinished: {
+                await integration.liveVoiceFinished()
+            },
+            validateLiveStart: { source in
+                await integration.validateLiveStart(source)
+            }
+        )
+        integration.model = model
+
+        await production.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        await waitForWakeLiveSession {
+            integration.liveSessionActive && model.voiceState == .listening
+        }
+
+        #expect(recorder.startCount == 1)
+        #expect(capturedAdmission?.isValid == true)
+
+        await production.setSystemAwake(false)
+
+        #expect(production.state == .suspended(.sleep))
+        #expect(capturedAdmission?.isValid == false)
+        #expect(recorder.startCount == 1)
+
+        let wakeTask = Task { @MainActor in
+            await production.setSystemAwake(true)
+            guard !integration.liveSessionActive else { return }
+            await production.resumeAfterLiveCleanup()
+        }
+        await wakeTask.value
+
+        #expect(integration.liveSessionActive)
+        #expect(production.state == .suspended(.sleep))
+        #expect(recorder.startCount == 1)
+        #expect(capturedAdmission?.isValid == false)
+
+        await model.endLiveVoice()
+
+        #expect(!integration.liveSessionActive)
+        #expect(production.state == .monitoring)
+        #expect(recorder.startCount == 2)
+        #expect(capturedAdmission?.isValid == false)
+
+        await integration.liveVoiceFinished()
+        await capturedAdmission?.complete()
+
+        #expect(recorder.startCount == 2)
+        #expect(production.state == .monitoring)
+    }
+
+    @Test @MainActor
     func manualLiveWithoutWakeIntegrationDoesNotInvokeCleanupCallback() async {
         let callbacks = WakeLiveCleanupCallbacks()
         let model = AppPresentationModel(
@@ -247,6 +342,16 @@ private struct WakeInvalidationResult {
     let releaseCount: Int
     let state: WakeWordState
     let liveSessionActive: Bool
+}
+
+@MainActor
+private func waitForWakeLiveSession(
+    _ condition: @escaping @MainActor () -> Bool
+) async {
+    for _ in 0..<200 {
+        if condition() { return }
+        await Task.yield()
+    }
 }
 
 @MainActor

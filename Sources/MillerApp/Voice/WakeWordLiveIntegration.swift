@@ -58,7 +58,11 @@ final class WakeWordLiveIntegration {
     private func completeWakeAdmission() async {
         if let wakeAdmission {
             self.wakeAdmission = nil
+            let admissionWasValid = wakeAdmission.isValid
             await wakeAdmission.complete()
+            if !admissionWasValid {
+                await production?.resumeAfterLiveCleanup()
+            }
         } else {
             await production?.resumeAfterLiveCleanup()
         }
