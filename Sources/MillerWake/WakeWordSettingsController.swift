@@ -205,8 +205,6 @@ public final class WakeWordSettingsController: ObservableObject {
             "Starting wake listening"
         case .monitoring:
             "Wake listening"
-        case .handoff, .capturingCommand:
-            "Recording request"
         case .stopping:
             "Stopping wake listening"
         case .unavailable(let reason):

@@ -73,64 +73,13 @@ public enum WakeWordState: Equatable, Sendable {
     case unavailable(WakeWordUnavailableReason)
     case starting
     case monitoring
-    case handoff
-    case capturingCommand
     case suspended(WakeWordSuspensionReason)
     case stopping
 }
 
-public enum WakeCommandEndpointEvent: Equatable, Sendable {
-    case continueListening
-    case emptyWakeTimeout
-    case silence
-    case hardLimit
-}
-
 public enum WakeWordCoordinatorEvent: Equatable, Sendable {
     case wakeDetected(generation: UInt64)
-    case commandEndpoint(generation: UInt64, reason: WakeCommandEndpointEvent)
     case detectorUnavailable(generation: UInt64)
-}
-
-public struct WakeWordPreparedCommandAudio: Equatable, Sendable {
-    public let id: UUID
-    public let generation: UInt64
-    public let samples: ContiguousArray<Int16>
-    public let sampleRate: Int
-
-    public init(
-        id: UUID,
-        generation: UInt64,
-        samples: ContiguousArray<Int16>,
-        sampleRate: Int
-    ) {
-        self.id = id
-        self.generation = generation
-        self.samples = samples
-        self.sampleRate = sampleRate
-    }
-}
-
-/// One-shot bridge from detector-owned post-keyword audio to Miller's audio
-/// owner. The coordinator remains the only authority for consuming it.
-public final class WakeWordCaptureHandoff: @unchecked Sendable {
-    public let monitoringSessionID: UUID
-    public let generation: UInt64
-    private let coordinator: WakeWordCoordinator
-
-    public init(
-        monitoringSessionID: UUID,
-        generation: UInt64,
-        coordinator: WakeWordCoordinator
-    ) {
-        self.monitoringSessionID = monitoringSessionID
-        self.generation = generation
-        self.coordinator = coordinator
-    }
-
-    public func consume() -> WakeWordPreparedCommandAudio? {
-        coordinator.beginCommandCapture(generation: generation)
-    }
 }
 
 public enum WakeWordPhraseError: Error, Equatable, Sendable {

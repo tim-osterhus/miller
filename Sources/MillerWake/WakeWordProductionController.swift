@@ -9,11 +9,8 @@ typealias WakeWordEventScheduler = @Sendable (
 
 public typealias WakeWordDetectedHandler =
     @MainActor @Sendable () async -> Void
-public typealias WakeWordCommandAudioHandler =
-    @MainActor @Sendable (WakeWordPreparedCommandAudio, WakeCommandEndpointEvent) async -> Void
 
-/// Coordinates the detector, the exclusive capture owner, and one bounded
-/// post-keyword handoff into the Live voice authority.
+/// Coordinates the detector and the exclusive capture owner.
 @MainActor
 public protocol WakeWordCaptureOwning: AnyObject {
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)? { get set }
@@ -42,7 +39,6 @@ public final class WakeWordProductionController: ObservableObject {
     private let eventScheduler: WakeWordEventScheduler
     private var coordinator: WakeWordCoordinator?
     private var monitoringSessionID: UUID?
-    private var pendingHandoff: WakeWordCaptureHandoff?
     private var sampleCallbackEpoch: UInt64?
     private var lifecycleEpoch: UInt64 = 0
     private var activeLifecycleEpochs = Set<UInt64>()
@@ -53,20 +49,17 @@ public final class WakeWordProductionController: ObservableObject {
     private var detectorTuning: SherpaWakeWordTuning
     private var systemIsAwake = true
     private let onWakeDetected: WakeWordDetectedHandler
-    private let onCommandAudio: WakeWordCommandAudioHandler
 
     public convenience init(
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
-        onWakeDetected: @escaping WakeWordDetectedHandler = {},
-        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in }
+        onWakeDetected: @escaping WakeWordDetectedHandler = {}
     ) {
         self.init(
             recorder: recorder,
             tunedDetectorFactory: { _ in try detectorFactory() },
             initialTuning: .default,
             onWakeDetected: onWakeDetected,
-            onCommandAudio: onCommandAudio,
             eventScheduler: { operation in
                 Task { @MainActor in await operation() }
             }
@@ -79,15 +72,13 @@ public final class WakeWordProductionController: ObservableObject {
             SherpaWakeWordTuning
         ) throws -> any WakeWordDetecting,
         initialTuning: SherpaWakeWordTuning = .default,
-        onWakeDetected: @escaping WakeWordDetectedHandler = {},
-        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in }
+        onWakeDetected: @escaping WakeWordDetectedHandler = {}
     ) {
         self.init(
             recorder: recorder,
             tunedDetectorFactory: tunedDetectorFactory,
             initialTuning: initialTuning,
             onWakeDetected: onWakeDetected,
-            onCommandAudio: onCommandAudio,
             eventScheduler: { operation in
                 Task { @MainActor in await operation() }
             }
@@ -98,7 +89,6 @@ public final class WakeWordProductionController: ObservableObject {
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
         onWakeDetected: @escaping WakeWordDetectedHandler = {},
-        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in },
         eventScheduler: @escaping WakeWordEventScheduler
     ) {
         self.init(
@@ -106,7 +96,6 @@ public final class WakeWordProductionController: ObservableObject {
             tunedDetectorFactory: { _ in try detectorFactory() },
             initialTuning: .default,
             onWakeDetected: onWakeDetected,
-            onCommandAudio: onCommandAudio,
             eventScheduler: eventScheduler
         )
     }
@@ -118,14 +107,12 @@ public final class WakeWordProductionController: ObservableObject {
         ) throws -> any WakeWordDetecting,
         initialTuning: SherpaWakeWordTuning,
         onWakeDetected: @escaping WakeWordDetectedHandler = {},
-        onCommandAudio: @escaping WakeWordCommandAudioHandler = { _, _ in },
         eventScheduler: @escaping WakeWordEventScheduler
     ) {
         self.recorder = recorder
         detectorFactory = tunedDetectorFactory
         detectorTuning = initialTuning
         self.onWakeDetected = onWakeDetected
-        self.onCommandAudio = onCommandAudio
         self.eventScheduler = eventScheduler
     }
 
@@ -396,7 +383,6 @@ public final class WakeWordProductionController: ObservableObject {
         guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
         clearSampleCallback(ifOwnedBy: callbackEpoch)
         monitoringSessionID = nil
-        pendingHandoff = nil
         coordinator?.markUnavailable(reason)
         if recorder.isWakeMonitoring {
             await recorder.stopWakeMonitoring()
@@ -423,24 +409,25 @@ public final class WakeWordProductionController: ObservableObject {
             switch event {
             case .wakeDetected(let generation):
                 guard eventCoordinator.accepts(generation) else { continue }
-                state = .handoff
-                if let monitoringSessionID {
-                    pendingHandoff = WakeWordCaptureHandoff(
-                        monitoringSessionID: monitoringSessionID,
-                        generation: generation,
-                        coordinator: eventCoordinator
-                    )
+                let triggerEpoch = beginLifecycleOperation()
+                defer { finishLifecycleOperation(triggerEpoch) }
+                await waitForEarlierLifecycleOperations(triggerEpoch)
+                guard acceptsLifecycleOperation(triggerEpoch),
+                      isEnabled,
+                      coordinator === eventCoordinator,
+                      eventCoordinator.accepts(generation) else {
+                    return
+                }
+                state = .suspended(.processing)
+                clearSampleCallback()
+                monitoringSessionID = nil
+                if recorder.isWakeMonitoring {
+                    await recorder.stopWakeMonitoring()
+                }
+                guard acceptsLifecycleOperation(triggerEpoch), isEnabled else {
+                    return
                 }
                 await onWakeDetected()
-            case .commandEndpoint(let generation, let reason):
-                guard eventCoordinator.accepts(generation) else { continue }
-                await finishCommandEndpoint(
-                    eventCoordinator: eventCoordinator,
-                    generation: generation,
-                    reason: reason,
-                    operationEpoch: operationEpoch
-                )
-                return
             case .detectorUnavailable(let generation):
                 guard eventCoordinator.accepts(generation) else { continue }
                 await handleDetectorRuntimeFailure(
@@ -449,39 +436,6 @@ public final class WakeWordProductionController: ObservableObject {
                 )
                 return
             }
-        }
-    }
-
-    private func finishCommandEndpoint(
-        eventCoordinator: WakeWordCoordinator,
-        generation: UInt64,
-        reason: WakeCommandEndpointEvent,
-        operationEpoch: UInt64
-    ) async {
-        guard acceptsLifecycleOperation(operationEpoch),
-              eventCoordinator.accepts(generation) else { return }
-        let preparedAudio: WakeWordPreparedCommandAudio?
-        switch reason {
-        case .emptyWakeTimeout:
-            preparedAudio = nil
-        case .continueListening:
-            return
-        case .silence, .hardLimit:
-            preparedAudio = pendingHandoff?.consume()
-        }
-        pendingHandoff = nil
-        eventCoordinator.suspend(.processing)
-        state = .suspended(.processing)
-        await stop(
-            disable: false,
-            shutDownDetector: false,
-            operationEpoch: operationEpoch
-        )
-        guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
-        if let preparedAudio {
-            await onCommandAudio(preparedAudio, reason)
-        } else {
-            await startMonitoringIfEligible(operationEpoch: operationEpoch)
         }
     }
 
@@ -521,7 +475,6 @@ public final class WakeWordProductionController: ObservableObject {
         guard acceptsLifecycleOperation(operationEpoch) else { return }
         clearSampleCallback()
         monitoringSessionID = nil
-        pendingHandoff = nil
         if disable, coordinator != nil {
             coordinator?.beginStopping()
             state = .stopping

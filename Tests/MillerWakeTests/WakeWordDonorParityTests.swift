@@ -42,19 +42,26 @@ struct WakeWordDonorParityTests {
     }
 
     @Test
-    func commandEndpointRequiresSpeechThenSilence() {
-        var detector = WakeCommandEndpointDetector(ambientDBFS: -60)
+    func wakeDetectionSuspendsImmediatelyAndIgnoresSubsequentAudio() throws {
+        let generation: UInt64
+        let coordinator = WakeWordCoordinator(
+            detector: DetectorProbe(process: { _ in true })
+        )
+        generation = try #require(coordinator.beginStarting())
+        try coordinator.confirmMonitoring(generation: generation)
 
-        for _ in 0..<5 {
-            #expect(detector.process(dbfs: -30) == .continueListening)
-        }
-        #expect(detector.speechStarted)
+        let firstEvents = coordinator.receive(
+            samples: ContiguousArray(repeating: 0, count: 480),
+            generation: generation
+        )
+        let laterEvents = coordinator.receive(
+            samples: ContiguousArray(repeating: 0, count: 480),
+            generation: generation
+        )
 
-        var event = WakeCommandEndpointEvent.continueListening
-        for _ in 0..<50 {
-            event = detector.process(dbfs: -70)
-        }
-        #expect(event == .silence)
+        #expect(firstEvents == [.wakeDetected(generation: generation)])
+        #expect(laterEvents.isEmpty)
+        #expect(coordinator.currentState() == .suspended(.processing))
     }
 
     @Test
@@ -340,35 +347,6 @@ struct WakeWordDonorParityTests {
 
         await controller.setEnabled(true)
         recorder.emit(ContiguousArray(repeating: 0, count: 480))
-        #expect(scheduler.count == 1)
-
-        await controller.suspend(.foregroundSession)
-        await scheduler.drain()
-
-        #expect(controller.state == .suspended(.foregroundSession))
-    }
-
-    @Test @MainActor
-    func queuedEndpointEventCannotPublishAfterSuspension() async {
-        let recorder = RecorderProbe()
-        let scheduler = EventSchedulerProbe()
-        let controller = WakeWordProductionController(
-            recorder: recorder,
-            detectorFactory: { DetectorProbe(process: { _ in true }) },
-            eventScheduler: scheduler.enqueue
-        )
-
-        await controller.setEnabled(true)
-        recorder.emit(ContiguousArray(repeating: 0, count: 480))
-        await scheduler.drain()
-        #expect(controller.state == .handoff)
-
-        for _ in 0..<5 {
-            recorder.emit(ContiguousArray(repeating: 10_000, count: 480))
-        }
-        for _ in 0..<50 {
-            recorder.emit(ContiguousArray(repeating: 0, count: 480))
-        }
         #expect(scheduler.count == 1)
 
         await controller.suspend(.foregroundSession)
