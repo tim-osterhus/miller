@@ -55,6 +55,35 @@ struct DirectGPTLiveSessionTests {
     }
 
     @Test
+    func wakeDirectSessionRequestsExactlyOneResponseAfterPeerConnection() async throws {
+        let peer = DirectTestPeer()
+        let socket = DirectSessionSocket()
+        let session = DirectGPTLiveSession(
+            peer: peer,
+            callCreator: GPTLiveCallCreator(loader: DirectSessionLoader()),
+            sidebandConnector: GPTLiveSidebandConnector(factory: { _, _ in socket }, sleep: { _ in })
+        )
+        let events = EventRecorder()
+        let run = Task {
+            try await session.run(
+                identity: .init(requestID: "wake-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("token".utf8), accountID: "account", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { event in await events.append(event) }
+            )
+        }
+
+        try await waitUntil { await events.containsStarted }
+        await session.end()
+        _ = await run.result
+
+        #expect(peer.operations == [.prepare, .answer, .response, .close])
+    }
+
+    @Test
     func muteInterruptCleanupStaleCallbacksAndFreshSessionAreBounded() async throws {
         let firstPeer = DirectTestPeer()
         let socket = DirectSessionSocket()
@@ -248,6 +277,35 @@ struct DirectGPTLiveSessionTests {
     }
 
     @Test
+    func stoppingBeforePeerConnectionDoesNotRequestWakeResponse() async throws {
+        let peer = BlockingAnswerPeer()
+        let socket = DirectSessionSocket()
+        let session = DirectGPTLiveSession(
+            peer: peer,
+            callCreator: GPTLiveCallCreator(loader: DirectSessionLoader()),
+            sidebandConnector: GPTLiveSidebandConnector(factory: { _, _ in socket }, sleep: { _ in })
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "stop-before-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("token".utf8), accountID: "account", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntil { await MainActor.run { peer.answerStarted } }
+        await session.end()
+        peer.releaseAnswer()
+        _ = await run.result
+
+        #expect(peer.responseCalls == 0)
+    }
+
+    @Test
     func slowPeerCleanupReportsPendingThenCompletes() async throws {
         let peer = BlockingClosePeer()
         let socket = DirectSessionSocket()
@@ -361,7 +419,7 @@ private final class DirectSessionLoader: GPTLiveURLLoading, @unchecked Sendable 
 
 @MainActor
 private final class DirectTestPeer: LiveAudioPeer {
-    enum Operation: Equatable { case prepare, answer, mute(Bool), close }
+    enum Operation: Equatable { case prepare, answer, response, mute(Bool), close }
     private(set) var operations: [Operation] = []
 
     func prepareOffer() async throws -> String {
@@ -373,6 +431,7 @@ private final class DirectTestPeer: LiveAudioPeer {
         operations.append(.answer)
     }
 
+    func requestResponse() async throws { operations.append(.response) }
     func setMuted(_ muted: Bool) async throws { operations.append(.mute(muted)) }
     func close() async { operations.append(.close) }
 }
@@ -439,12 +498,14 @@ private final class DirectSessionSocket: GPTLiveWebSocket, @unchecked Sendable {
 private final class BlockingAnswerPeer: LiveAudioPeer {
     private var answerContinuation: CheckedContinuation<Void, Never>?
     private(set) var answerStarted = false
+    private(set) var responseCalls = 0
 
     func prepareOffer() async throws -> String { "v=0\r\ns=-\r\n" }
     func applyAnswerAndWaitForConnected(_ answer: String) async throws {
         answerStarted = true
         await withCheckedContinuation { answerContinuation = $0 }
     }
+    func requestResponse() async throws { responseCalls += 1 }
     func setMuted(_ muted: Bool) async throws {}
     func close() async {}
     func releaseAnswer() { answerContinuation?.resume(); answerContinuation = nil }

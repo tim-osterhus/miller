@@ -70,9 +70,140 @@ struct GPTLiveDirectControllerTests {
         await run.value
 
         #expect(peer.operations == [.prepare, .answer, .close])
+        #expect(peer.operations.filter { $0 == .response }.isEmpty)
         #expect(states.valuesSnapshot == [.connecting, .listening])
         #expect(await credentialLoads.value == 1)
         #expect(await credentialAdmission.events == [.refresh, .load])
+    }
+
+    @Test
+    func wakeDirectSessionRequestsExactlyOneProviderResponseAfterPeerConnection() async throws {
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let peer = DirectControllerPeer()
+        let socket = DirectControllerSocket()
+        let states = DirectControllerStateProbe()
+        let controller = try GPTLiveController(
+            helperURL: nil,
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-direct-live-test"),
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            makePeer: { peer },
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(
+                    peer: peer,
+                    callCreator: GPTLiveCallCreator(loader: DirectControllerLoader()),
+                    sidebandConnector: GPTLiveSidebandConnector(
+                        factory: { _, _ in socket },
+                        sleep: { _ in }
+                    ),
+                    configuration: configuration
+                )
+            }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task {
+            try? await dependencies.start(LiveVoiceStartContext.wakeword) { event in
+                if case let .state(state) = event {
+                    states.append(state)
+                }
+            }
+        }
+
+        try await waitUntilDirectController { states.contains(.listening) }
+        await dependencies.end()
+        await run.value
+
+        #expect(peer.operations == [.prepare, .answer, .response, .close])
+    }
+
+    @Test
+    func wakeHelperSessionRequestsExactlyOneProviderResponseAfterPeerConnection() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/helper-wake-response-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryParent) }
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let helper = temporaryParent.appendingPathComponent("fake-helper")
+        try Data(
+            "#!/bin/sh\nexec /opt/homebrew/opt/node@22/bin/node \(fixture.path) wait-stop\n".utf8
+        ).write(to: helper)
+        #expect(chmod(helper.path, 0o700) == 0)
+
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let peer = DirectControllerPeer()
+        let states = DirectControllerStateProbe()
+        let controller = try GPTLiveController(
+            helperURL: helper,
+            temporaryParentURL: temporaryParent,
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            makeSession: { client in LiveAudioSession(client: client, peer: peer) },
+            helperVerifier: { _ in },
+            spawnedProcessVerifier: { _ in }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task {
+            try? await dependencies.start(LiveVoiceStartContext.wakeword) { event in
+                if case let .state(state) = event {
+                    states.append(state)
+                }
+            }
+        }
+
+        try await waitUntilDirectController { states.contains(.listening) }
+        await dependencies.end()
+        await run.value
+
+        let manualRun = Task {
+            try? await dependencies.start(LiveVoiceStartContext.manual) { _ in }
+        }
+        try await waitUntilDirectController {
+            peer.operations.filter { $0 == .answer }.count == 2
+        }
+        await dependencies.end()
+        await manualRun.value
+
+        #expect(peer.operations.filter { $0 == .response }.count == 1)
+        #expect(peer.operations.suffix(3) == [.prepare, .answer, .close])
     }
 
     @Test
@@ -261,7 +392,7 @@ private final class DirectControllerConfigurationRecorder: @unchecked Sendable {
 
 @MainActor
 private final class DirectControllerPeer: LiveAudioPeer {
-    enum Operation: Equatable { case prepare, answer, close }
+    enum Operation: Equatable { case prepare, answer, response, close }
     private(set) var operations: [Operation] = []
     private let failPrepare: Bool
 
@@ -272,13 +403,14 @@ private final class DirectControllerPeer: LiveAudioPeer {
     func prepareOffer() async throws -> String {
         if failPrepare { throw DirectControllerPeerFailure.prepare }
         operations.append(.prepare)
-        return "v=0\r\ns=-\r\n"
+        return directControllerSyntheticOffer
     }
 
     func applyAnswerAndWaitForConnected(_ answer: String) async throws {
         operations.append(.answer)
     }
 
+    func requestResponse() async throws { operations.append(.response) }
     func setMuted(_ muted: Bool) async throws {}
     func close() async { operations.append(.close) }
 }
@@ -286,6 +418,29 @@ private final class DirectControllerPeer: LiveAudioPeer {
 private enum DirectControllerPeerFailure: Error {
     case prepare
 }
+
+private let directControllerSyntheticOffer = """
+v=0\r
+o=- 0 0 IN IP4 0.0.0.0\r
+s=-\r
+t=0 0\r
+a=group:BUNDLE 0 1\r
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r
+a=mid:0\r
+a=ice-ufrag:u\r
+a=ice-pwd:p\r
+a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r
+a=setup:actpass\r
+a=rtpmap:111 opus/48000/2\r
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r
+a=mid:1\r
+a=ice-ufrag:u\r
+a=ice-pwd:p\r
+a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r
+a=setup:actpass\r
+a=sctp-port:5000\r
+a=max-message-size:262144\r
+"""
 
 private final class DirectControllerLoader: GPTLiveURLLoading, @unchecked Sendable {
     func load(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {

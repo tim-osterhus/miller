@@ -56,6 +56,8 @@ struct WebKitLivePeerContractTests {
         #expect(html.contains("new RTCPeerConnection()"))
         #expect(html.contains("getUserMedia({ audio: true, video: false })"))
         #expect(html.contains("createDataChannel(\"oai-events\")"))
+        #expect(html.contains("channel.readyState === \"open\""))
+        #expect(html.contains("JSON.stringify({type: \"response.create\"})"))
         #expect(html.contains("createOffer()"))
         #expect(html.contains("setLocalDescription(offer)"))
         #expect(html.contains("setRemoteDescription"))
@@ -136,6 +138,27 @@ struct WebKitLivePeerContractTests {
         await #expect(throws: (any Error).self) {
             try await peer.applyAnswerAndWaitForConnected("v=0\r\ns=-\r\n")
         }
+    }
+
+    @Test
+    func peerRequestsOneFixedResponseOnlyAfterItIsConnected() async throws {
+        let evaluator = FakeScriptEvaluator(results: [
+            .prepareOffer: syntheticOffer,
+            .applyAnswer: "connected",
+            .close: "ok",
+        ])
+        let peer = WebKitLivePeer(evaluator: evaluator)
+
+        await #expect(throws: LiveAudioPeerError.invalidState) {
+            try await peer.requestResponse()
+        }
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\ns=-\r\n")
+        try await peer.requestResponse()
+        await peer.close()
+
+        #expect(evaluator.responseCalls == 1)
+        #expect(evaluator.calls == [.prepareOffer, .applyAnswer, .close])
     }
 
     @Test
@@ -291,6 +314,7 @@ struct WebKitLivePeerContractTests {
 private final class FakeScriptEvaluator: WebKitLivePeerScriptEvaluating {
     private var results: [WebKitLivePeerScriptOperation: String]
     private(set) var calls: [WebKitLivePeerScriptOperation] = []
+    private(set) var responseCalls = 0
 
     init(results: [WebKitLivePeerScriptOperation: String]) {
         self.results = results
@@ -303,6 +327,11 @@ private final class FakeScriptEvaluator: WebKitLivePeerScriptEvaluating {
         calls.append(operation)
         guard let result = results[operation] else { throw FakeEvaluatorError.missingResult }
         return result
+    }
+
+    func requestResponse() async throws -> String {
+        responseCalls += 1
+        return "ok"
     }
 }
 

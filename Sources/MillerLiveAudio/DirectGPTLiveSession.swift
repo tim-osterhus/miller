@@ -98,6 +98,7 @@ public actor DirectGPTLiveSession {
         identity: LiveSessionIdentity,
         credential: CodexOAuthCredential,
         permission: MicrophonePermission,
+        requestInitialResponse: Bool = false,
         onActive: @escaping @Sendable () async -> Void = {},
         onCleanupPending: @escaping @Sendable () async -> Void = {},
         receive: @escaping @Sendable (LiveSessionEvent) async -> Void
@@ -143,6 +144,7 @@ public actor DirectGPTLiveSession {
                 credential: credential,
                 generation: generation,
                 stream: stream,
+                requestInitialResponse: requestInitialResponse,
                 onActive: onActive,
                 receive: receive
             )
@@ -188,6 +190,7 @@ public actor DirectGPTLiveSession {
         credential: CodexOAuthCredential,
         generation: UInt64,
         stream: AsyncStream<Input>,
+        requestInitialResponse: Bool,
         onActive: @escaping @Sendable () async -> Void,
         receive: @escaping @Sendable (LiveSessionEvent) async -> Void
     ) async throws {
@@ -250,6 +253,12 @@ public actor DirectGPTLiveSession {
         try await peer.applyAnswerAndWaitForConnected(call.answerSDP)
         guard !stopRequested else { return }
         guard connected.terminal == nil else { throw GPTLiveSessionError.sidebandStartup }
+        if requestInitialResponse {
+            try Task.checkCancellation()
+            guard !stopRequested else { return }
+            try await peer.requestResponse()
+            guard !stopRequested else { return }
+        }
         try contract.accept(.started(threadID: identity.threadID), generation: identity.generation)
         await receive(.started(threadID: identity.threadID))
         await onActive()

@@ -124,6 +124,15 @@ protocol WebKitLivePeerScriptEvaluating: AnyObject, Sendable {
         _ operation: WebKitLivePeerScriptOperation,
         answer: String?
     ) async throws -> String
+
+    func requestResponse() async throws -> String
+}
+
+@MainActor
+extension WebKitLivePeerScriptEvaluating {
+    func requestResponse() async throws -> String {
+        throw LiveAudioPeerError.unavailable
+    }
 }
 
 @MainActor
@@ -195,6 +204,25 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
                 throw LiveAudioPeerError.connectionFailed
             }
             state = .connected
+        } catch is CancellationError {
+            await close()
+            throw CancellationError()
+        } catch let error as LiveAudioPeerError {
+            await close()
+            throw error
+        } catch {
+            await close()
+            throw LiveAudioPeerError.connectionFailed
+        }
+    }
+
+    func requestResponse() async throws {
+        guard state == .connected else { throw LiveAudioPeerError.invalidState }
+        do {
+            guard try await callResponse() == "ok" else {
+                await close()
+                throw LiveAudioPeerError.connectionFailed
+            }
         } catch is CancellationError {
             await close()
             throw CancellationError()
@@ -313,6 +341,33 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
         return result
     }
 
+    private func callResponse() async throws -> String {
+        let race = WebKitLivePeerCallRace<String>()
+        let timeout = operationTimeout
+        let result = try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                race.install(continuation)
+                Task { @MainActor [evaluator] in
+                    do {
+                        race.resolve(.success(try await evaluator.requestResponse()))
+                    } catch {
+                        race.resolve(.failure(error))
+                    }
+                }
+                Task {
+                    try? await Task.sleep(for: timeout)
+                    race.resolve(.failure(LiveAudioPeerError.connectionFailed))
+                }
+            }
+        }, onCancel: {
+            race.resolve(.failure(CancellationError()))
+        })
+        guard result.utf8.count <= Self.maximumResultBytes else {
+            throw LiveAudioPeerError.connectionFailed
+        }
+        return result
+    }
+
     private static func isValidSDP(_ value: String) -> Bool {
         !value.isEmpty
             && value.utf8.count <= maximumSDPBytes
@@ -346,6 +401,27 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
           }
         }, { once: false });
       });
+      const waitForDataChannelOpen = () => new Promise((resolve, reject) => {
+        if (!channel || closed) { reject(new Error("data channel unavailable")); return; }
+        if (channel.readyState === "open") { resolve(); return; }
+        let settled = false;
+        let timeout;
+        const finish = error => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          channel.removeEventListener("open", opened);
+          channel.removeEventListener("close", closedChannel);
+          if (error) reject(error); else resolve();
+        };
+        const opened = () => finish();
+        const closedChannel = () => finish(new Error("data channel closed"));
+        channel.addEventListener("open", opened, { once: true });
+        channel.addEventListener("close", closedChannel, { once: true });
+        timeout = setTimeout(
+          () => finish(new Error("data channel timeout")), 10000
+        );
+      });
       window.millerLive = Object.freeze({
         async prepareOffer() {
           if (pc || closed) throw new Error("invalid state");
@@ -377,6 +453,17 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring {
           await pc.setRemoteDescription({ type: "answer", sdp: answer });
           await waitForConnected();
           return "connected";
+        },
+        async requestResponse() {
+          if (!pc || !channel || closed || !connected()) {
+            throw new Error("invalid state");
+          }
+          await waitForDataChannelOpen();
+          if (closed || !connected() || channel.readyState !== "open") {
+            throw new Error("invalid state");
+          }
+          channel.send(JSON.stringify({type: "response.create"}));
+          return "ok";
         },
         async setMuted(muted) {
           if (!outboundStream || closed) throw new Error("invalid state");
@@ -488,6 +575,18 @@ private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScrip
         let result = try await view.callAsyncJavaScript(
             script,
             arguments: arguments,
+            in: nil,
+            contentWorld: .page
+        )
+        guard let result = result as? String else { throw LiveAudioPeerError.connectionFailed }
+        return result
+    }
+
+    func requestResponse() async throws -> String {
+        try await pageReadiness.waitUntilReady()
+        let result = try await view.callAsyncJavaScript(
+            "return await window.millerLive.requestResponse()",
+            arguments: [:],
             in: nil,
             contentWorld: .page
         )

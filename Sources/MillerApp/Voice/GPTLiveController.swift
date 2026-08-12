@@ -560,6 +560,7 @@ actor GPTLiveController {
                     identity: identity,
                     credential: credential,
                     permission: permission,
+                    requestInitialResponse: context == .wakeword,
                     onActive: {
                         await self.markClientSessionActive()
                         await receive(.sessionAdmitted(id: sessionID))
@@ -580,6 +581,7 @@ actor GPTLiveController {
                     identity: identity,
                     credential: credential,
                     permission: permission,
+                    requestInitialResponse: context == .wakeword,
                     onActive: {
                         await self.markClientSessionActive()
                         await receive(.sessionAdmitted(id: sessionID))

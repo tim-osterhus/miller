@@ -14,8 +14,13 @@ public enum LiveAudioPeerError: Error, Equatable, Sendable {
 public protocol LiveAudioPeer: Sendable {
     func prepareOffer() async throws -> String
     func applyAnswerAndWaitForConnected(_ answer: String) async throws
+    func requestResponse() async throws
     func setMuted(_ muted: Bool) async throws
     func close() async
+}
+
+public extension LiveAudioPeer {
+    func requestResponse() async throws {}
 }
 
 /// Optional post-admission failure observation for peers that can report a

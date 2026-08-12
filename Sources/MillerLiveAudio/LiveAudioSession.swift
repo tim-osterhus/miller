@@ -104,12 +104,14 @@ public actor LiveAudioSession {
         identity: LiveSessionIdentity,
         credential: CodexOAuthCredential,
         permission: MicrophonePermission,
+        requestInitialResponse: Bool = false,
         receive: @escaping @Sendable (LiveSessionEvent) async -> Void
     ) async throws {
         try await run(
             identity: identity,
             credential: credential,
             permission: permission,
+            requestInitialResponse: requestInitialResponse,
             onActive: {},
             onCleanupPending: {},
             receive: receive
@@ -120,6 +122,7 @@ public actor LiveAudioSession {
         identity: LiveSessionIdentity,
         credential: CodexOAuthCredential,
         permission: MicrophonePermission,
+        requestInitialResponse: Bool = false,
         onActive: @escaping @Sendable () async -> Void,
         onCleanupPending: @escaping @Sendable () async -> Void,
         receive: @escaping @Sendable (LiveSessionEvent) async -> Void
@@ -129,6 +132,7 @@ public actor LiveAudioSession {
                 identity: identity,
                 credential: credential,
                 permission: permission,
+                requestInitialResponse: requestInitialResponse,
                 onActive: onActive,
                 onCleanupPending: onCleanupPending,
                 receive: receive
@@ -142,6 +146,7 @@ public actor LiveAudioSession {
         identity: LiveSessionIdentity,
         credential: CodexOAuthCredential,
         permission: MicrophonePermission,
+        requestInitialResponse: Bool,
         onActive: @escaping @Sendable () async -> Void,
         onCleanupPending: @escaping @Sendable () async -> Void,
         receive: @escaping @Sendable (LiveSessionEvent) async -> Void
@@ -157,6 +162,7 @@ public actor LiveAudioSession {
         self.identity = identity
         terminalPeerFailure = nil
         defer { finishRun(generation: runGeneration) }
+        var initialResponseRequested = false
         do {
             let offer = try await peer.prepareOffer()
             try Task.checkCancellation()
@@ -171,9 +177,18 @@ public actor LiveAudioSession {
                 case let .sdp(_, answer):
                     shouldReceive = false
                     try await peer.applyAnswerAndWaitForConnected(answer)
-                    if client.confirmPeerConnected(identity: identity) {
+                    let peerWasAdmitted = client.confirmPeerConnected(identity: identity)
+                    if peerWasAdmitted {
                         beginPeerMonitor(peer: peer, generation: runGeneration)
                     }
+                    try Task.checkCancellation()
+                    guard peerWasAdmitted,
+                          requestInitialResponse,
+                          !initialResponseRequested,
+                          !peerClosed
+                    else { break }
+                    initialResponseRequested = true
+                    try await peer.requestResponse()
                 case .started:
                     await onActive()
                 case .outputAudio:

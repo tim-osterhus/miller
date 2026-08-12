@@ -74,6 +74,45 @@ struct LiveAudioSessionTests {
         #expect(!process.isRunning)
     }
 
+    @Test @MainActor
+    func wakeHelperSessionRequestsExactlyOneResponseAfterPeerConnection() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let peer = PermissionTestPeer()
+        let process = CodexAppServerProcess(configuration: try .init(
+            executableURL: URL(fileURLWithPath: "/opt/homebrew/opt/node@22/bin/node"),
+            arguments: [fixture.path, "wait-stop"],
+            temporaryParentURL: repository.appendingPathComponent(".artifacts"),
+            terminationGrace: .milliseconds(100)
+        ))
+        let session = LiveAudioSession(
+            client: CodexAppServerClient(process: process),
+            peer: peer
+        )
+        let run = Task {
+            try? await session.run(
+                identity: .init(requestID: "wake-response", threadID: "thread", generation: 1),
+                credential: .init(
+                    accessToken: Data("synthetic".utf8), accountID: "account-1", planType: nil
+                ),
+                permission: .authorized,
+                requestInitialResponse: true,
+                receive: { _ in }
+            )
+        }
+
+        try await waitUntilLiveAudioSession { peer.operations.contains(.response) }
+        await session.end()
+        await run.value
+
+        #expect(peer.operations == [.prepare, .answer, .response, .close])
+    }
+
     @Test
     func permissionStatesRemainTruthfulForTheLegacyCaptureGroundwork() {
         #expect(!MicrophonePermission.notDetermined.mayRequestCapture)
@@ -127,16 +166,57 @@ private actor CountingPlaybackDriver: LiveAudioPlaybackDriving {
 
 @MainActor
 private final class PermissionTestPeer: LiveAudioPeer {
+    enum Operation: Equatable { case prepare, answer, response, close }
     private(set) var prepareCalls = 0
+    private(set) var operations = [Operation]()
 
     nonisolated init() {}
 
     func prepareOffer() async throws -> String {
         prepareCalls += 1
-        return "v=0\r\ns=-\r\n"
+        operations.append(.prepare)
+        return liveAudioSessionSyntheticOffer
     }
 
-    func applyAnswerAndWaitForConnected(_ answer: String) async throws {}
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {
+        operations.append(.answer)
+    }
+    func requestResponse() async throws { operations.append(.response) }
     func setMuted(_ muted: Bool) async throws {}
-    func close() async {}
+    func close() async { operations.append(.close) }
 }
+
+@MainActor
+private func waitUntilLiveAudioSession(
+    _ predicate: @escaping @MainActor () -> Bool
+) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while ContinuousClock.now < deadline {
+        if predicate() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw LiveAudioPeerError.connectionFailed
+}
+
+private let liveAudioSessionSyntheticOffer = """
+v=0\r
+o=- 0 0 IN IP4 0.0.0.0\r
+s=-\r
+t=0 0\r
+a=group:BUNDLE 0 1\r
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r
+a=mid:0\r
+a=ice-ufrag:u\r
+a=ice-pwd:p\r
+a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r
+a=setup:actpass\r
+a=rtpmap:111 opus/48000/2\r
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r
+a=mid:1\r
+a=ice-ufrag:u\r
+a=ice-pwd:p\r
+a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r
+a=setup:actpass\r
+a=sctp-port:5000\r
+a=max-message-size:262144\r
+"""
