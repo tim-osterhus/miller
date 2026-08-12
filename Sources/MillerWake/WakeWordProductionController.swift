@@ -6,6 +6,11 @@ import Foundation
 typealias WakeWordEventScheduler = @Sendable (
     @escaping @MainActor @Sendable () async -> Void
 ) -> Void
+typealias WakeWordHandoffSleep = @Sendable () async -> Void
+
+private let defaultWakeWordHandoffSleep: WakeWordHandoffSleep = {
+    try? await Task.sleep(for: .milliseconds(150))
+}
 
 public typealias WakeWordAdmissionHandler =
     @MainActor @Sendable (WakeWordAdmission) async -> Void
@@ -37,6 +42,7 @@ public final class WakeWordProductionController: ObservableObject {
     private let detectorFactory:
         @Sendable (SherpaWakeWordTuning) throws -> any WakeWordDetecting
     private let eventScheduler: WakeWordEventScheduler
+    private let handoffSleep: WakeWordHandoffSleep
     private var coordinator: WakeWordCoordinator?
     private var monitoringSessionID: UUID?
     private var sampleCallbackEpoch: UInt64?
@@ -89,14 +95,16 @@ public final class WakeWordProductionController: ObservableObject {
         recorder: any WakeWordCaptureOwning,
         detectorFactory: @escaping @Sendable () throws -> any WakeWordDetecting,
         onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler = { _ in },
-        eventScheduler: @escaping WakeWordEventScheduler
+        eventScheduler: @escaping WakeWordEventScheduler,
+        handoffSleep: @escaping WakeWordHandoffSleep = defaultWakeWordHandoffSleep
     ) {
         self.init(
             recorder: recorder,
             tunedDetectorFactory: { _ in try detectorFactory() },
             initialTuning: .default,
             onWakeDetectedWithAdmission: onWakeDetectedWithAdmission,
-            eventScheduler: eventScheduler
+            eventScheduler: eventScheduler,
+            handoffSleep: handoffSleep
         )
     }
 
@@ -107,13 +115,15 @@ public final class WakeWordProductionController: ObservableObject {
         ) throws -> any WakeWordDetecting,
         initialTuning: SherpaWakeWordTuning,
         onWakeDetectedWithAdmission: @escaping WakeWordAdmissionHandler = { _ in },
-        eventScheduler: @escaping WakeWordEventScheduler
+        eventScheduler: @escaping WakeWordEventScheduler,
+        handoffSleep: @escaping WakeWordHandoffSleep = defaultWakeWordHandoffSleep
     ) {
         self.recorder = recorder
         detectorFactory = tunedDetectorFactory
         detectorTuning = initialTuning
         wakeDetectionHandler = onWakeDetectedWithAdmission
         self.eventScheduler = eventScheduler
+        self.handoffSleep = handoffSleep
     }
 
     public func setEnabled(_ enabled: Bool) async {
@@ -270,6 +280,12 @@ public final class WakeWordProductionController: ObservableObject {
         defer { finishLifecycleOperation(operationEpoch) }
         await waitForEarlierLifecycleOperations(operationEpoch)
         guard acceptsLifecycleOperation(operationEpoch), isEnabled else { return }
+        await handoffSleep()
+        guard acceptsLifecycleOperation(operationEpoch),
+              isEnabled,
+              systemIsAwake else {
+            return
+        }
         await startMonitoringIfEligible(operationEpoch: operationEpoch)
     }
 

@@ -124,6 +124,77 @@ struct WakeWordProductionHandoffTests {
     }
 
     @Test @MainActor
+    func liveCleanupWaitsForSettlingInputRouteBeforeRearming() async {
+        let recorder = SettlingHandoffRecorderProbe()
+        let handoffSleep = HandoffSleepGate()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() },
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            },
+            handoffSleep: { await handoffSleep.wait() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.suspend(.foregroundSession)
+        recorder.inputRouteSettled = false
+
+        let rearm = Task { @MainActor in
+            await controller.resumeAfterLiveCleanup()
+        }
+        await handoffSleep.waitUntilEntered()
+
+        #expect(recorder.startCount == 1)
+        #expect(controller.state == .suspended(.foregroundSession))
+
+        recorder.inputRouteSettled = true
+        await handoffSleep.release()
+        await rearm.value
+
+        #expect(controller.state == .monitoring)
+        #expect(recorder.startCount == 2)
+    }
+
+    @Test @MainActor
+    func liveCleanupDoesNotRearmAfterDisableDuringSettlingDelay() async {
+        let recorder = SettlingHandoffRecorderProbe()
+        let handoffSleep = HandoffSleepGate()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            detectorFactory: { HandoffDetectorProbe() },
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            },
+            handoffSleep: { await handoffSleep.wait() }
+        )
+
+        await controller.setEnabled(true)
+        await controller.suspend(.foregroundSession)
+        recorder.inputRouteSettled = true
+
+        let rearm = Task { @MainActor in
+            await controller.resumeAfterLiveCleanup()
+        }
+        await handoffSleep.waitUntilEntered()
+
+        let disable = Task { @MainActor in
+            await controller.setEnabled(false)
+        }
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        await handoffSleep.release()
+        await rearm.value
+        await disable.value
+
+        #expect(controller.state == .disabled)
+        #expect(recorder.startCount == 1)
+        #expect(recorder.isWakeMonitoring == false)
+    }
+
+    @Test @MainActor
     func wakeDetectionStopsRecorderBeforeCallback() async {
         let recorder = HandoffRecorderProbe()
         let detector = HandoffDetectorProbe()
@@ -194,6 +265,58 @@ private final class HandoffRecorderProbe: WakeWordCaptureOwning {
 
     func emit(_ samples: ContiguousArray<Int16>) {
         onSamples?(samples)
+    }
+}
+
+@MainActor
+private final class SettlingHandoffRecorderProbe: WakeWordCaptureOwning {
+    var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    var inputRouteSettled = true
+    private(set) var isWakeMonitoring = false
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    func startWakeMonitoring() async throws -> UUID {
+        startCount += 1
+        guard inputRouteSettled else {
+            throw WakeWordCaptureStartError.inputDeviceUnavailable
+        }
+        isWakeMonitoring = true
+        return UUID()
+    }
+
+    func stopWakeMonitoring() async {
+        stopCount += 1
+        isWakeMonitoring = false
+    }
+}
+
+private actor HandoffSleepGate {
+    private var entered = false
+    private var entryWaiters = [CheckedContinuation<Void, Never>]()
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        entered = true
+        let waiters = entryWaiters
+        entryWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let continuation = releaseContinuation
+        releaseContinuation = nil
+        continuation?.resume()
     }
 }
 
