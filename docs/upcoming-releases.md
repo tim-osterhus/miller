@@ -26,8 +26,11 @@ selection and Command-C observation is listed in the unreached M1 gate.
 - Keep the feature optional and owner-controlled.
 - Support one custom phrase, the system-default microphone, clear readiness,
   and deterministic disable and cleanup behavior.
+- Treat the phrase only as a trigger: release wake capture, start one ordinary
+  Live session, and ask Miller to acknowledge that it is ready before the owner
+  speaks the request.
 - The deterministic integration is complete; the microphone, default/custom
-  phrase, and audible handoff qualification remains `LIVE_NOT_RUN`.
+  phrase, and audible acknowledgement qualification remains `LIVE_NOT_RUN`.
 
 ### Live text feasibility
 

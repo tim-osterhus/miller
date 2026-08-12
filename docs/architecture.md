@@ -340,10 +340,15 @@ English phrase. SQLite wake preferences are the sole preference authority. The
 custom-phrase and microphone observation gate is explicitly `LIVE_NOT_RUN` in
 the v0.1.2 release closure.
 
-After a match, the coordinator owns a bounded post-keyword PCM buffer. An empty
-timeout rearms without opening Live. Silence or the hard limit transfers that
-buffer once to the existing WebKit Live peer, then wake capture remains
-suspended until provider, WebKit, transcript, and admission cleanup completes.
+After a match, the coordinator stops wake capture and releases its microphone
+lease before admitting exactly one ordinary Live session. Wake-started sessions
+receive the bounded instruction `Immediately acknowledge you’re ready and
+listening.` Manual sessions do not. The wake phrase is only a trigger: Miller
+does not retain or forward detector audio, create a synthetic user turn, or
+treat the phrase as the request.
+
+Wake capture remains suspended until provider, WebKit, transcript, and
+admission cleanup completes, then rearms when wake listening remains enabled.
 Manual Live suspends wake first. Disable, shutdown, sleep, device loss, and
 permission failure release capture and publish a truthful state. Application
 focus and Settings-window visibility do not suspend enabled wake listening. No

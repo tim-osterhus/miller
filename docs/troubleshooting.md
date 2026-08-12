@@ -55,7 +55,7 @@ paused/unavailable state instead of pretending that capture continues. Moving
 focus away from Miller or closing Settings does not pause enabled wake
 listening. The owner-visible microphone and custom-phrase check is
 `LIVE_NOT_RUN` in the v0.1.2 release closure; deterministic tests do not prove
-speech detection or audible handoff.
+speech detection or the wake-only audible acknowledgement.
 
 ## A reasoning request fails
 

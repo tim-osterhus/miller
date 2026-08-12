@@ -14,9 +14,12 @@ permission, and custom-phrase gate: `LIVE_NOT_RUN`.
   and file with a visible error.
 - Capture is system-default microphone only, 16 kHz mono Int16, owned by one
   AVAudioEngine adapter. Wake and Live use one process-local microphone lease.
-- A match opens Miller. Empty wake timeout rearms without Live. Silence or the
-  hard limit transfers the bounded post-keyword PCM to exactly one Live
-  admission and one existing WebKit outbound track.
+- A match stops wake capture, releases its microphone lease, opens Miller, and
+  admits exactly one ordinary Live session. Detector audio is not buffered or
+  forwarded after the matched frame.
+- Wake-started Live sessions receive the bounded instruction `Immediately
+  acknowledge you’re ready and listening.` Manual Live sessions do not. Miller
+  creates no synthetic user item or durable user turn for the wake phrase.
 - Wake capture yields before Live and rearms only after provider, WebKit,
   transcript, and admission cleanup. Disable, shutdown, sleep, device loss,
   and permission failure release capture and publish state. Application focus
@@ -48,7 +51,7 @@ handoff, failure/interrupt cleanup, sleep/device loss/shutdown, focus
 independence, persisted tuning defaults and rollback, and package
 inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The current full serial suite passed 990 tests.
+in the parent handoff. The current full serial suite passed 1,002 tests.
 
 The earlier route-fixture observation—three route fixtures returned status 79
 and the Pi-provider fixture returned status 1 in that environment—is retained
@@ -59,7 +62,7 @@ evidence by the later exact v0.1.2 run
 `v0.1.2-headless-report.md` records PASS for the three route checks and the
 Pi-provider check. This supersession is headless evidence only; it does not
 qualify a human wake run, and the owner-visible microphone, permission,
-custom-phrase, audible handoff, Live, and recovery rows remain
+custom-phrase, audible acknowledgement, Live, and recovery rows remain
 `LIVE_NOT_RUN`.
 
 ## Measurements
@@ -101,6 +104,7 @@ The following rows remain `LIVE_NOT_RUN` and are not inferred from tests:
 - real microphone permission request and denial recovery;
 - human speech detection for Hey Miller;
 - owner custom-phrase save and relaunch;
-- audible one-shot post-keyword command handoff;
+- automatic Live start from the phrase alone and audible readiness
+  acknowledgement before the owner speaks a request;
 - real Live provider admission, interruption, failure, cleanup, and rearm;
 - observed sleep/device-loss recovery on the owner machine.
