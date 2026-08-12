@@ -48,7 +48,7 @@ handoff, failure/interrupt cleanup, sleep/device loss/shutdown, focus
 independence, persisted tuning defaults and rollback, and package
 inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The current full serial suite passed 988 tests.
+in the parent handoff. The current full serial suite passed 990 tests.
 
 The earlier route-fixture observation—three route fixtures returned status 79
 and the Pi-provider fixture returned status 1 in that environment—is retained
@@ -84,6 +84,18 @@ custom-phrase, audible handoff, Live, and recovery rows remain
 
 ## Human gate
 
+Partial owner-visible evidence recorded on 2026-08-11 HST:
+
+- background-focus wake listening remained active outside Miller Settings;
+- two consecutive wake-triggered Live admissions became usable in
+  approximately 10 seconds each, with no `voice_timeout`;
+- the durable store records a matching completed wakeword session with a
+  10.022-second start-to-completion interval; the second observed session was
+  still open when the sanitized evidence was inspected.
+
+This closes the prior startup-timeout regression, but it does not promote the
+entire wake gate to PASS.
+
 The following rows remain `LIVE_NOT_RUN` and are not inferred from tests:
 
 - real microphone permission request and denial recovery;
@@ -91,5 +103,4 @@ The following rows remain `LIVE_NOT_RUN` and are not inferred from tests:
 - owner custom-phrase save and relaunch;
 - audible one-shot post-keyword command handoff;
 - real Live provider admission, interruption, failure, cleanup, and rearm;
-- observed sleep/device-loss recovery and background-focus listening on the
-  owner machine.
+- observed sleep/device-loss recovery on the owner machine.
