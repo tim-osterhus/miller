@@ -312,6 +312,72 @@ struct WakeWordCaptureAdapterTests {
 
     @Test
     @MainActor
+    func inputAvailabilityMonitorToleratesTransientRecoveryAndBoundsSustainedFailure() async throws {
+        let audio = InjectedWakeAudioEngine()
+        let input = WakeInputAvailabilityProbe()
+        let monitorGate = WakeAvailabilityMonitorGate()
+        let adapter = WakeWordAVAudioCaptureAdapter(
+            ownership: MicrophoneOwnership(),
+            permissionStatus: { .authorized },
+            requestPermission: { .authorized },
+            inputAvailable: { input.isAvailable },
+            audioEngineBoundaryFactory: { audio.boundary },
+            waitForAvailabilityCheck: { await monitorGate.wait() }
+        )
+        let received = WakeSampleDeliveryProbe()
+        let failures = WakeCaptureFailureProbe()
+        adapter.onSamples = { samples in
+            received.record(samples, deliveredOnMainThread: Thread.isMainThread)
+        }
+        adapter.setFailureHandler { failures.record($0) }
+
+        _ = try await adapter.startWakeMonitoring()
+        await waitForMonitorWaiters(monitorGate, atLeast: 1)
+        await adapter.stopWakeMonitoring()
+        _ = try await adapter.startWakeMonitoring()
+        await waitForMonitorWaiters(monitorGate, atLeast: 2)
+
+        input.setAvailable(false)
+        monitorGate.signal()
+        await Task.yield()
+        #expect(adapter.isWakeMonitoring)
+        #expect(failures.reasons.isEmpty)
+
+        monitorGate.signal()
+        await waitForMonitorWaiters(monitorGate, atLeast: 1)
+        input.setAvailable(true)
+        monitorGate.signal()
+        await waitForMonitorWaiters(monitorGate, atLeast: 1)
+
+        #expect(adapter.isWakeMonitoring)
+        #expect(failures.reasons.isEmpty)
+
+        let currentTap = try #require(audio.installedTaps.last)
+        audio.invoke(currentTap, with: try audio.makeBuffer(frameCount: 480))
+        try await waitForSampleCount(1, in: received)
+
+        #expect(received.deliveries == [
+            .init(
+                sampleCount: 480,
+                firstSample: 0,
+                deliveredOnMainThread: true
+            ),
+        ])
+        #expect(adapter.isWakeMonitoring)
+
+        input.setAvailable(false)
+        for _ in 0..<3 {
+            await waitForMonitorWaiters(monitorGate, atLeast: 1)
+            monitorGate.signal()
+        }
+        await waitForMonitoringState(false, in: adapter)
+
+        #expect(failures.reasons == [.inputDevice])
+        #expect(!adapter.isWakeMonitoring)
+    }
+
+    @Test
+    @MainActor
     func startedAdapterReportsOversizedTapBufferAndStopsMonitoring() async throws {
         let audio = InjectedWakeAudioEngine()
         let adapter = WakeWordAVAudioCaptureAdapter(
@@ -429,6 +495,30 @@ struct WakeWordCaptureAdapterTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         Issue.record("Timed out waiting for \(expectedCount) sample deliveries")
+    }
+
+    @MainActor
+    private func waitForMonitorWaiters(
+        _ gate: WakeAvailabilityMonitorGate,
+        atLeast expectedCount: Int
+    ) async {
+        for _ in 0..<100 {
+            if gate.waitingCount >= expectedCount { return }
+            await Task.yield()
+        }
+        Issue.record("Timed out waiting for monitor gate")
+    }
+
+    @MainActor
+    private func waitForMonitoringState(
+        _ expectedState: Bool,
+        in adapter: WakeWordAVAudioCaptureAdapter
+    ) async {
+        for _ in 0..<100 {
+            if adapter.isWakeMonitoring == expectedState { return }
+            await Task.yield()
+        }
+        Issue.record("Timed out waiting for wake monitoring state")
     }
 }
 
@@ -599,6 +689,41 @@ private final class WakeCaptureFailureProbe: @unchecked Sendable {
 
     func record(_ reason: WakeWordUnavailableReason) {
         lock.withLock { storage.append(reason) }
+    }
+}
+
+private final class WakeInputAvailabilityProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var available = true
+
+    var isAvailable: Bool {
+        lock.withLock { available }
+    }
+
+    func setAvailable(_ available: Bool) {
+        lock.withLock { self.available = available }
+    }
+}
+
+private final class WakeAvailabilityMonitorGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations = [CheckedContinuation<Void, Never>]()
+
+    var waitingCount: Int {
+        lock.withLock { continuations.count }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.withLock { continuations.append(continuation) }
+        }
+    }
+
+    func signal() {
+        let continuation = lock.withLock {
+            continuations.isEmpty ? nil : continuations.removeFirst()
+        }
+        continuation?.resume()
     }
 }
 

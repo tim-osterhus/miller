@@ -207,6 +207,8 @@ typealias WakeWordAudioEngineBoundaryFactory =
 
 @MainActor
 final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
+    private static let inputAvailabilityFailureLimit = 3
+
     var onSamples: (@Sendable (ContiguousArray<Int16>) -> Void)?
     private(set) var isWakeMonitoring = false
 
@@ -216,6 +218,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
     private let inputAvailable: (@Sendable () -> Bool)?
     private let audioQueue: DispatchQueue
     private let audioEngineBoundaryFactory: WakeWordAudioEngineBoundaryFactory
+    private let waitForAvailabilityCheck: @Sendable () async -> Void
     private let lifecycleFence = WakeWordCaptureLifecycleFence()
     private let chunker = WakeWordPCM16Chunker()
     private var generation: UInt64 = 0
@@ -237,6 +240,9 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         inputAvailable: (@Sendable () -> Bool)? = nil,
         audioEngineBoundaryFactory: @escaping WakeWordAudioEngineBoundaryFactory = {
             WakeWordAudioEngineBoundary.live(engine: AVAudioEngine())
+        },
+        waitForAvailabilityCheck: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .milliseconds(250))
         }
     ) {
         self.ownership = ownership
@@ -244,6 +250,7 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         self.requestPermission = requestPermission
         self.inputAvailable = inputAvailable
         self.audioEngineBoundaryFactory = audioEngineBoundaryFactory
+        self.waitForAvailabilityCheck = waitForAvailabilityCheck
         audioQueue = DispatchQueue(label: "MillerWake.capture")
     }
 
@@ -328,18 +335,28 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         isWakeMonitoring = true
         lifecycleFence.activate(generation: generation)
         invalidationTask?.cancel()
+        let waitForAvailabilityCheck = self.waitForAvailabilityCheck
         invalidationTask = Task { @MainActor [weak self] in
+            var inputUnavailableChecks = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard let self, self.isWakeMonitoring else { return }
+                await waitForAvailabilityCheck()
+                guard let self,
+                      self.isWakeMonitoring,
+                      self.generation == generation
+                else { return }
                 if self.permissionStatus() != .authorized {
-                    self.report(.microphonePermission)
+                    self.report(.microphonePermission, generation: generation)
                     return
                 }
                 let inputStillAvailable = self.inputAvailable?()
                     ?? self.inputIsAvailable()
-                if !inputStillAvailable {
-                    self.report(.inputDevice)
+                if inputStillAvailable {
+                    inputUnavailableChecks = 0
+                    continue
+                }
+                inputUnavailableChecks += 1
+                if inputUnavailableChecks >= Self.inputAvailabilityFailureLimit {
+                    self.report(.inputDevice, generation: generation)
                     return
                 }
             }
