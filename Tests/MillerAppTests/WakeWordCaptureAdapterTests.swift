@@ -378,6 +378,69 @@ struct WakeWordCaptureAdapterTests {
 
     @Test
     @MainActor
+    func coreAudioConfigurationStopRecreatesTheWakeEngine() async throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let audio = InjectedWakeAudioEngineFactory(format: format)
+        let monitorGate = WakeAvailabilityMonitorGate()
+        let adapter = WakeWordAVAudioCaptureAdapter(
+            ownership: MicrophoneOwnership(),
+            permissionStatus: { .authorized },
+            requestPermission: { .authorized },
+            audioEngineBoundaryFactory: audio.makeBoundary,
+            waitForAvailabilityCheck: { await monitorGate.wait() }
+        )
+        let received = WakeSampleDeliveryProbe()
+        let failures = WakeCaptureFailureProbe()
+        adapter.onSamples = { samples in
+            received.record(samples, deliveredOnMainThread: Thread.isMainThread)
+        }
+        adapter.setFailureHandler { failures.record($0) }
+
+        _ = try await adapter.startWakeMonitoring()
+        await waitForMonitorWaiters(monitorGate, atLeast: 1)
+        let firstEngine = try #require(audio.liveEngines.first)
+        firstEngine.simulateConfigurationStop()
+        monitorGate.signal()
+        await waitForEngineCreations(2, in: audio)
+
+        #expect(adapter.isWakeMonitoring)
+        #expect(failures.reasons.isEmpty)
+        #expect(firstEngine.stopCount == 1)
+
+        let currentEngine = try #require(audio.liveEngines.last)
+        let currentTap = try #require(currentEngine.installedTaps.last)
+        let deliveredFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 24_000,
+            channels: 1,
+            interleaved: true
+        ))
+        currentEngine.invoke(
+            currentTap,
+            with: try currentEngine.makeBuffer(
+                format: deliveredFormat,
+                frameCount: 1_024
+            )
+        )
+        try await waitForSampleCount(1, in: received)
+        #expect(received.deliveries == [
+            .init(
+                sampleCount: 480,
+                firstSample: 0,
+                deliveredOnMainThread: true
+            ),
+        ])
+
+        await adapter.stopWakeMonitoring()
+    }
+
+    @Test
+    @MainActor
     func startedAdapterReportsOversizedTapBufferAndStopsMonitoring() async throws {
         let audio = InjectedWakeAudioEngine()
         let adapter = WakeWordAVAudioCaptureAdapter(
@@ -520,6 +583,18 @@ struct WakeWordCaptureAdapterTests {
         }
         Issue.record("Timed out waiting for wake monitoring state")
     }
+
+    @MainActor
+    private func waitForEngineCreations(
+        _ expectedCount: Int,
+        in factory: InjectedWakeAudioEngineFactory
+    ) async {
+        for _ in 0..<100 {
+            if factory.creationCount == expectedCount { return }
+            await Task.yield()
+        }
+        Issue.record("Timed out waiting for \(expectedCount) wake engines")
+    }
 }
 
 private final class UncheckedSendableBox<Value>: @unchecked Sendable {
@@ -536,6 +611,7 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
     private var taps = [AVAudioNodeTapBlock]()
     private var tapFormats = [AVAudioFormat?]()
     private var stops = 0
+    private var running = false
 
     init(format: AVAudioFormat? = nil) {
         self.format = format ?? AVAudioFormat(
@@ -557,8 +633,14 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
             },
             removeTap: {},
             prepare: {},
-            start: {},
-            stop: { [self] in lock.withLock { stops += 1 } }
+            start: { [self] in lock.withLock { running = true } },
+            isRunning: { [self] in lock.withLock { running } },
+            stop: { [self] in
+                lock.withLock {
+                    running = false
+                    stops += 1
+                }
+            }
         )
     }
 
@@ -580,6 +662,10 @@ private final class InjectedWakeAudioEngine: @unchecked Sendable {
 
     func setOutputFormat(_ format: AVAudioFormat) {
         lock.withLock { self.format = format }
+    }
+
+    func simulateConfigurationStop() {
+        lock.withLock { running = false }
     }
 
     func makeBuffer(

@@ -171,6 +171,7 @@ struct WakeWordAudioEngineBoundary: @unchecked Sendable {
     let removeTap: () -> Void
     let prepare: () -> Void
     let start: () throws -> Void
+    let isRunning: () -> Bool
     let stop: () -> Void
 
     static func live(engine: AVAudioEngine) -> Self {
@@ -194,6 +195,9 @@ struct WakeWordAudioEngineBoundary: @unchecked Sendable {
             },
             start: {
                 try engine.start()
+            },
+            isRunning: {
+                engine.isRunning
             },
             stop: {
                 engine.stop()
@@ -283,54 +287,19 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         let generation = self.generation
         let callback = onSamples
         let lifecycleFence = self.lifecycleFence
-        let audioEngineBoundary = audioEngineBoundaryFactory()
         lifecycleFence.prepare(generation: generation)
         do {
-            try audioQueue.sync {
-                let inputFormat = audioEngineBoundary.outputFormat()
-                guard inputFormat.sampleRate > 0,
-                      let target = AVAudioFormat(
-                        commonFormat: .pcmFormatInt16,
-                        sampleRate: 16_000,
-                        channels: 1,
-                        interleaved: true
-                      )
-                else { throw WakeWordCaptureStartError.inputDeviceUnavailable }
-
-                audioEngineBoundary.removeTap()
-                let tap = WakeWordRealtimeAudioTap.make(
-                    chunkFrameCount: 1_024,
-                    shouldCapture: {
-                        lifecycleFence.accepts(generation: generation)
-                    },
-                    onFailure: { [weak self] in
-                        self?.report(.capture, generation: generation)
-                    }
-                ) { [weak self] snapshot in
-                    self?.process(
-                        snapshot,
-                        generation: generation,
-                        callback: callback,
-                        target: target
-                    )
-                }
-                audioEngineBoundary.installTap(1_024, nil, tap)
-                audioEngineBoundary.prepare()
-                try audioEngineBoundary.start()
-                self.converter = nil
-            }
+            audioEngineBoundary = try makeStartedAudioEngine(
+                generation: generation,
+                callback: callback
+            )
         } catch {
-            audioQueue.sync {
-                audioEngineBoundary.removeTap()
-                audioEngineBoundary.stop()
-            }
             lifecycleFence.invalidate()
             lease.release()
             throw (error as? WakeWordCaptureStartError)
                 ?? WakeWordCaptureStartError.captureFailed
         }
 
-        self.audioEngineBoundary = audioEngineBoundary
         self.lease = lease
         isWakeMonitoring = true
         lifecycleFence.activate(generation: generation)
@@ -352,6 +321,17 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
                     ?? self.inputIsAvailable()
                 if inputStillAvailable {
                     inputUnavailableChecks = 0
+                    if !self.audioEngineIsRunning() {
+                        do {
+                            try self.restartAudioEngine(
+                                generation: generation,
+                                callback: callback
+                            )
+                        } catch {
+                            self.report(.capture, generation: generation)
+                            return
+                        }
+                    }
                     continue
                 }
                 inputUnavailableChecks += 1
@@ -362,6 +342,81 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
             }
         }
         return UUID()
+    }
+
+    private func makeStartedAudioEngine(
+        generation: UInt64,
+        callback: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    ) throws -> WakeWordAudioEngineBoundary {
+        let boundary = audioEngineBoundaryFactory()
+        let lifecycleFence = self.lifecycleFence
+        do {
+            try audioQueue.sync {
+                let inputFormat = boundary.outputFormat()
+                guard inputFormat.sampleRate > 0,
+                      let target = AVAudioFormat(
+                        commonFormat: .pcmFormatInt16,
+                        sampleRate: 16_000,
+                        channels: 1,
+                        interleaved: true
+                      )
+                else { throw WakeWordCaptureStartError.inputDeviceUnavailable }
+
+                boundary.removeTap()
+                let tap = WakeWordRealtimeAudioTap.make(
+                    chunkFrameCount: 1_024,
+                    shouldCapture: {
+                        lifecycleFence.accepts(generation: generation)
+                    },
+                    onFailure: { [weak self] in
+                        self?.report(.capture, generation: generation)
+                    }
+                ) { [weak self] snapshot in
+                    self?.process(
+                        snapshot,
+                        generation: generation,
+                        callback: callback,
+                        target: target
+                    )
+                }
+                boundary.installTap(1_024, nil, tap)
+                boundary.prepare()
+                try boundary.start()
+                converter = nil
+            }
+            return boundary
+        } catch {
+            audioQueue.sync {
+                boundary.removeTap()
+                boundary.stop()
+            }
+            throw error
+        }
+    }
+
+    private func restartAudioEngine(
+        generation: UInt64,
+        callback: (@Sendable (ContiguousArray<Int16>) -> Void)?
+    ) throws {
+        guard lifecycleFence.accepts(generation: generation),
+              isWakeMonitoring,
+              let previous = audioEngineBoundary else {
+            return
+        }
+        audioEngineBoundary = nil
+        audioQueue.sync {
+            previous.removeTap()
+            previous.stop()
+            converter = nil
+        }
+        guard lifecycleFence.accepts(generation: generation),
+              isWakeMonitoring else {
+            return
+        }
+        audioEngineBoundary = try makeStartedAudioEngine(
+            generation: generation,
+            callback: callback
+        )
     }
 
     func stopWakeMonitoring() async {
@@ -440,6 +495,11 @@ final class WakeWordAVAudioCaptureAdapter: WakeWordCaptureOwning {
         return audioQueue.sync {
             audioEngineBoundary.outputFormat().sampleRate > 0
         }
+    }
+
+    private func audioEngineIsRunning() -> Bool {
+        guard let audioEngineBoundary else { return false }
+        return audioQueue.sync { audioEngineBoundary.isRunning() }
     }
 
     private static func convert(
