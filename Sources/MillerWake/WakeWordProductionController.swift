@@ -293,6 +293,12 @@ public final class WakeWordProductionController: ObservableObject {
               !Task.isCancelled else {
             return
         }
+        if let completedCoordinator = coordinator {
+            completedCoordinator.shutdown()
+            if coordinator === completedCoordinator {
+                coordinator = nil
+            }
+        }
         await startMonitoringIfEligible(operationEpoch: operationEpoch)
     }
 

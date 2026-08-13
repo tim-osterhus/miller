@@ -252,6 +252,47 @@ struct WakeWordProductionHandoffTests {
         #expect(recorder.stopCount == 1)
         #expect(controller.state == .suspended(.processing))
     }
+
+    @Test @MainActor
+    func completedWakeRecreatesDetectorBeforeSecondTrigger() async {
+        let recorder = HandoffRecorderProbe()
+        let factory = HandoffTunedDetectorFactory()
+        let callback = WakeTriggerProbe()
+        let controller = WakeWordProductionController(
+            recorder: recorder,
+            tunedDetectorFactory: { tuning in
+                try MainActor.assumeIsolated { try factory.make(tuning: tuning) }
+            },
+            initialTuning: .default,
+            onWakeDetectedWithAdmission: { admission in
+                callback.record(
+                    stopCompleted: recorder.stopCompleted,
+                    admissionValid: admission.isValid
+                )
+                await admission.complete()
+            },
+            eventScheduler: { operation in
+                Task { @MainActor in await operation() }
+            },
+            handoffSleep: {}
+        )
+
+        await controller.setEnabled(true)
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        await waitUntil {
+            callback.count == 1 && controller.state == .monitoring
+        }
+
+        recorder.emit(ContiguousArray(repeating: 0, count: 480))
+        await waitUntil {
+            callback.count == 2 && controller.state == .monitoring
+        }
+
+        #expect(callback.count == 2)
+        #expect(factory.createdTunings == [.default, .default, .default])
+        #expect(recorder.startCount == 3)
+        #expect(recorder.stopCount == 2)
+    }
 }
 
 @MainActor
