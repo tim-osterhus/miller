@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import MillerAvatarCore
 import MillerAvatarHost
+import MillerCore
 
 enum AvatarReadinessFailureCode: String, Equatable, Sendable {
     case packageUnavailable = "avatar_package_unavailable"
@@ -45,6 +46,7 @@ protocol MillerAvatarSurfaceControlling: AnyObject {
         profileID: UUID,
         from store: AvatarProfileStore?
     ) async -> ProfileLoadDisposition
+    func project(_ payload: ProjectPhasePayload)
     func setVisibility(_ visibility: EffectiveVisibility)
     func setReducedMotion(_ enabled: Bool)
     func dispose(reason: DisposalReason)
@@ -84,6 +86,10 @@ private final class PackageAvatarSurface: MillerAvatarSurfaceControlling {
 
     func setReducedMotion(_ enabled: Bool) {
         surface.setReducedMotion(enabled)
+    }
+
+    func project(_ payload: ProjectPhasePayload) {
+        surface.project(payload)
     }
 
     func dispose(reason: DisposalReason) {
@@ -142,6 +148,7 @@ final class AvatarIntegrationController {
     private var retryAvailable = false
     private var retryConsumed = false
     private var terminated = false
+    private var latestProjection: AvatarProjection?
 
     private struct ProfileKey: Equatable, Sendable {
         let id: UUID
@@ -156,6 +163,9 @@ final class AvatarIntegrationController {
     private(set) var isSurfaceAttached = false
     var onReadinessChange: ((AvatarReadiness, Bool) -> Void)?
     var onSurfaceAttachmentChange: ((Bool) -> Void)?
+    var onPresentationPolicyChange:
+        ((EffectiveVisibility, Bool) -> Void)?
+    var onPresentationClear: (() -> Void)?
 
     init(
         adapter: MillerAvatarProfileAdapter,
@@ -194,6 +204,7 @@ final class AvatarIntegrationController {
             resetRetryAuthority()
             disposeCurrent(reason: .operator)
             readiness = .disabled
+            notifyPresentationPolicy()
             return
         }
 
@@ -201,6 +212,7 @@ final class AvatarIntegrationController {
             resetRetryAuthority()
             disposeCurrent(reason: .operator)
             readiness = .unavailable(.profileMissing)
+            notifyPresentationPolicy()
             return
         }
 
@@ -210,13 +222,16 @@ final class AvatarIntegrationController {
         } else if let surface {
             surface.setReducedMotion(reduceMotion)
             applyVisibilityToCurrentSurface()
+            notifyPresentationPolicy()
             return
         }
 
         guard desiredVisibility == .visible else {
             readiness = .starting
+            notifyPresentationPolicy()
             return
         }
+        notifyPresentationPolicy()
         requestProfile(id: selectedProfileID, disposalReason: .operator)
     }
 
@@ -257,6 +272,7 @@ final class AvatarIntegrationController {
         guard !terminated else { return }
         reduceMotion = enabled
         surface?.setReducedMotion(enabled)
+        notifyPresentationPolicy()
     }
 
     func show() {
@@ -264,8 +280,10 @@ final class AvatarIntegrationController {
         desiredVisibility = .visible
         if let surface {
             surface.setVisibility(.visible)
+            notifyPresentationPolicy()
             return
         }
+        notifyPresentationPolicy()
         guard enabled,
               !awaitingExplicitRetry,
               let selectedProfileID
@@ -276,22 +294,25 @@ final class AvatarIntegrationController {
     func hide() {
         guard !terminated else { return }
         desiredVisibility = .hidden
-        guard let surface else { return }
-        switch surfaceState {
-        case .live, .liveSuspended:
-            surface.setVisibility(.hidden)
-        default:
-            disposeCurrent(reason: .hiddenBeforeLive)
-            if enabled, selectedProfileID != nil {
-                readiness = .starting
+        if let surface {
+            switch surfaceState {
+            case .live, .liveSuspended:
+                surface.setVisibility(.hidden)
+            default:
+                disposeCurrent(reason: .hiddenBeforeLive)
+                if enabled, selectedProfileID != nil {
+                    readiness = .starting
+                }
             }
         }
+        notifyPresentationPolicy()
     }
 
     func occlude() {
         guard !terminated else { return }
         desiredVisibility = .occluded
         surface?.setVisibility(.occluded)
+        notifyPresentationPolicy()
     }
 
     func screenChanged() {
@@ -321,12 +342,14 @@ final class AvatarIntegrationController {
         resetRetryAuthority()
         disposeCurrent(reason: .operator)
         readiness = .disabled
+        notifyPresentationPolicy()
     }
 
     func close() {
         guard !terminated else { return }
         desiredVisibility = .hidden
         disposeCurrent(reason: .operator)
+        notifyPresentationPolicy()
         if enabled, selectedProfileID != nil, !awaitingExplicitRetry {
             readiness = .starting
         }
@@ -340,8 +363,16 @@ final class AvatarIntegrationController {
         disposeCurrent(reason: .termination)
         onReadinessChange = nil
         onSurfaceAttachmentChange = nil
+        onPresentationPolicyChange = nil
+        onPresentationClear = nil
         hostRegion = nil
         readiness = .disabled
+    }
+
+    func project(_ projection: AvatarProjection) {
+        guard !terminated else { return }
+        latestProjection = projection
+        applyLatestProjection()
     }
 
     static func readiness(for failure: FailureCode) -> AvatarReadiness {
@@ -407,7 +438,14 @@ final class AvatarIntegrationController {
         disposalReason: DisposalReason
     ) {
         guard !terminated, desiredVisibility == .visible else { return }
-        disposeCurrent(reason: disposalReason)
+        if surface != nil {
+            disposeCurrent(reason: disposalReason)
+        } else if latestProjection?.phase != .idle {
+            // There is no owned renderer to dispose, but do not replay a
+            // semantic payload that predates this replacement.
+            latestProjection = nil
+            onPresentationClear?()
+        }
         requestedLoad = false
         ownerGeneration &+= 1
         let owner = ownerGeneration
@@ -425,6 +463,7 @@ final class AvatarIntegrationController {
         fresh.setReducedMotion(reduceMotion)
         fresh.setVisibility(.visible)
         fresh.start()
+        applyLatestProjection()
     }
 
     private func receive(
@@ -439,7 +478,9 @@ final class AvatarIntegrationController {
             if !awaitingExplicitRetry {
                 readiness = .unavailable(.rendererFailed)
             }
+            latestProjection = nil
             detachCurrentSurface(disposeReason: nil)
+            onPresentationClear?()
         case .starting, .loading:
             readiness = .starting
         case .rendererReady:
@@ -498,14 +539,38 @@ final class AvatarIntegrationController {
         awaitingExplicitRetry = true
         self.retryAvailable = retryAvailable
         readiness = failure
+        latestProjection = nil
         detachCurrentSurface(disposeReason: .failure)
+        onPresentationClear?()
     }
 
     private func disposeCurrent(reason: DisposalReason) {
         reconciliationGeneration &+= 1
         reconciliationTask?.cancel()
         reconciliationTask = nil
+        latestProjection = nil
         detachCurrentSurface(disposeReason: reason)
+        onPresentationClear?()
+    }
+
+    private func applyLatestProjection() {
+        guard let projection = latestProjection,
+              let surface,
+              let phase = PresentationPhase(rawValue: projection.phase.rawValue),
+              let visibility = EffectiveVisibility(rawValue: projection.visibility.rawValue)
+        else { return }
+        let owner = ownerGeneration
+        guard isCurrent(surface, owner: owner) else { return }
+        surface.project(ProjectPhasePayload(
+            projectionSequence: projection.projectionSequence,
+            generationID: projection.generationID,
+            phase: phase,
+            playbackID: projection.playbackID
+        ))
+        guard isCurrent(surface, owner: owner) else { return }
+        surface.setVisibility(visibility)
+        guard isCurrent(surface, owner: owner) else { return }
+        surface.setReducedMotion(projection.reduceMotion)
     }
 
     private func detachCurrentSurface(disposeReason: DisposalReason?) {
@@ -559,6 +624,15 @@ final class AvatarIntegrationController {
         awaitingExplicitRetry = false
         retryAvailable = false
         retryConsumed = false
+    }
+
+    private var effectiveVisibility: EffectiveVisibility {
+        guard enabled, selectedProfileID != nil else { return .hidden }
+        return desiredVisibility
+    }
+
+    private func notifyPresentationPolicy() {
+        onPresentationPolicyChange?(effectiveVisibility, reduceMotion)
     }
 
     private func isCurrent(

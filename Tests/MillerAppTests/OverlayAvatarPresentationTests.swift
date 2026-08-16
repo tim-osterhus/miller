@@ -92,6 +92,208 @@ struct OverlayAvatarPresentationTests {
     }
 
     @Test
+    func synchronousProjectionFailureDetachesBeforeOneBoundedPresentationClear() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        var coordinator: AvatarProjectionCoordinator!
+        var projections = [AvatarProjection]()
+        coordinator = AvatarProjectionCoordinator {
+            projections.append($0)
+            integration.project($0)
+        }
+        integration.onPresentationClear = {
+            coordinator.clearPresentation()
+        }
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let surface = try #require(factory.records.first)
+        surface.synchronousProjectionFailure = true
+
+        let turnID = TurnID()
+        coordinator.beginTypedTurn(turnID)
+
+        #expect(projections.map(\.phase) == [.thinking, .idle])
+        #expect(surface.projectionCalls.count == 1)
+        #expect(!surface.callsAfterDetach)
+        #expect(surface.disposeReasons == [.failure])
+        #expect(!integration.isSurfaceAttached)
+
+        integration.retry()
+        try await eventually {
+            factory.records.count == 2
+                && factory.records.last?.projectionCalls.count == 1
+        }
+        let retry = try #require(factory.records.last)
+        coordinator.projectTypedState(.responding, for: turnID)
+        #expect(retry.projectionCalls.count == 2)
+        #expect(retry.projectionCalls.last?.phase == .responding)
+    }
+
+    @Test
+    func projectionTargetsCurrentSurfaceAndPreservesSessionAcrossReplacementAndDisable() async throws {
+        let profileA = UUID()
+        let profileB = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileA, additionalID: profileB),
+            surfaceFactory: factory.make
+        )
+        var coordinator: AvatarProjectionCoordinator!
+        coordinator = AvatarProjectionCoordinator { integration.project($0) }
+        integration.onPresentationClear = {
+            coordinator.clearPresentation()
+        }
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileA,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let first = try #require(factory.records.first)
+        let turnID = TurnID()
+        coordinator.beginTypedTurn(turnID)
+        coordinator.projectTypedState(.waiting, for: turnID)
+        #expect(first.projectionCalls.count == 1)
+
+        coordinator.projectTypedState(.responding, for: turnID)
+        #expect(first.projectionCalls.count == 2)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileB,
+            reduceMotion: false
+        )
+        try await eventually { factory.records.count == 2 }
+        let replacement = try #require(factory.records.last)
+        #expect(first.projectionCalls.count == 2)
+        #expect(replacement.projectionCalls.count == 1)
+        #expect(replacement.projectionCalls.last?.phase == .idle)
+
+        coordinator.projectTypedState(.responding, for: turnID)
+        #expect(first.projectionCalls.count == 2)
+        #expect(replacement.projectionCalls.count == 2)
+        #expect(replacement.projectionCalls.last?.phase == .responding)
+
+        integration.disable()
+        #expect(replacement.disposeReasons == [.operator])
+        coordinator.projectTypedState(.waiting, for: turnID)
+        #expect(replacement.projectionCalls.count == 2)
+        #expect(coordinator.lastProjection?.phase == .thinking)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileB,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually {
+            factory.records.count == 3
+                && factory.records.last?.projectionCalls.count == 1
+        }
+        let reenabled = try #require(factory.records.last)
+        #expect(reenabled.projectionCalls.count == 1)
+        #expect(reenabled.projectionCalls.last?.phase == .idle)
+        coordinator.projectTypedState(.waiting, for: turnID)
+        #expect(reenabled.projectionCalls.count == 2)
+        #expect(reenabled.projectionCalls.last?.phase == .thinking)
+        #expect(reenabled.projectionCalls.last?.generationID ==
+            coordinator.currentGenerationID)
+
+        let staleTurn = TurnID()
+        coordinator.beginTypedTurn(staleTurn)
+        coordinator.projectTypedState(.responding, for: staleTurn)
+        let staleCount = reenabled.projectionCalls.count
+        coordinator.projectTypedState(.failed, for: turnID)
+        #expect(reenabled.projectionCalls.count == staleCount)
+    }
+
+    @Test
+    func clearingDisposalDropsUnwiredLatestProjectionBeforeFreshSurface() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        let projection = try AvatarProjection(
+            projectionSequence: 1,
+            generationID: UUID(),
+            phase: .responding,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: nil
+        )
+
+        integration.project(projection)
+        integration.update(
+            enabled: false,
+            selectedProfileID: nil,
+            reduceMotion: false
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually {
+            factory.records.count == 1
+                && factory.records.first?.projectionCalls.isEmpty == true
+        }
+        #expect(factory.records.first?.projectionCalls.isEmpty == true)
+    }
+
+    @Test
+    func effectiveAvatarPolicyIsHiddenWhenDisabledOrProfileMissing() {
+        let profileID = UUID()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID)
+        )
+        var policies = [(EffectiveVisibility, Bool)]()
+        integration.onPresentationPolicyChange = { visibility, reduceMotion in
+            policies.append((visibility, reduceMotion))
+        }
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        #expect(policies.last?.0 == .visible)
+
+        integration.disable()
+        #expect(policies.last?.0 == .hidden)
+
+        integration.show()
+        #expect(policies.last?.0 == .hidden)
+        integration.update(
+            enabled: true,
+            selectedProfileID: nil,
+            reduceMotion: false
+        )
+        #expect(policies.last?.0 == .hidden)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        #expect(policies.last?.0 == .visible)
+    }
+
+    @Test
     func quarantinedProfileNeverOffersRendererRetry() async throws {
         let profileID = UUID()
         let factory = SurfaceFactory()
@@ -508,9 +710,13 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     var startCount = 0
     var loadCount = 0
     var disposeReasons: [DisposalReason] = []
+    var projectionCalls: [ProjectPhasePayload] = []
     var visibilityCalls: [EffectiveVisibility] = []
     var reducedMotionCalls: [Bool] = []
     var loadDisposition: ProfileLoadDisposition = .accepted
+    var synchronousProjectionFailure = false
+    var callsAfterDetach = false
+    private var disposed = false
 
     func start() { startCount += 1 }
 
@@ -522,16 +728,27 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
         return loadDisposition
     }
 
+    func project(_ payload: ProjectPhasePayload) {
+        if disposed { callsAfterDetach = true }
+        projectionCalls.append(payload)
+        if synchronousProjectionFailure {
+            onState?(.failed(.renderFailed, retryAvailable: true))
+        }
+    }
+
     func setVisibility(_ visibility: EffectiveVisibility) {
+        if disposed { callsAfterDetach = true }
         visibilityCalls.append(visibility)
     }
 
     func setReducedMotion(_ enabled: Bool) {
+        if disposed { callsAfterDetach = true }
         reducedMotionCalls.append(enabled)
     }
 
     func dispose(reason: DisposalReason) {
         disposeReasons.append(reason)
+        disposed = true
     }
 
     func emit(_ state: MillerAvatarSurfaceState) {

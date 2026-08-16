@@ -506,6 +506,7 @@ final class AppPresentationModel: ObservableObject {
     private let liveTranscriptRecorder: LiveVoiceTranscriptRecorder
     private let voiceHistory: VoiceHistoryDependencies
     private let capabilityController: CapabilityController?
+    private let avatarProjectionCoordinator: AvatarProjectionCoordinator?
     private let prepareLiveStart: @MainActor @Sendable (
         VoiceActivationSource
     ) async -> Bool
@@ -566,6 +567,7 @@ final class AppPresentationModel: ObservableObject {
         liveTranscriptRecorder: LiveVoiceTranscriptRecorder = .init(),
         voiceHistory: VoiceHistoryDependencies = .unavailable,
         capabilityController: CapabilityController? = nil,
+        avatarProjectionCoordinator: AvatarProjectionCoordinator? = nil,
         prepareLiveStart: @escaping @MainActor @Sendable (
             VoiceActivationSource
         ) async -> Bool = { _ in false },
@@ -580,6 +582,7 @@ final class AppPresentationModel: ObservableObject {
         self.liveTranscriptRecorder = liveTranscriptRecorder
         self.voiceHistory = voiceHistory
         self.capabilityController = capabilityController
+        self.avatarProjectionCoordinator = avatarProjectionCoordinator
         self.prepareLiveStart = prepareLiveStart
         self.validateLiveStart = validateLiveStart
         self.liveVoiceFinished = liveVoiceFinished
@@ -1177,6 +1180,7 @@ final class AppPresentationModel: ObservableObject {
                 else { return }
                 self.pendingVoiceHistoryAttachment = nil
                 voiceHistoryStatus = "Selected voice history is no longer available."
+                avatarProjectionCoordinator?.reset(reason: .cancelled)
                 return
             }
         } else {
@@ -1198,11 +1202,13 @@ final class AppPresentationModel: ObservableObject {
             activeTurnID = turnID
             typedSubmissionPending = false
             voiceState = .unavailable
+            avatarProjectionCoordinator?.beginTypedTurn(turnID)
             observe(turnID)
             await refresh()
         } catch {
             presentationState = .failed
             errorCode = Self.code(for: error)
+            avatarProjectionCoordinator?.reset(reason: .cancelled)
             await refreshLiveVoiceAvailability(
                 allowStartPending: false,
                 allowTypedSubmissionPending: true
@@ -1823,6 +1829,23 @@ final class AppPresentationModel: ObservableObject {
         if voiceState != .failed {
             voiceState = cleanup.terminalState
         }
+        if let liveTranscriptSessionID {
+            switch cleanup.terminalState {
+            case .stopped, .failed:
+                avatarProjectionCoordinator?.projectLiveState(
+                    cleanup.terminalState,
+                    for: liveTranscriptSessionID
+                )
+            case .available, .connecting, .listening, .responding, .speaking,
+                 .closed, .unavailable:
+                break
+            }
+            avatarProjectionCoordinator?.resetLiveSession(
+                liveTranscriptSessionID,
+                reason: cleanup.terminalState == .stopped
+                    ? .stopped : .cancelled
+            )
+        }
         let waiters = liveVoiceCleanupWaiters
         liveVoiceCleanupWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
@@ -1936,12 +1959,19 @@ final class AppPresentationModel: ObservableObject {
             }
             guard generation == liveVoiceEventGeneration else { return }
             liveTranscriptSessionID = id
+            avatarProjectionCoordinator?.beginLiveSession(id)
         case let .state(state):
             if state == .closed || state == .stopped || state == .failed {
                 nextLiveVoiceEventGeneration()
             }
             voiceState = state
-        case .transcriptDelta, .transcriptDone:
+            if let liveTranscriptSessionID {
+                avatarProjectionCoordinator?.projectLiveState(
+                    state,
+                    for: liveTranscriptSessionID
+                )
+            }
+        case let .transcriptDelta(role, _), let .transcriptDone(role, _):
             var persistenceFailed = false
             do {
                 try await liveTranscriptRecorder.record(event)
@@ -1952,12 +1982,24 @@ final class AppPresentationModel: ObservableObject {
             if persistenceFailed { presentTranscriptPersistenceFailure() }
             liveTranscriptProjection.record(event)
             publishLiveTranscriptTurns(liveTranscriptProjection.turns)
+            if let liveTranscriptSessionID {
+                avatarProjectionCoordinator?.projectLiveTranscriptRole(
+                    role,
+                    for: liveTranscriptSessionID
+                )
+            }
         case let .status(status):
             liveVoiceReasoningStatus = status
         case let .failed(code):
             nextLiveVoiceEventGeneration()
             liveVoiceFailureCode = Self.sanitizedLiveCode(code)
             voiceState = .failed
+            if let liveTranscriptSessionID {
+                avatarProjectionCoordinator?.projectLiveState(
+                    .failed,
+                    for: liveTranscriptSessionID
+                )
+            }
         }
     }
 
@@ -1990,7 +2032,7 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func stop() async {
-        guard activeTurnID != nil else {
+        guard let turnID = activeTurnID else {
             return
         }
         do {
@@ -2000,11 +2042,13 @@ final class AppPresentationModel: ObservableObject {
             reasoningStatus = nil
             turnObservation?.cancel()
             presentationState = .stopped
+            avatarProjectionCoordinator?.projectTypedState(.stopped, for: turnID)
             await refresh()
             await refreshLiveVoiceAvailability()
         } catch {
             presentationState = .failed
             errorCode = Self.code(for: error)
+            avatarProjectionCoordinator?.projectTypedState(.failed, for: turnID)
         }
     }
 
@@ -2014,6 +2058,7 @@ final class AppPresentationModel: ObservableObject {
         }
         capabilityController?.declinePendingApprovals(for: .close)
         nextConversationProjectionGeneration()
+        avatarProjectionCoordinator?.reset(reason: .replaced)
         selectedConversationID = ConversationID()
         publishVisibleTurns([])
         draft = ""
@@ -2028,6 +2073,7 @@ final class AppPresentationModel: ObservableObject {
             return
         }
         let generation = nextConversationProjectionGeneration()
+        avatarProjectionCoordinator?.reset(reason: .replaced)
         selectedConversationID = id
         await refreshTurns(generation: generation)
         requestInputFocus()
@@ -2066,6 +2112,10 @@ final class AppPresentationModel: ObservableObject {
     }
 
     func refresh() async {
+        await refresh(originatingTurnID: nil)
+    }
+
+    private func refresh(originatingTurnID: TurnID?) async {
         guard !providerMutationPending else { return }
         let generation = nextConversationProjectionGeneration()
         do {
@@ -2074,14 +2124,20 @@ final class AppPresentationModel: ObservableObject {
             )
             guard generation == conversationProjectionGeneration else { return }
             conversations = loaded
-            await refreshTurns(generation: generation)
+            await refreshTurns(
+                generation: generation,
+                originatingTurnID: originatingTurnID
+            )
         } catch {
             guard generation == conversationProjectionGeneration else { return }
-            fail(error)
+            fail(error, originatingTurnID: originatingTurnID)
         }
     }
 
-    private func refreshTurns(generation: UInt64) async {
+    private func refreshTurns(
+        generation: UInt64,
+        originatingTurnID: TurnID? = nil
+    ) async {
         let conversationID = selectedConversationID
         do {
             let loaded = try await dependencies.loadTurns(conversationID)
@@ -2091,7 +2147,7 @@ final class AppPresentationModel: ObservableObject {
         } catch {
             guard generation == conversationProjectionGeneration,
                   conversationID == selectedConversationID else { return }
-            fail(error)
+            fail(error, originatingTurnID: originatingTurnID)
         }
     }
 
@@ -2112,7 +2168,7 @@ final class AppPresentationModel: ObservableObject {
                         }
                     }
                 } catch {
-                    fail(error)
+                    fail(error, originatingTurnID: turnID)
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(30))
@@ -2121,7 +2177,12 @@ final class AppPresentationModel: ObservableObject {
     }
 
     private func apply(_ turn: Turn) async {
+        guard activeTurnID == turn.id else { return }
         presentationState = PresentationDerivation.state(for: turn)
+        avatarProjectionCoordinator?.projectTypedState(
+            presentationState,
+            for: turn.id
+        )
         if turn.state.isTerminal {
             activeTurnID = nil
             reasoningStatus = nil
@@ -2129,15 +2190,36 @@ final class AppPresentationModel: ObservableObject {
                 errorCode = turn.errorCode
             }
         }
-        await refresh()
+        await refresh(originatingTurnID: turn.id)
         if turn.state.isTerminal {
             await refreshLiveVoiceAvailability()
         }
     }
 
-    private func fail(_ error: Error) {
+    private func fail(
+        _ error: Error,
+        originatingTurnID: TurnID? = nil
+    ) {
+        if let originatingTurnID {
+            guard activeTurnID == originatingTurnID else { return }
+            presentationState = .failed
+            errorCode = Self.code(for: error)
+            avatarProjectionCoordinator?.projectTypedState(
+                .failed,
+                for: originatingTurnID
+            )
+            return
+        }
         presentationState = .failed
         errorCode = Self.code(for: error)
+        if let activeTurnID {
+            avatarProjectionCoordinator?.projectTypedState(
+                .failed,
+                for: activeTurnID
+            )
+        } else if liveTranscriptSessionID == nil {
+            avatarProjectionCoordinator?.reset(reason: .cancelled)
+        }
     }
 
     private func apply(_ snapshot: ProviderSettingsSnapshot) {
@@ -2200,6 +2282,7 @@ final class AppPresentationModel: ObservableObject {
         liveVoiceFailureCode = nil
         liveTranscriptPersistenceMessage = nil
         liveVoiceMuted = false
+        avatarProjectionCoordinator?.reset(reason: .operator)
         voiceState = liveVoiceAvailability
     }
 
@@ -2633,6 +2716,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private let preferenceRepository: SQLitePreferenceRepository
     private let avatarSettings: AvatarSettingsModel
     private let avatarIntegration: AvatarIntegrationController
+    private let avatarProjectionCoordinator: AvatarProjectionCoordinator
     private let systemReducedMotionSource: SystemReducedMotionSource
     private let wakeProduction: WakeWordProductionController
     private let wakeSettings: WakeWordSettingsController
@@ -3061,6 +3145,29 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             adapter: avatarProfileAdapter,
             profileStore: avatarProfileStore
         )
+        let avatarProjectionCoordinator = AvatarProjectionCoordinator(
+            visibility: .hidden,
+            reduceMotion: systemReducedMotionSource.value
+        )
+        avatarProjectionCoordinator.onProjection = { [weak avatarIntegration] projection in
+            avatarIntegration?.project(projection)
+        }
+        avatarIntegration.onPresentationPolicyChange = {
+            [weak avatarProjectionCoordinator] visibility, reduceMotion in
+            let avatarVisibility: AvatarVisibility = switch visibility {
+            case .visible: .visible
+            case .occluded: .occluded
+            case .hidden: .hidden
+            }
+            avatarProjectionCoordinator?.setPresentationPolicy(
+                visibility: avatarVisibility,
+                reduceMotion: reduceMotion
+            )
+        }
+        avatarIntegration.onPresentationClear = {
+            [weak avatarProjectionCoordinator] in
+            avatarProjectionCoordinator?.clearPresentation()
+        }
         let avatarSettings = AvatarSettingsModel(
             adapter: avatarProfileAdapter,
             preferences: preferenceRepository,
@@ -3089,6 +3196,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         self.systemReducedMotionSource = systemReducedMotionSource
         self.avatarSettings = avatarSettings
         self.avatarIntegration = avatarIntegration
+        self.avatarProjectionCoordinator = avatarProjectionCoordinator
         let microphoneOwnership = MicrophoneOwnership()
         let wakeIntegration = WakeWordLiveIntegration()
         let wakeModelPaths = try? WakeWordRuntimeResources.resolve(
@@ -3421,6 +3529,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             liveTranscriptRecorder: liveTranscriptRecorder,
             voiceHistory: voiceHistory,
             capabilityController: capabilityController,
+            avatarProjectionCoordinator: avatarProjectionCoordinator,
             prepareLiveStart: { [weak wakeIntegration] source in
                 await wakeIntegration?.prepareLiveStart(source) ?? false
             },
@@ -3816,12 +3925,16 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         avatarSettings.onStateChange = nil
         avatarSettings.onCommittedProfileChange = nil
         avatarSettings.onRuntimeRetry = nil
+        avatarIntegration.onPresentationPolicyChange = nil
+        avatarIntegration.onPresentationClear = nil
+        avatarProjectionCoordinator.onProjection = { _ in }
         avatarIntegration.disposeForTermination()
         _ = await wakeProduction.shutdown()
         await model.shutdownLiveVoice()
         await liveController?.shutdown()
         await capabilityController.shutdown()
         await model.abandonLiveVoiceSession()
+        avatarProjectionCoordinator.reset(reason: .operator)
         await supervisor.shutdown()
     }
 
