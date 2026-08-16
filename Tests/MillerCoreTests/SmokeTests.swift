@@ -252,37 +252,65 @@ private enum CoreDomainChecks {
     }
 
     static func avatarProjectionIsBoundedAndContainsNoAuthority() throws {
-        let aboveRange = AvatarProjection(
-            generation: 7,
+        let generationID = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let playbackID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let aboveRange = try AvatarProjection(
+            projectionSequence: 1,
+            generationID: generationID,
             phase: .speaking,
-            isVisible: true,
-            reduceMotion: true,
-            animationIntent: .speaking,
-            gazeIntent: .center,
-            mouthEnvelope: 2
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: try AvatarMouthCue(
+                generationID: generationID,
+                playbackID: playbackID,
+                cueIndex: 1,
+                playbackOffsetMilliseconds: 100,
+                envelope: 2
+            )
         )
-        try require(aboveRange.mouthEnvelope == 1, "Mouth envelope must clamp above the range")
+        try require(
+            aboveRange.mouthCue?.envelope == 1,
+            "Mouth envelope must clamp above the range"
+        )
 
-        let belowRange = AvatarProjection(
-            generation: 7,
+        let belowRange = try AvatarProjection(
+            projectionSequence: 2,
+            generationID: generationID,
             phase: .speaking,
-            isVisible: true,
-            reduceMotion: true,
-            animationIntent: .speaking,
-            mouthEnvelope: -1
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: try AvatarMouthCue(
+                generationID: generationID,
+                playbackID: playbackID,
+                cueIndex: 2,
+                playbackOffsetMilliseconds: 200,
+                envelope: -1
+            )
         )
-        try require(belowRange.mouthEnvelope == 0, "Mouth envelope must clamp below the range")
+        try require(
+            belowRange.mouthCue?.envelope == 0,
+            "Mouth envelope must clamp below the range"
+        )
 
-        let notANumber = AvatarProjection(
-            generation: 7,
-            phase: .speaking,
-            isVisible: true,
-            reduceMotion: true,
-            animationIntent: .speaking,
-            mouthEnvelope: .nan
+        var rejectedNonFiniteEnvelope = false
+        do {
+            _ = try AvatarMouthCue(
+                generationID: generationID,
+                playbackID: playbackID,
+                cueIndex: 3,
+                playbackOffsetMilliseconds: 300,
+                envelope: .nan
+            )
+        } catch AvatarProjectionError.nonFiniteEnvelope {
+            rejectedNonFiniteEnvelope = true
+        }
+        try require(
+            rejectedNonFiniteEnvelope,
+            "A non-finite mouth envelope must be rejected"
         )
-        try require(notANumber.mouthEnvelope == nil, "A non-finite mouth envelope must be omitted")
-        _ = try JSONEncoder().encode(notANumber)
+        _ = try JSONEncoder().encode(aboveRange)
 
         let labels = Set(Mirror(reflecting: aboveRange).children.compactMap(\.label))
         let forbidden = Set([

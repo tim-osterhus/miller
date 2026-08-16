@@ -1,0 +1,53 @@
+{
+  "schema": "miller-avatar.integration-fixture/v1",
+  "cases": [
+    {
+      "name": "duplicate-projection-sequence",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": null, "phase": "idle", "playback_id": null }],
+      "input": { "type": "project", "projection_sequence": 1, "generation_id": null, "phase": "listening", "playback_id": null },
+      "expected": { "last_projection_sequence": 1, "generation_id": null, "phase": "idle", "playback_id": null, "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "decreasing-projection-sequence",
+      "prelude": [{ "type": "project", "projection_sequence": 2, "generation_id": null, "phase": "idle", "playback_id": null }],
+      "input": { "type": "project", "projection_sequence": 1, "generation_id": null, "phase": "listening", "playback_id": null },
+      "expected": { "last_projection_sequence": 2, "generation_id": null, "phase": "idle", "playback_id": null, "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "stale-generation",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111" }],
+      "input": { "type": "mouth", "generation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 100, "scalar": 0.5 },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111", "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "stale-playback",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111" }],
+      "input": { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "22222222-2222-4222-8222-222222222222", "cue_index": 1, "playback_offset_ms": 100, "scalar": 0.5 },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111", "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "duplicate-cue-index",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111" }, { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 100, "scalar": 0.5 }],
+      "input": { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 200, "scalar": 0.5 },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111", "last_cue_index": 1, "last_playback_offset_ms": 100, "mouth_scalar": 0.5, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "decreasing-playback-offset",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111" }, { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 200, "scalar": 0.5 }],
+      "input": { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 2, "playback_offset_ms": 100, "scalar": 0.5 },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111", "last_cue_index": 1, "last_playback_offset_ms": 200, "mouth_scalar": 0.5, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "nonfinite-equivalent-scalar-type",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111" }],
+      "input": { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 100, "scalar": "NaN" },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "speaking", "playback_id": "11111111-1111-4111-8111-111111111111", "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    },
+    {
+      "name": "mouth-outside-speaking",
+      "prelude": [{ "type": "project", "projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "thinking", "playback_id": null }],
+      "input": { "type": "mouth", "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "playback_id": "11111111-1111-4111-8111-111111111111", "cue_index": 1, "playback_offset_ms": 100, "scalar": 0.5 },
+      "expected": { "last_projection_sequence": 1, "generation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "phase": "thinking", "playback_id": null, "last_cue_index": null, "last_playback_offset_ms": null, "mouth_scalar": 0, "reduced_motion": false, "is_suspended": false, "is_terminated": false, "effects": [] }
+    }
+  ]
+}

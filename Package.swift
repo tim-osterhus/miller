@@ -113,7 +113,11 @@ let package = Package(
             ],
             linkerSettings: [.linkedFramework("WebKit")]
         ),
-        .testTarget(name: "MillerCoreTests", dependencies: ["MillerCore"]),
+        .testTarget(
+            name: "MillerCoreTests",
+            dependencies: ["MillerCore"],
+            resources: [.copy("Fixtures")]
+        ),
         .testTarget(
             name: "MillerStorageTests",
             dependencies: ["MillerStorage"]
