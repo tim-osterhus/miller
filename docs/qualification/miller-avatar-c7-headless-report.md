@@ -11,9 +11,10 @@ real Live audio, signing, notarization, publication, or M1 performance.
 
 ## Qualified source boundary
 
-- Miller's evaluated source was C6 head
-  `4be0f3b0e2a1fc51938d1aaa58e565c32b0e57aa` plus the reviewed C7 changes
-  described below. The exact C7 checkpoint commit remains to be recorded.
+- Miller's reviewed C7 implementation checkpoint is
+  `fb544cb5c3cf7ae0764a51bd473a0ca82973ed9b`. It descends from C6 head
+  `4be0f3b0e2a1fc51938d1aaa58e565c32b0e57aa`. This report's subsequent
+  documentation-only update does not change the qualified implementation.
 - Published Miller v0.1.2 commit
   `6280a38c3b0c0afa936f3af6550645306221ded4` is an ancestor of that head.
 - Miller resolves Miller Avatar `v0.1.0-alpha.3` at the exact reviewed commit
