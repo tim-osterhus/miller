@@ -39,3 +39,11 @@ public protocol LiveAudioPeerResponseFencing: LiveAudioPeer {
 public protocol LiveAudioPeerConnectionMonitoring: LiveAudioPeer {
     func waitForConnectionFailure() async throws
 }
+
+/// Optional bounded observation of the already-owned remote audio element.
+/// Implementations expose only playback state, a monotonic offset, and a
+/// normalized envelope; they never expose PCM or browser/provider objects.
+@MainActor
+public protocol LiveAudioOutputMonitoring: LiveAudioPeer {
+    func outputSamples() -> AsyncStream<LiveAudioOutputSample>
+}

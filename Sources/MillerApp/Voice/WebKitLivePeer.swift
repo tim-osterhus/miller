@@ -24,6 +24,7 @@ enum WebKitLivePeerScriptOperation: Hashable, Sendable {
     case applyAnswer
     case setMuted(Bool)
     case connectionState
+    case outputSample
     case close
 }
 
@@ -147,7 +148,7 @@ extension WebKitLivePeerScriptEvaluating {
 
 @MainActor
 final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
-    LiveAudioPeerResponseFencing {
+    LiveAudioPeerResponseFencing, LiveAudioOutputMonitoring {
     static let baseOrigin = URL(string: "https://miller.invalid/")!
     static let maximumSDPBytes = 65_536
     private static let maximumResultBytes = 65_536
@@ -166,6 +167,10 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
     private let operationTimeout: Duration
     private var state: State = .idle
     private var activeResponseGeneration: UInt64?
+    private var outputStream: AsyncStream<LiveAudioOutputSample>?
+    private var outputContinuation: AsyncStream<LiveAudioOutputSample>.Continuation?
+    private var outputSamplingTask: Task<Void, Never>?
+    private var outputSamplingGeneration: UInt64 = 0
 
     init(
         evaluator: any WebKitLivePeerScriptEvaluating,
@@ -305,13 +310,74 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
         }
     }
 
+    func outputSamples() -> AsyncStream<LiveAudioOutputSample> {
+        guard state == .connected else {
+            return AsyncStream { continuation in continuation.finish() }
+        }
+        if let outputStream { return outputStream }
+
+        let (stream, continuation) = AsyncStream<LiveAudioOutputSample>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        outputStream = stream
+        outputContinuation = continuation
+        outputSamplingGeneration &+= 1
+        let generation = outputSamplingGeneration
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.finishOutputSampling(generation: generation)
+            }
+        }
+        outputSamplingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var samplingFailed = false
+            while !Task.isCancelled,
+                  self.outputSamplingGeneration == generation,
+                  self.state == .connected
+            {
+                do {
+                    let sample = try await self.readOutputSample()
+                    guard self.outputSamplingGeneration == generation,
+                          self.state == .connected
+                    else { break }
+                    continuation.yield(sample)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    samplingFailed = true
+                    break
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(34))
+                } catch {
+                    break
+                }
+            }
+            continuation.finish()
+            if samplingFailed {
+                self.finishOutputSampling(generation: generation)
+                // Do not call close on this task: finishOutputSampling cancels
+                // the sampling task itself. An independent task completes the
+                // page teardown without inheriting that cancellation.
+                let closeTask = Task { @MainActor [weak self] in
+                    await self?.close()
+                }
+                await closeTask.value
+            } else {
+                self.finishOutputSampling(generation: generation)
+            }
+        }
+        return stream
+    }
+
     func close() async {
+        finishOutputSampling()
         guard state != .closed else { return }
+        state = .closed
         if let generation = activeResponseGeneration {
             activeResponseGeneration = nil
             await evaluator.invalidateResponse(generation: generation)
         }
-        state = .closed
         _ = try? await call(.close)
     }
 
@@ -377,6 +443,39 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
         return result
     }
 
+    private func readOutputSample() async throws -> LiveAudioOutputSample {
+        let encoded = try await call(.outputSample)
+        guard let data = encoded.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(
+                  OutputSamplePayload.self,
+                  from: data
+              )
+        else {
+            return LiveAudioOutputSample(
+                isPlaying: false,
+                offsetMilliseconds: 0,
+                envelope: 0
+            )
+        }
+        let envelope = payload.envelope?.isFinite == true
+            ? min(max(payload.envelope ?? 0, 0), 1) : 0
+        return LiveAudioOutputSample(
+            isPlaying: payload.isPlaying ?? false,
+            offsetMilliseconds: payload.offsetMilliseconds ?? 0,
+            envelope: envelope
+        )
+    }
+
+    private func finishOutputSampling(generation: UInt64? = nil) {
+        if let generation, generation != outputSamplingGeneration { return }
+        outputSamplingGeneration &+= 1
+        outputSamplingTask?.cancel()
+        outputSamplingTask = nil
+        outputContinuation?.finish()
+        outputContinuation = nil
+        outputStream = nil
+    }
+
     private func callResponse(generation: UInt64) async throws -> String {
         let race = WebKitLivePeerCallRace<String>()
         let timeout = operationTimeout
@@ -425,6 +524,10 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
       let microphoneSource = null;
       let destination = null;
       let remoteStream = null;
+      let outputSource = null;
+      let outputAnalyser = null;
+      let lastOutputOffset = 0;
+      const maximumSafeInteger = 9007199254740991;
       let channel = null;
       let audio = null;
       let closed = false;
@@ -479,7 +582,15 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           audio.playsInline = true;
           audio.srcObject = remoteStream;
           pc.ontrack = event => {
-            if (event.track.kind === "audio") remoteStream.addTrack(event.track);
+            if (event.track.kind === "audio") {
+              remoteStream.addTrack(event.track);
+              if (!outputAnalyser) {
+                outputSource = audioContext.createMediaStreamSource(remoteStream);
+                outputAnalyser = audioContext.createAnalyser();
+                outputAnalyser.fftSize = 256;
+                outputSource.connect(outputAnalyser);
+              }
+            }
           };
           channel = pc.createDataChannel("oai-events");
           const offer = await pc.createOffer();
@@ -528,6 +639,46 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (!pc || closed) throw new Error("invalid state");
           return pc.connectionState;
         },
+        async outputSample() {
+          if (!pc || closed || !audio) {
+            throw new Error("output unavailable");
+          }
+          if (!outputAnalyser) {
+            return JSON.stringify({
+              isPlaying: false,
+              offsetMilliseconds: lastOutputOffset,
+              envelope: 0
+            });
+          }
+          const values = new Uint8Array(outputAnalyser.fftSize);
+          outputAnalyser.getByteTimeDomainData(values);
+          let sum = 0;
+          for (const value of values) {
+            const centered = (value - 128) / 128;
+            sum += centered * centered;
+          }
+          const measured = values.length === 0
+            ? 0 : Math.sqrt(sum / values.length) * 2;
+          const envelope = Number.isFinite(measured)
+            ? Math.min(1, Math.max(0, measured)) : 0;
+          const currentTime = Number(audio.currentTime);
+          const measuredOffset = Number.isFinite(currentTime)
+            && currentTime >= 0 ? Math.floor(currentTime * 1000) : 0;
+          lastOutputOffset = Math.min(
+            maximumSafeInteger,
+            Math.max(lastOutputOffset, measuredOffset)
+          );
+          const tracks = remoteStream
+            ? remoteStream.getAudioTracks() : [];
+          const isPlaying = !audio.paused && !audio.ended
+            && audio.readyState >= 2
+            && tracks.some(track => track.readyState === "live");
+          return JSON.stringify({
+            isPlaying,
+            offsetMilliseconds: lastOutputOffset,
+            envelope
+          });
+        },
         async close() {
           if (closed) return "ok";
           closed = true;
@@ -535,6 +686,10 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (localStream) for (const track of localStream.getTracks()) track.stop();
           if (outboundStream) for (const track of outboundStream.getTracks()) track.stop();
           if (microphoneSource) microphoneSource.disconnect();
+          if (outputSource) outputSource.disconnect();
+          if (outputAnalyser) outputAnalyser.disconnect();
+          outputSource = null;
+          outputAnalyser = null;
           if (audioContext) { try { await audioContext.close(); } catch (_) {} }
           if (remoteStream) for (const track of remoteStream.getTracks()) track.stop();
           if (audio) { audio.pause(); audio.srcObject = null; audio.removeAttribute("src"); audio.load(); }
@@ -574,6 +729,12 @@ private final class WebKitLivePeerCallRace<Value: Sendable>: @unchecked Sendable
         }
         continuation?.resume(with: result)
     }
+}
+
+private struct OutputSamplePayload: Decodable {
+    let isPlaying: Bool?
+    let offsetMilliseconds: UInt64?
+    let envelope: Double?
 }
 
 @MainActor
@@ -622,6 +783,9 @@ private final class SystemWebKitLivePeerEvaluator: NSObject, WebKitLivePeerScrip
             arguments = ["muted": muted]
         case .connectionState:
             script = "return window.millerLive.connectionState()"
+            arguments = [:]
+        case .outputSample:
+            script = "return await window.millerLive.outputSample()"
             arguments = [:]
         case .close:
             script = "return await window.millerLive.close()"

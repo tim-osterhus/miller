@@ -62,11 +62,94 @@ struct WebKitLivePeerContractTests {
         #expect(html.contains("setLocalDescription(offer)"))
         #expect(html.contains("setRemoteDescription"))
         #expect(html.contains("track.enabled = !muted"))
+        #expect(html.contains("createMediaStreamSource(remoteStream)"))
+        #expect(html.contains("createAnalyser()"))
+        #expect(html.components(separatedBy: "createAnalyser()").count - 1 == 1)
+        #expect(html.contains("outputSample()"))
+        #expect(html.contains("outputSource.disconnect()"))
+        #expect(html.contains("outputAnalyser.disconnect()"))
+        #expect(!html.contains("createMediaStreamSource(localStream).connect"))
         #expect(html.contains("audio.srcObject = null"))
         #expect(!html.contains("<form"))
         #expect(!html.contains("<iframe"))
         #expect(!html.contains("src=\"http"))
         #expect(!html.contains("window.open"))
+    }
+
+    @Test
+    func outputSampleIsAClosedTypedOperationOnTheExistingPeer() async throws {
+        let evaluator = FakeScriptEvaluator(results: [
+            .prepareOffer: syntheticOffer,
+            .applyAnswer: "connected",
+            .outputSample: "{\"isPlaying\":true,\"offsetMilliseconds\":12,\"envelope\":0.5}",
+            .close: "ok",
+        ])
+        let peer = WebKitLivePeer(evaluator: evaluator)
+
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\n s=-\r\n")
+        _ = peer.outputSamples()
+        try await Task.sleep(for: .milliseconds(50))
+        await peer.close()
+        #expect(evaluator.calls.contains(.outputSample))
+    }
+
+    @Test
+    func samplingFailureClosesThePeerAndTerminatesTheOutputStreamOnce() async throws {
+        let evaluator = FailingOutputSampleEvaluator()
+        let peer = WebKitLivePeer(evaluator: evaluator)
+
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\n s=-\r\n")
+        let stream = peer.outputSamples()
+        let samples = Task { @MainActor in
+            var samples = [LiveAudioOutputSample]()
+            for await sample in stream {
+                samples.append(sample)
+            }
+            return samples
+        }
+
+        try await waitUntil { await MainActor.run { evaluator.closeCalls == 1 } }
+        #expect(await samples.value.count == 1)
+        await peer.close()
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(evaluator.closeCalls == 1)
+        #expect(evaluator.outputSampleCalls == 2)
+        #expect(await samples.value.count == 1)
+    }
+
+    @Test
+    func cancelledOutputConsumerStopsPollingWithoutClosingTheConnectedPeer() async throws {
+        let evaluator = PollingOutputSampleEvaluator()
+        let peer = WebKitLivePeer(evaluator: evaluator)
+
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\n s=-\r\n")
+        let stream = peer.outputSamples()
+        let probe = OutputConsumerProbe()
+        let consumer = Task { @MainActor in
+            for await sample in stream {
+                probe.firstSample = sample
+            }
+        }
+
+        try await waitUntil {
+            await MainActor.run {
+                probe.firstSample != nil && evaluator.outputSampleCalls >= 3
+            }
+        }
+        let callsAtCancellation = evaluator.outputSampleCalls
+        consumer.cancel()
+        await consumer.value
+        try await Task.sleep(for: .milliseconds(120))
+
+        #expect(evaluator.outputSampleCalls == callsAtCancellation)
+        #expect(evaluator.closeCalls == 0)
+        try await peer.setMuted(true)
+        await peer.close()
+        #expect(evaluator.closeCalls == 1)
     }
 
     @Test(arguments: [
@@ -350,6 +433,68 @@ private final class FakeScriptEvaluator: WebKitLivePeerScriptEvaluating {
         responseCalls += 1
         return "ok"
     }
+}
+
+@MainActor
+private final class FailingOutputSampleEvaluator: WebKitLivePeerScriptEvaluating {
+    private(set) var outputSampleCalls = 0
+    private(set) var closeCalls = 0
+
+    func evaluate(
+        _ operation: WebKitLivePeerScriptOperation,
+        answer: String?
+    ) async throws -> String {
+        switch operation {
+        case .prepareOffer:
+            return syntheticOffer
+        case .applyAnswer:
+            return "connected"
+        case .outputSample:
+            outputSampleCalls += 1
+            if outputSampleCalls == 1 {
+                return "{\"isPlaying\":true,\"offsetMilliseconds\":12,\"envelope\":0.5}"
+            }
+            throw FakeEvaluatorError.missingResult
+        case .close:
+            closeCalls += 1
+            return "ok"
+        default:
+            throw FakeEvaluatorError.missingResult
+        }
+    }
+}
+
+@MainActor
+private final class PollingOutputSampleEvaluator: WebKitLivePeerScriptEvaluating {
+    private(set) var outputSampleCalls = 0
+    private(set) var closeCalls = 0
+
+    func evaluate(
+        _ operation: WebKitLivePeerScriptOperation,
+        answer: String?
+    ) async throws -> String {
+        switch operation {
+        case .prepareOffer:
+            return syntheticOffer
+        case .applyAnswer:
+            return "connected"
+        case .outputSample:
+            outputSampleCalls += 1
+            return "{\"isPlaying\":true,\"offsetMilliseconds\":\(outputSampleCalls),\"envelope\":0.5}"
+        case .setMuted:
+            return "ok"
+        case .close:
+            closeCalls += 1
+            return "ok"
+        default:
+            throw FakeEvaluatorError.missingResult
+        }
+    }
+}
+
+@MainActor
+private final class OutputConsumerProbe {
+    var firstSample: LiveAudioOutputSample?
 }
 
 @MainActor

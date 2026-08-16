@@ -3412,6 +3412,13 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 releasePeer: { [livePeerHost] in
                     await MainActor.run { livePeerHost.removePeer() }
                 },
+                outputObservationSink: { [weak avatarProjectionCoordinator] sessionID,
+                                          observation in
+                    avatarProjectionCoordinator?.projectLiveOutput(
+                        observation,
+                        for: sessionID
+                    )
+                },
                 spawnedProcessVerifier: { pid in
                     try runtimeVerifier.verifyRunningProcess(
                         pid: pid,

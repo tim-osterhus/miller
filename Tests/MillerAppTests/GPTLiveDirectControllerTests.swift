@@ -5,6 +5,7 @@ import MillerLiveAudio
 import Testing
 @testable import MillerApp
 
+@Suite(.serialized)
 @MainActor
 struct GPTLiveDirectControllerTests {
     @Test
@@ -270,14 +271,16 @@ struct GPTLiveDirectControllerTests {
             }
         }
 
-        try await waitUntilDirectController { states.contains(.listening) }
+        try await waitUntilDirectController(timeout: .seconds(5)) {
+            states.contains(.listening)
+        }
         await dependencies.end()
         await run.value
 
         let manualRun = Task {
             try? await dependencies.start(LiveVoiceStartContext.manual) { _ in }
         }
-        try await waitUntilDirectController {
+        try await waitUntilDirectController(timeout: .seconds(5)) {
             peer.operations.filter { $0 == .answer }.count == 2
         }
         await dependencies.end()
@@ -452,6 +455,725 @@ struct GPTLiveDirectControllerTests {
         #expect(await credentialLoads.value == 0)
         #expect(peer.operations.isEmpty)
     }
+
+    @Test
+    func outputMonitorStartsOnlyAfterAdmissionAndEmitsMeasuredOutput() async throws {
+        let peer = DirectOutputControllerPeer(holdAnswer: true)
+        let socket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        var order = [String]()
+        peer.onMonitorStart = { order.append("monitor") }
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [peer]),
+            sockets: DirectOutputControllerSocketFactory(sockets: [socket]),
+            sink: { _, observation in probe.record(observation) }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+                if case .sessionAdmitted = event {
+                    order.append("admitted")
+                }
+            }
+        }
+
+        try await waitUntilDirectController { peer.answerEntered }
+        #expect(peer.monitorStartCount == 0)
+        #expect(probe.admitted == false)
+
+        peer.releaseAnswer()
+        try await waitUntilDirectController {
+            peer.monitorStartCount == 1 && probe.admitted
+        }
+        #expect(order == ["admitted", "monitor"])
+
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 100,
+                envelope: 0.8
+            )
+        )
+        try await Task.sleep(for: .milliseconds(45))
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 132,
+                envelope: 0.8
+            )
+        )
+        try await waitUntilDirectController {
+            probe.observations.count >= 2
+        }
+        #expect(probe.observations.first == .playbackStarted(offsetMilliseconds: 132))
+        #expect(probe.observations.contains(.mouthCue(offsetMilliseconds: 132, envelope: 0.8)))
+
+        await dependencies.end()
+        await run.value
+        #expect(peer.closeCalls == 1)
+    }
+
+    @Test(arguments: DirectOutputTermination.allCases)
+    func outputMonitorNeutralizesOnEveryControllerTermination(
+        _ termination: DirectOutputTermination
+    ) async throws {
+        let peer = DirectOutputControllerPeer(
+            failMute: termination == .failure
+        )
+        let socket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [peer]),
+            sockets: DirectOutputControllerSocketFactory(sockets: [socket]),
+            sink: { _, observation in probe.record(observation) }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+            }
+        }
+
+        try await waitUntilDirectController {
+            peer.monitorStartCount == 1 && probe.admitted
+        }
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 100,
+                envelope: 0.8
+            )
+        )
+        try await Task.sleep(for: .milliseconds(45))
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 132,
+                envelope: 0.8
+            )
+        )
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStarted = $0 { return true }
+                return false
+            }
+        }
+        switch termination {
+        case .interrupt:
+            await dependencies.interrupt()
+        case .end:
+            await dependencies.end()
+        case .failure:
+            await dependencies.mute(true)
+        case .spontaneousClose:
+            socket.close()
+        }
+
+        await run.value
+        try await waitUntilDirectController { peer.closeCalls == 1 }
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStopped = $0 { return true }
+                return false
+            }
+        }
+        let observationCount = probe.observations.count
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 200,
+                envelope: 0.9
+            )
+        )
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(peer.closeCalls == 1)
+        #expect(peer.streamFinished)
+        #expect(probe.observations.count == observationCount)
+    }
+
+    @Test
+    func stalePriorGenerationOutputIsRejectedAfterAReplacementStart() async throws {
+        let firstPeer = DirectOutputControllerPeer(finishStreamOnClose: false)
+        let secondPeer = DirectOutputControllerPeer()
+        let firstSocket = DirectOutputControllerSocket()
+        let secondSocket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [firstPeer, secondPeer]),
+            sockets: DirectOutputControllerSocketFactory(
+                sockets: [firstSocket, secondSocket]
+            ),
+            sink: { _, observation in probe.record(observation) }
+        )
+        let dependencies = controller.dependencies()
+
+        let firstRun = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+            }
+        }
+        try await waitUntilDirectController {
+            firstPeer.monitorStartCount == 1 && probe.admitted
+        }
+        await dependencies.end()
+        await firstRun.value
+        #expect(firstPeer.closeCalls == 1)
+
+        probe.resetAdmission()
+        let secondRun = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+            }
+        }
+        try await waitUntilDirectController {
+            secondPeer.monitorStartCount == 1 && probe.admitted
+        }
+        let observationsBeforeStale = probe.observations.count
+        firstPeer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 300,
+                envelope: 0.9
+            )
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(probe.observations.count == observationsBeforeStale)
+
+        firstPeer.finishStream()
+        await dependencies.end()
+        await secondRun.value
+        #expect(secondPeer.closeCalls == 1)
+    }
+
+    @Test
+    func wakeStartAndMicrophoneMuteCannotCreateOrStopRemoteOutputCues() async throws {
+        let peer = DirectOutputControllerPeer()
+        let socket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [peer]),
+            sockets: DirectOutputControllerSocketFactory(sockets: [socket]),
+            sink: { _, observation in probe.record(observation) }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task { @MainActor in
+            try? await dependencies.start(.wakeword) { event in
+                probe.record(event)
+            }
+        }
+
+        try await waitUntilDirectController {
+            peer.monitorStartCount == 1 && probe.admitted
+        }
+        #expect(probe.observations.isEmpty)
+        await dependencies.mute(true)
+        #expect(probe.observations.isEmpty)
+
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 100,
+                envelope: 0.8
+            )
+        )
+        try await Task.sleep(for: .milliseconds(45))
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 132,
+                envelope: 0.8
+            )
+        )
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStarted = $0 { return true }
+                return false
+            }
+        }
+        await dependencies.mute(true)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(probe.observations.contains {
+            if case .playbackStopped = $0 { return true }
+            return false
+        } == false)
+
+        await dependencies.end()
+        await run.value
+    }
+
+    @Test
+    func terminalStopFencesOutputQueuedAcrossAReentrantControllerStop() async throws {
+        let peer = DirectOutputControllerPeer(finishStreamOnClose: false)
+        let socket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        let mainActorGate = DirectOutputMainActorGate()
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [peer]),
+            sockets: DirectOutputControllerSocketFactory(sockets: [socket]),
+            sink: { _, observation in
+                if mainActorGate.stopRequested {
+                    mainActorGate.recordAfterStop(observation)
+                }
+                probe.record(observation)
+            }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+            }
+        }
+
+        try await waitUntilDirectController {
+            peer.monitorStartCount == 1 && probe.admitted
+        }
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 100,
+                envelope: 0.8
+            )
+        )
+        try await Task.sleep(for: .milliseconds(45))
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 132,
+                envelope: 0.8
+            )
+        )
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStarted = $0 { return true }
+                return false
+            }
+        }
+        let blocker = Task { @MainActor in
+            mainActorGate.block()
+        }
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(300))
+            mainActorGate.release()
+        }
+        Task.detached {
+            while !mainActorGate.isBlocked {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            peer.emitFromAnyActor(
+                LiveAudioOutputSample(
+                    isPlaying: true,
+                    offsetMilliseconds: 164,
+                    envelope: 0.8
+                )
+            )
+        }
+        try await waitUntilDirectControllerAsync { mainActorGate.isBlocked }
+
+        let stop = Task(priority: .high) {
+            try? await Task.sleep(for: .milliseconds(75))
+            mainActorGate.markStopRequested()
+            await dependencies.end()
+        }
+        await stop.value
+        await blocker.value
+        await run.value
+
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStopped = $0 { return true }
+                return false
+            }
+        }
+        guard let stopIndex = probe.observations.firstIndex(where: {
+            if case .playbackStopped = $0 { return true }
+            return false
+        }) else {
+            Issue.record("expected synthesized playback stop")
+            return
+        }
+        #expect(mainActorGate.postStopActiveObservations == 0)
+        #expect(!probe.observations.dropFirst(stopIndex + 1).contains {
+            switch $0 {
+            case .playbackStarted, .mouthCue: return true
+            case .playbackStopped: return false
+            }
+        })
+    }
+
+    @Test
+    func naturalStopQueuedBeforeTerminationStillReceivesATerminalStop() async throws {
+        let peer = DirectOutputControllerPeer(finishStreamOnClose: false)
+        let socket = DirectOutputControllerSocket()
+        let probe = DirectOutputControllerProbe()
+        let mainActorGate = DirectOutputMainActorGate()
+        let controller = try makeDirectOutputController(
+            peers: DirectOutputControllerPeerFactory(peers: [peer]),
+            sockets: DirectOutputControllerSocketFactory(sockets: [socket]),
+            sink: { _, observation in probe.record(observation) }
+        )
+        let dependencies = controller.dependencies()
+        let run = Task { @MainActor in
+            try? await dependencies.start(.manual) { event in
+                probe.record(event)
+            }
+        }
+
+        try await waitUntilDirectController {
+            peer.monitorStartCount == 1 && probe.admitted
+        }
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 100,
+                envelope: 0.8
+            )
+        )
+        try await Task.sleep(for: .milliseconds(45))
+        peer.emit(
+            LiveAudioOutputSample(
+                isPlaying: true,
+                offsetMilliseconds: 132,
+                envelope: 0.8
+            )
+        )
+        try await waitUntilDirectController {
+            probe.observations.contains {
+                if case .playbackStarted = $0 { return true }
+                return false
+            }
+        }
+
+        let blocker = Task { @MainActor in
+            mainActorGate.block()
+        }
+        let scenario = Task.detached {
+            while !mainActorGate.isBlocked {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            try? await Task.sleep(for: .milliseconds(450))
+            peer.emitFromAnyActor(
+                LiveAudioOutputSample(
+                    isPlaying: false,
+                    offsetMilliseconds: 500,
+                    envelope: 0
+                )
+            )
+            try? await Task.sleep(for: .milliseconds(100))
+            await dependencies.end()
+        }
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(900))
+            mainActorGate.release()
+        }
+
+        await scenario.value
+        await blocker.value
+        await run.value
+
+        guard let stopIndex = probe.observations.firstIndex(where: {
+            if case .playbackStopped = $0 { return true }
+            return false
+        }) else {
+            Issue.record("expected a terminal playback stop")
+            return
+        }
+        #expect(probe.observations.dropFirst(stopIndex + 1).allSatisfy {
+            if case .playbackStopped = $0 { return true }
+            return false
+        })
+    }
+}
+
+enum DirectOutputTermination: CaseIterable, Equatable, Sendable {
+    case interrupt
+    case end
+    case failure
+    case spontaneousClose
+}
+
+@MainActor
+private func makeDirectOutputController(
+    peers: DirectOutputControllerPeerFactory,
+    sockets: DirectOutputControllerSocketFactory,
+    sink: @escaping LiveAudioOutputObservationSink
+) throws -> GPTLiveController {
+    let profile = try ProviderProfile(
+        kind: .codexOAuth,
+        label: "Codex",
+        baseURL: nil,
+        model: "gpt-5.6-terra",
+        credentialReference: UUID(),
+        isSelected: true
+    )
+    let envelope = try CredentialEnvelope(
+        providerKind: .codexOAuth,
+        payload: Data(
+            #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+        )
+    )
+    return try GPTLiveController(
+        helperURL: nil,
+        temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-direct-output-test"),
+        selectedProfile: { profile },
+        credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+        refreshCredential: {},
+        microphonePermission: { .authorized },
+        makePeer: { peers.next() },
+        makeDirectSession: { peer, configuration in
+            let socket = sockets.next()
+            return DirectGPTLiveSession(
+                peer: peer,
+                callCreator: GPTLiveCallCreator(
+                    loader: DirectControllerLoader()
+                ),
+                sidebandConnector: GPTLiveSidebandConnector(
+                    factory: { _, _ in socket },
+                    sleep: { _ in }
+                ),
+                configuration: configuration
+            )
+        },
+        outputObservationSink: sink
+    )
+}
+
+@MainActor
+private final class DirectOutputControllerProbe {
+    private(set) var events = [LiveVoiceEvent]()
+    private(set) var observations = [LiveAudioOutputObservation]()
+
+    var admitted: Bool {
+        events.contains {
+            if case .sessionAdmitted = $0 { return true }
+            return false
+        }
+    }
+
+    func record(_ event: LiveVoiceEvent) {
+        events.append(event)
+    }
+
+    func record(_ observation: LiveAudioOutputObservation) {
+        observations.append(observation)
+    }
+
+    func resetAdmission() {
+        events.removeAll()
+    }
+}
+
+@MainActor
+private final class DirectOutputControllerPeer: LiveAudioPeer,
+    LiveAudioOutputMonitoring {
+    private let stream: AsyncStream<LiveAudioOutputSample>
+    private let sampleEmitter: DirectOutputControllerSampleEmitter
+    private var continuation: AsyncStream<LiveAudioOutputSample>.Continuation?
+    private let holdAnswer: Bool
+    private let failMute: Bool
+    private let finishStreamOnClose: Bool
+    private var answerContinuation: CheckedContinuation<Void, Never>?
+
+    private(set) var answerEntered = false
+    private(set) var monitorStartCount = 0
+    private(set) var closeCalls = 0
+    private(set) var streamFinished = false
+    var onMonitorStart: (() -> Void)?
+
+    nonisolated init(
+        holdAnswer: Bool = false,
+        failMute: Bool = false,
+        finishStreamOnClose: Bool = true
+    ) {
+        let (stream, continuation) = AsyncStream<LiveAudioOutputSample>.makeStream()
+        self.stream = stream
+        self.sampleEmitter = DirectOutputControllerSampleEmitter(continuation: continuation)
+        self.continuation = continuation
+        self.holdAnswer = holdAnswer
+        self.failMute = failMute
+        self.finishStreamOnClose = finishStreamOnClose
+    }
+
+    func prepareOffer() async throws -> String {
+        directControllerSyntheticOffer
+    }
+
+    func applyAnswerAndWaitForConnected(_ answer: String) async throws {
+        answerEntered = true
+        guard holdAnswer else { return }
+        await withCheckedContinuation { answerContinuation = $0 }
+    }
+
+    func requestResponse() async throws {}
+
+    func setMuted(_ muted: Bool) async throws {
+        if failMute { throw DirectOutputControllerPeerError.mute }
+    }
+
+    func close() async {
+        closeCalls += 1
+        if finishStreamOnClose { finishStream() }
+    }
+
+    func outputSamples() -> AsyncStream<LiveAudioOutputSample> {
+        monitorStartCount += 1
+        onMonitorStart?()
+        return stream
+    }
+
+    func releaseAnswer() {
+        answerContinuation?.resume()
+        answerContinuation = nil
+    }
+
+    func emit(_ sample: LiveAudioOutputSample) {
+        continuation?.yield(sample)
+    }
+
+    nonisolated func emitFromAnyActor(_ sample: LiveAudioOutputSample) {
+        sampleEmitter.emit(sample)
+    }
+
+    func finishStream() {
+        guard !streamFinished else { return }
+        streamFinished = true
+        continuation?.finish()
+        continuation = nil
+        sampleEmitter.finish()
+    }
+}
+
+private final class DirectOutputControllerSampleEmitter: @unchecked Sendable {
+    private let continuation: AsyncStream<LiveAudioOutputSample>.Continuation
+
+    init(continuation: AsyncStream<LiveAudioOutputSample>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func emit(_ sample: LiveAudioOutputSample) {
+        continuation.yield(sample)
+    }
+
+    func finish() {
+        continuation.finish()
+    }
+}
+
+private final class DirectOutputMainActorGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var blocked = false
+    private var stopWasRequested = false
+    private var postStopActiveCount = 0
+
+    var stopRequested: Bool {
+        lock.withLock { stopWasRequested }
+    }
+
+    var postStopActiveObservations: Int {
+        lock.withLock { postStopActiveCount }
+    }
+
+    var isBlocked: Bool {
+        lock.withLock { blocked }
+    }
+
+    func block() {
+        lock.withLock { blocked = true }
+        semaphore.wait()
+    }
+
+    func release() {
+        semaphore.signal()
+    }
+
+    func markStopRequested() {
+        lock.withLock { stopWasRequested = true }
+    }
+
+    func recordAfterStop(_ observation: LiveAudioOutputObservation) {
+        switch observation {
+        case .playbackStarted, .mouthCue:
+            lock.withLock { postStopActiveCount += 1 }
+        case .playbackStopped:
+            break
+        }
+    }
+}
+
+private enum DirectOutputControllerPeerError: Error {
+    case mute
+}
+
+private final class DirectOutputControllerPeerFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peers: [DirectOutputControllerPeer]
+
+    init(peers: [DirectOutputControllerPeer]) {
+        self.peers = peers
+    }
+
+    func next() -> any LiveAudioPeer {
+        lock.withLock { peers.removeFirst() }
+    }
+}
+
+private final class DirectOutputControllerSocketFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sockets: [DirectOutputControllerSocket]
+
+    init(sockets: [DirectOutputControllerSocket]) {
+        self.sockets = sockets
+    }
+
+    func next() -> DirectOutputControllerSocket {
+        lock.withLock { sockets.removeFirst() }
+    }
+}
+
+private final class DirectOutputControllerSocket: GPTLiveWebSocket,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue = [GPTLiveWebSocketMessage]()
+    private var waiters = [CheckedContinuation<GPTLiveWebSocketMessage, Error>]()
+    private var closed = false
+
+    func open() async throws {}
+
+    func receive() async throws -> GPTLiveWebSocketMessage {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if !queue.isEmpty {
+                let message = queue.removeFirst()
+                lock.unlock()
+                continuation.resume(returning: message)
+            } else if closed {
+                lock.unlock()
+                continuation.resume(throwing: GPTLiveSidebandError.closed)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func send(_ text: String) async throws {}
+
+    func close() {
+        lock.lock()
+        guard !closed else {
+            lock.unlock()
+            return
+        }
+        closed = true
+        let waiters = self.waiters
+        self.waiters.removeAll()
+        lock.unlock()
+        for waiter in waiters {
+            waiter.resume(throwing: GPTLiveSidebandError.closed)
+        }
+    }
 }
 
 private actor DirectControllerCredentialAdmission {
@@ -578,9 +1300,10 @@ private final class DirectControllerStateProbe {
 }
 
 private func waitUntilDirectController(
+    timeout: Duration = .seconds(2),
     _ predicate: @escaping @MainActor @Sendable () -> Bool
 ) async throws {
-    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    let deadline = ContinuousClock.now.advanced(by: timeout)
     while ContinuousClock.now < deadline {
         if await MainActor.run(body: predicate) { return }
         try await Task.sleep(for: .milliseconds(10))

@@ -1,5 +1,6 @@
 import Foundation
 import MillerCore
+import MillerLiveAudio
 
 enum AvatarProjectionResetReason: Equatable, Sendable {
     case stopped
@@ -25,8 +26,14 @@ final class AvatarProjectionCoordinator {
     private var terminal = false
     private var semanticPhase: AvatarPresentationPhase = .idle
     private var presentationCleared = false
+    private var playbackID: UUID?
+    private var cueIndex: UInt64 = 0
+    private var playbackOffsetMilliseconds: UInt64 = 0
 
     private(set) var currentGenerationID: UUID?
+    var currentPlaybackID: UUID? {
+        playbackID
+    }
     private(set) var lastProjection: AvatarProjection?
     private(set) var visibility: AvatarVisibility
     private(set) var reduceMotion: Bool
@@ -115,6 +122,7 @@ final class AvatarProjectionCoordinator {
         if Self.isTerminal(state) {
             // Fence terminal state before the synchronous sink can re-enter.
             terminal = true
+            clearPlayback()
         }
         let phase = Self.phase(for: state)
         project(state: phase)
@@ -130,6 +138,76 @@ final class AvatarProjectionCoordinator {
         )
     }
 
+    /// Accepts only the bounded observations produced by Miller's existing
+    /// remote-output monitor. Provider state and transcript events cannot
+    /// create this input.
+    func projectLiveOutput(
+        _ observation: LiveAudioOutputObservation,
+        for sessionID: UUID
+    ) {
+        guard case .live(sessionID) = session, !terminal else { return }
+        switch observation {
+        case let .playbackStarted(offsetMilliseconds):
+            guard visibility == .visible, !reduceMotion else {
+                clearPlayback()
+                return
+            }
+            guard playbackID == nil else { return }
+            playbackID = UUID()
+            cueIndex = 0
+            playbackOffsetMilliseconds = min(
+                offsetMilliseconds,
+                Self.maximumSafeProjectionSequence
+            )
+            // A measured remote segment establishes the Live response base
+            // even when the provider's earlier listening event arrived
+            // before Miller admitted the session to this coordinator.
+            semanticPhase = .responding
+            _ = emit(
+                .speaking,
+                generationID: currentGenerationID,
+                playbackID: playbackID
+            )
+        case let .mouthCue(offsetMilliseconds, envelope):
+            guard let playbackID,
+                  visibility == .visible,
+                  !reduceMotion,
+                  cueIndex < Self.maximumSafeProjectionSequence
+            else { return }
+            let offset = min(
+                max(playbackOffsetMilliseconds, offsetMilliseconds),
+                Self.maximumSafeProjectionSequence
+            )
+            let nextCueIndex = cueIndex + 1
+            guard let generationID = currentGenerationID else { return }
+            let cue: AvatarMouthCue
+            do {
+                cue = try AvatarMouthCue(
+                    generationID: generationID,
+                    playbackID: playbackID,
+                    cueIndex: nextCueIndex,
+                    playbackOffsetMilliseconds: offset,
+                    envelope: envelope
+                )
+            } catch {
+                return
+            }
+            cueIndex = nextCueIndex
+            playbackOffsetMilliseconds = offset
+            _ = emit(
+                .speaking,
+                generationID: generationID,
+                playbackID: playbackID,
+                mouthCue: cue
+            )
+        case .playbackStopped:
+            guard playbackID != nil else { return }
+            clearPlayback()
+            guard visibility == .visible, !reduceMotion else { return }
+            project(state: semanticPhase)
+        }
+    }
+
     func resetLiveSession(
         _ sessionID: UUID,
         reason: AvatarProjectionResetReason = .cancelled
@@ -140,6 +218,7 @@ final class AvatarProjectionCoordinator {
 
     func reset(reason _: AvatarProjectionResetReason = .operator) {
         guard session != nil || lastProjection != nil else { return }
+        clearPlayback()
         let shouldClear = !presentationCleared
         session = nil
         currentGenerationID = nil
@@ -155,6 +234,7 @@ final class AvatarProjectionCoordinator {
         guard !presentationCleared,
               session != nil || lastProjection != nil
         else { return }
+        clearPlayback()
         presentationCleared = true
         _ = emit(.idle, generationID: nil, force: true)
     }
@@ -180,6 +260,7 @@ final class AvatarProjectionCoordinator {
 
     private func replaceCurrentSession() {
         guard session != nil || lastProjection != nil else { return }
+        clearPlayback()
         let shouldClear = !presentationCleared
         session = nil
         currentGenerationID = nil
@@ -193,6 +274,24 @@ final class AvatarProjectionCoordinator {
 
     private func project(state phase: AvatarPresentationPhase) {
         semanticPhase = phase
+        if Self.isTerminal(phase) {
+            clearPlayback()
+        }
+        if playbackID != nil,
+           !Self.isTerminal(phase),
+           visibility == .visible,
+           !reduceMotion
+        {
+            guard lastProjection?.phase != .speaking
+                    || lastProjection?.playbackID != playbackID
+            else { return }
+            _ = emit(
+                .speaking,
+                generationID: currentGenerationID,
+                playbackID: playbackID
+            )
+            return
+        }
         _ = emit(
             phase,
             generationID: Self.phaseNeedsGeneration(phase)
@@ -203,6 +302,7 @@ final class AvatarProjectionCoordinator {
     }
 
     private func clearAndReconcileIfActive() {
+        clearPlayback()
         presentationCleared = true
         _ = emit(.idle, generationID: nil, force: true)
         guard visibility == .visible,
@@ -223,6 +323,8 @@ final class AvatarProjectionCoordinator {
     private func emit(
         _ phase: AvatarPresentationPhase,
         generationID: UUID?,
+        playbackID: UUID? = nil,
+        mouthCue: AvatarMouthCue? = nil,
         force: Bool = false
     ) -> Bool {
         let identity = Self.phaseNeedsGeneration(phase) ? generationID : nil
@@ -235,8 +337,8 @@ final class AvatarProjectionCoordinator {
            lastProjection.generationID == identity,
            lastProjection.visibility == visibility,
            lastProjection.reduceMotion == reduceMotion,
-           lastProjection.playbackID == nil,
-           lastProjection.mouthCue == nil
+           lastProjection.playbackID == playbackID,
+           lastProjection.mouthCue == mouthCue
         {
             return false
         }
@@ -252,7 +354,8 @@ final class AvatarProjectionCoordinator {
                 phase: phase,
                 visibility: visibility,
                 reduceMotion: reduceMotion,
-                playbackID: nil
+                playbackID: playbackID,
+                mouthCue: mouthCue
             )
         } catch {
             return false
@@ -332,9 +435,24 @@ final class AvatarProjectionCoordinator {
         _ phase: AvatarPresentationPhase
     ) -> Bool {
         switch phase {
-        case .thinking, .responding, .succeeded, .stopped, .failed:
+        case .thinking, .responding, .speaking, .succeeded, .stopped, .failed:
             true
-        case .idle, .listening, .transcribing, .speaking:
+        case .idle, .listening, .transcribing:
+            false
+        }
+    }
+
+    private func clearPlayback() {
+        playbackID = nil
+        cueIndex = 0
+        playbackOffsetMilliseconds = 0
+    }
+
+    private static func isTerminal(_ phase: AvatarPresentationPhase) -> Bool {
+        switch phase {
+        case .succeeded, .stopped, .failed:
+            true
+        default:
             false
         }
     }

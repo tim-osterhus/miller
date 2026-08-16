@@ -51,6 +51,8 @@ private final class OrdinaryLiveEvaluator: WebKitLivePeerScriptEvaluating {
             return "ok"
         case .connectionState:
             return "connected"
+        case .outputSample:
+            return "{\"isPlaying\":false,\"offsetMilliseconds\":0,\"envelope\":0}"
         }
     }
 }

@@ -55,6 +55,11 @@ typealias LegacyLiveVoiceStartOperation = @Sendable (
     @escaping @MainActor @Sendable (LiveVoiceEvent) async -> Void
 ) async throws -> Void
 
+typealias LiveAudioOutputObservationSink = @MainActor @Sendable (
+    UUID,
+    LiveAudioOutputObservation
+) -> Void
+
 struct LiveVoiceStart: Sendable {
     private let operation: LiveVoiceStartOperation
 
@@ -170,6 +175,7 @@ actor GPTLiveController {
         @MainActor @Sendable (LiveVoiceStartContext) async -> Bool
     private let microphoneOwnership: MicrophoneOwnership?
     private let releasePeer: @Sendable () async -> Void
+    private let outputObservationSink: LiveAudioOutputObservationSink
     private let helperVerifier: @Sendable (URL) throws -> Void
     private let spawnedProcessVerifier: @Sendable (pid_t) throws -> Void
     private var session: LiveAudioSession?
@@ -182,6 +188,14 @@ actor GPTLiveController {
     private var credentialRefreshRace: GPTLiveCredentialRefreshRace?
     private var startCompletionWaiters: [CheckedContinuation<Void, Never>] = []
     private var liveMicrophoneLease: MicrophoneOwnership.Lease?
+    private var outputObservationTask: Task<Void, Never>?
+    private var outputObservationGeneration: UInt64 = 0
+    private let outputDeliveryFence = GPTLiveOutputDeliveryFence()
+    private var outputDeliveryGeneration: UInt64?
+    private var outputObservationSessionID: UUID?
+    private var outputPlaybackActive = false
+    private var outputPlaybackTerminalPending = false
+    private var outputPlaybackOffsetMilliseconds: UInt64 = 0
 
     init(
         helperURL: URL?,
@@ -226,6 +240,7 @@ actor GPTLiveController {
         ) async -> Bool = { _ in true },
         microphoneOwnership: MicrophoneOwnership? = nil,
         releasePeer: @escaping @Sendable () async -> Void = {},
+        outputObservationSink: @escaping LiveAudioOutputObservationSink = { _, _ in },
         helperVerifier: @escaping @Sendable (URL) throws -> Void = {
             try CodexAppServerHelperVerifier().verify($0)
         },
@@ -273,6 +288,7 @@ actor GPTLiveController {
         self.authorizeStart = authorizeStart
         self.microphoneOwnership = microphoneOwnership
         self.releasePeer = releasePeer
+        self.outputObservationSink = outputObservationSink
         self.helperVerifier = helperVerifier
         self.spawnedProcessVerifier = spawnedProcessVerifier
     }
@@ -566,6 +582,12 @@ actor GPTLiveController {
                     onActive: {
                         await self.markClientSessionActive()
                         await receive(.sessionAdmitted(id: sessionID))
+                        if let peer {
+                            await self.beginOutputObservation(
+                                peer: peer,
+                                sessionID: sessionID
+                            )
+                        }
                     },
                     onCleanupPending: {
                         await self.markTerminalFailurePresented()
@@ -587,6 +609,12 @@ actor GPTLiveController {
                     onActive: {
                         await self.markClientSessionActive()
                         await receive(.sessionAdmitted(id: sessionID))
+                        if let peer {
+                            await self.beginOutputObservation(
+                                peer: peer,
+                                sessionID: sessionID
+                            )
+                        }
                     },
                     onCleanupPending: {},
                 ) { event in
@@ -640,6 +668,10 @@ actor GPTLiveController {
 
     private func stop(interrupting: Bool) async {
         stopRequested = true
+        if outputPlaybackActive {
+            outputPlaybackTerminalPending = true
+        }
+        _ = outputDeliveryFence.invalidate()
         credentialRefreshRace?.cancel()
         if let directSession {
             if interrupting { await directSession.interrupt() }
@@ -674,7 +706,186 @@ actor GPTLiveController {
         }
     }
 
+    private func beginOutputObservation(
+        peer: any LiveAudioPeer,
+        sessionID: UUID
+    ) async {
+        guard !stopRequested, clientSessionBecameActive else { return }
+        guard let monitor = peer as? any LiveAudioOutputMonitoring else { return }
+        outputObservationGeneration &+= 1
+        let generation = outputObservationGeneration
+        let deliveryGeneration = outputDeliveryFence.begin()
+        outputDeliveryGeneration = deliveryGeneration
+        outputObservationSessionID = sessionID
+        outputPlaybackActive = false
+        outputPlaybackOffsetMilliseconds = 0
+        outputObservationTask?.cancel()
+        outputObservationTask = Task { [weak self, monitor] in
+            var processor = LiveAudioOutputObservationProcessor()
+            let clock = ContinuousClock()
+            let startedAt = clock.now
+            let stream = await monitor.outputSamples()
+            for await sample in stream {
+                guard !Task.isCancelled else { break }
+                let observations = processor.observe(
+                    sample,
+                    atMilliseconds: Self.elapsedMilliseconds(
+                        from: startedAt,
+                        to: clock.now
+                    )
+                )
+                for observation in observations {
+                    await self?.deliverOutputObservation(
+                        observation,
+                        sessionID: sessionID,
+                        generation: generation,
+                        deliveryGeneration: deliveryGeneration
+                    )
+                }
+            }
+            for observation in processor.stop() {
+                await self?.deliverOutputObservation(
+                    observation,
+                    sessionID: sessionID,
+                    generation: generation,
+                    deliveryGeneration: deliveryGeneration
+                )
+            }
+            await self?.finishOutputObservation(generation: generation)
+        }
+    }
+
+    private func deliverOutputObservation(
+        _ observation: LiveAudioOutputObservation,
+        sessionID: UUID,
+        generation: UInt64,
+        deliveryGeneration: UInt64
+    ) async {
+        guard generation == outputObservationGeneration,
+              clientSessionBecameActive,
+              outputDeliveryGeneration == deliveryGeneration,
+              outputObservationSessionID == sessionID
+        else { return }
+        switch observation {
+        case let .playbackStarted(offsetMilliseconds):
+            outputPlaybackActive = true
+            outputPlaybackOffsetMilliseconds = max(
+                outputPlaybackOffsetMilliseconds,
+                offsetMilliseconds
+            )
+        case let .mouthCue(offsetMilliseconds, _):
+            outputPlaybackOffsetMilliseconds = max(
+                outputPlaybackOffsetMilliseconds,
+                offsetMilliseconds
+            )
+        case let .playbackStopped(offsetMilliseconds):
+            outputPlaybackOffsetMilliseconds = max(
+                outputPlaybackOffsetMilliseconds,
+                offsetMilliseconds
+            )
+        }
+        if stopRequested,
+           case .playbackStopped = observation
+        {
+            let delivered = await deliverOutputObservationToSink(
+                observation,
+                sessionID: sessionID,
+                deliveryGeneration: deliveryGeneration
+            )
+            guard delivered,
+                  generation == outputObservationGeneration,
+                  outputDeliveryGeneration == deliveryGeneration,
+                  outputObservationSessionID == sessionID
+            else { return }
+            outputPlaybackActive = false
+            outputPlaybackTerminalPending = false
+            return
+        }
+        guard !stopRequested else { return }
+        let delivered = await deliverOutputObservationToSink(
+            observation,
+            sessionID: sessionID,
+            deliveryGeneration: deliveryGeneration
+        )
+        guard delivered,
+              generation == outputObservationGeneration,
+              outputDeliveryGeneration == deliveryGeneration,
+              outputObservationSessionID == sessionID
+        else { return }
+        if case .playbackStopped = observation {
+            outputPlaybackActive = false
+            outputPlaybackTerminalPending = false
+        }
+    }
+
+    private func deliverOutputObservationToSink(
+        _ observation: LiveAudioOutputObservation,
+        sessionID: UUID,
+        deliveryGeneration: UInt64
+    ) async -> Bool {
+        let sink = outputObservationSink
+        let fence = outputDeliveryFence
+        let delivery = Task { @MainActor in
+            guard fence.isCurrent(deliveryGeneration) else { return false }
+            sink(sessionID, observation)
+            return true
+        }
+        return await delivery.value
+    }
+
+    private func finishOutputObservation(generation: UInt64) {
+        guard generation == outputObservationGeneration else { return }
+        outputObservationTask = nil
+    }
+
+    private func cancelOutputObservation() {
+        outputObservationGeneration &+= 1
+        outputObservationTask?.cancel()
+        outputObservationTask = nil
+        outputObservationSessionID = nil
+        outputDeliveryGeneration = nil
+        outputPlaybackActive = false
+        outputPlaybackTerminalPending = false
+        outputPlaybackOffsetMilliseconds = 0
+    }
+
+    nonisolated private static func elapsedMilliseconds(
+        from start: ContinuousClock.Instant,
+        to end: ContinuousClock.Instant
+    ) -> UInt64 {
+        let components = start.duration(to: end).components
+        guard components.seconds > 0 || components.attoseconds > 0 else {
+            return 0
+        }
+        let seconds = UInt64(max(components.seconds, 0))
+        let millisecondsFromSeconds = seconds > UInt64.max / 1_000
+            ? UInt64.max
+            : seconds * 1_000
+        let attoseconds = UInt64(max(components.attoseconds, 0))
+        let millisecondsFromAttoseconds = attoseconds / 1_000_000_000_000_000
+        return millisecondsFromSeconds > UInt64.max - millisecondsFromAttoseconds
+            ? UInt64.max
+            : millisecondsFromSeconds + millisecondsFromAttoseconds
+    }
+
     private func finishStart() {
+        let terminalOutput = (outputPlaybackActive || outputPlaybackTerminalPending)
+            ? outputObservationSessionID.map {
+                ($0, LiveAudioOutputObservation.playbackStopped(
+                    offsetMilliseconds: outputPlaybackOffsetMilliseconds
+                ))
+            }
+            : nil
+        let terminalDeliveryGeneration = outputDeliveryFence.invalidate()
+        cancelOutputObservation()
+        if let (sessionID, observation) = terminalOutput {
+            let sink = outputObservationSink
+            let fence = outputDeliveryFence
+            Task { @MainActor in
+                guard fence.isCurrent(terminalDeliveryGeneration) else { return }
+                sink(sessionID, observation)
+            }
+        }
         releaseLiveMicrophoneLeaseIfNeeded()
         session = nil
         directSession = nil
@@ -858,6 +1069,29 @@ actor GPTLiveController {
         case .invalidField: return "\(prefix)_invalid_field"
         default: return "\(prefix)_mismatch"
         }
+    }
+}
+
+private final class GPTLiveOutputDeliveryFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    func begin() -> UInt64 {
+        lock.withLock {
+            generation &+= 1
+            return generation
+        }
+    }
+
+    func invalidate() -> UInt64 {
+        lock.withLock {
+            generation &+= 1
+            return generation
+        }
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        lock.withLock { generation == candidate }
     }
 }
 
