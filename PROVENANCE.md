@@ -90,6 +90,56 @@ Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
 the v0.1.2 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
 
+## Miller Avatar v0.1.0-alpha.1
+
+Miller links the public Miller Avatar package from
+`https://github.com/tim-osterhus/miller-avatar.git` at the immutable tag
+`v0.1.0-alpha.1`, resolved to commit
+`4f48f55bfeb1fd1f805143bdfadf61ddff541b15`. The package is distributed under
+Apache-2.0. MillerApp links only `MillerAvatarCore` and `MillerAvatarHost`;
+the diagnostic `MillerAvatarApp` product is neither linked nor packaged.
+
+The fixed SwiftPM resource bundle is
+`Contents/Resources/MillerAvatar_MillerAvatarHost.bundle`. Its complete Web
+inventory is exactly:
+
+- `Web/app.js`
+- `Web/bundle-manifest.json`
+- `Web/bundle-metafile.json`
+- `Web/index.html`
+- `Web/styles.css`
+
+The resource closure is checked at the source checkout, build output, release
+inventory, and release verifier boundaries. It contains no VRM or VRMA character or motion assets, model bytes, motion bytes, user profile, or
+private fixture. Linking this package does not construct a profile store,
+load a model, or activate a renderer while Avatar is disabled; those runtime
+surfaces are outside this C2 package-only change.
+
+The real packaged-app Avatar-Off launch test is deferred for this remediation
+because the protected retained release boundary is occupied by the owner-
+qualified release processes. No app-launching behavior test was added. The
+deterministic production source contract and exact package, link, Web-byte, and
+legal-inventory checks remain the C2 evidence.
+
+### Avatar Web runtime dependencies
+
+- `three@0.180.0`, MIT, from `https://github.com/mrdoob/three.js` at immutable
+  tag `r180`.
+- `@pixiv/three-vrm@3.5.5` core family, MIT, from
+  `https://github.com/pixiv/three-vrm` at immutable commit
+  `ff42fae4fcee1fcbca2cd262c7f5f8cbddeaf5ab`.
+- `@pixiv/three-vrm-animation@3.5.5`, MIT, from the same immutable Pixiv
+  commit. This package supplies parsing and conversion code only; it does not
+  supply motion bytes.
+- `Mapbox Earcut 3.0.1`, ISC, Copyright © 2016 Mapbox. Its emitted geometry
+  code is embedded in `Web/app.js`; the complete ISC notice is retained in the
+  pinned Avatar runtime notice and no Earcut asset is shipped.
+
+The generated Web payload and its normalized bundle manifests are the only
+renderer bytes admitted to Miller. Character, model, motion, texture, and
+other user-selected assets remain runtime inputs and are not copied into the
+repository or release application.
+
 ### Cortana wakeword donor
 
 - Canonical donor repository: owner-controlled Cortana repository, reviewed at

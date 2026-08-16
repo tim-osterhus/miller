@@ -10,6 +10,16 @@ plist="$bundle_root/Contents/Info.plist"
 gateway="$bundle_root/Contents/Resources/Gateway"
 legal="$bundle_root/Contents/Resources/Legal"
 inventory="$(dirname "$bundle_root")/inventory.json"
+avatar_bundle="$bundle_root/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle"
+typeset -A avatar_web_hashes=(
+  app.js 2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0
+  bundle-manifest.json 99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7
+  bundle-metafile.json 2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6
+  index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
+  styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
+)
+avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
+avatar_aggregate_third_party_notices_sha256="134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28"
 
 test -d "$bundle_root"
 test ! -L "$bundle_root"
@@ -42,6 +52,26 @@ test -f "$gateway/app/server.mjs"
 test -f "$gateway/app/node_modules/@miller/pi-mvp-overlay/package.json"
 test -f "$gateway/app/node_modules/openai/package.json"
 test -f "$gateway/app/node_modules/partial-json/package.json"
+test -d "$avatar_bundle"
+test ! -L "$avatar_bundle"
+test -z "$(find -P "$avatar_bundle" -type l -print -quit)"
+test "$(
+  find -P "$avatar_bundle" -type f -print \
+    | sed "s|$avatar_bundle/||" \
+    | LC_ALL=C sort
+)" = "Web/app.js
+Web/bundle-manifest.json
+Web/bundle-metafile.json
+Web/index.html
+Web/styles.css"
+test -z "$(find -P "$avatar_bundle" \( \
+  -iname '*.vrm' -o -iname '*.vrma' -o -iname '*MillerAvatarApp*' \
+\) -print -quit)"
+for web_file expected in ${(kv)avatar_web_hashes}; do
+  test -f "$avatar_bundle/Web/$web_file"
+  test ! -L "$avatar_bundle/Web/$web_file"
+  test "$(shasum -a 256 "$avatar_bundle/Web/$web_file" | awk '{print $1}')" = "$expected"
+done
 wake_model_root="$bundle_root/Contents/Resources/WakeWord/model"
 typeset -A wakeword_model_hashes=(
   encoder.onnx 1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678
@@ -71,13 +101,59 @@ for wakeword_model expected in ${(kv)wakeword_model_hashes}; do
 done
 test -f "$inventory"
 test ! -L "$inventory"
-for document in LICENSE NOTICE PROVENANCE.md THIRD_PARTY_NOTICES.md Miller.spdx.json; do
+for document in LICENSE NOTICE PROVENANCE.md THIRD_PARTY_NOTICES.md \
+  miller-avatar-NOTICE.txt Miller.spdx.json
+do
   test -f "$legal/$document"
+  test ! -L "$legal/$document"
 done
 for document in \
   mcp-swift-sdk-LICENSE.txt
 do
   test -f "$legal/$document"
+  test ! -L "$legal/$document"
+done
+test "$(shasum -a 256 "$legal/miller-avatar-NOTICE.txt" | awk '{print $1}')" = \
+  "$avatar_notice_sha256"
+test "$(shasum -a 256 "$legal/THIRD_PARTY_NOTICES.md" \
+  | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+test "$(shasum -a 256 "$repo_root/THIRD_PARTY_NOTICES.md" \
+  | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+for required in \
+  "The distributed web renderer contains Three.js" \
+  "THIRD_PARTY_NOTICES.md" \
+  "No avatar, animation, texture, font, sound"
+do
+  grep -Fq "$required" "$legal/miller-avatar-NOTICE.txt"
+done
+for required in \
+  "Three.js 0.180.0" \
+  "pixiv three-vrm 3.5.5" \
+  "@pixiv/three-vrm-animation@3.5.5" \
+  "Mapbox Earcut 3.0.1" \
+  "Copyright © 2016 Mapbox" \
+  "Permission to use, copy, modify" \
+  "THE SOFTWARE IS PROVIDED"
+do
+  grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
+done
+for required in \
+  'Miller Avatar v0.1.0-alpha.1' \
+  '4f48f55bfeb1fd1f805143bdfadf61ddff541b15' \
+  'Web/bundle-manifest.json' \
+  'Web/bundle-metafile.json' \
+  'no VRM or VRMA character or motion assets'
+do
+  grep -Fq "$required" "$legal/PROVENANCE.md"
+done
+for required in \
+  'Miller Avatar v0.1.0-alpha.1' \
+  'MillerAvatarApp` is a diagnostic product' \
+  '## Three.js 0.180.0 — MIT License' \
+  '## @pixiv/three-vrm core family 3.5.5 — MIT License' \
+  '## @pixiv/three-vrm-animation 3.5.5 — MIT License'
+do
+  grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
 done
 
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = \
@@ -99,7 +175,8 @@ test -z "$(find "$bundle_root" \( \
   -iname '*cortana*' -o -iname '*voiceink*' -o -iname '*codex-rs*' -o \
   -iname '*MillerWakeBridge*' -o -iname '*MillerWake*' -o \
   -iname '*sherpa*' -o -iname '*gigaspeech*' -o \
-  -iname '*wake-model*' -o -iname '*.vrm' -o -iname '*avatar*renderer*' -o \
+  -iname '*wake-model*' -o -iname '*.vrm' -o -iname '*.vrma' -o \
+  -iname '*MillerAvatarApp*' -o -iname '*avatar*renderer*' -o \
   -iname '*fake*helper*' -o -iname '*fixture*' -o \
   -iname '*credential*.json' -o -iname '*credential*.plist' -o \
   -iname '*credential*.db' -o -iname '*credential*.sqlite*' -o \
@@ -125,6 +202,34 @@ test -z "$(strings "$gateway/runtime/node" \
   | grep -E '/private/tmp|Desktop/Millrace-Dev|/Users/' \
   | grep -Ev '/Users/admin/build/' \
   | head -n 1 || true)"
+"$gateway/runtime/node" --input-type=module - \
+  "$repo_root/THIRD_PARTY_NOTICES.md" "$legal/THIRD_PARTY_NOTICES.md" <<'EOF'
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+const source = await readFile(process.argv[2]);
+const packaged = await readFile(process.argv[3]);
+assert.deepEqual(packaged, source, "packaged aggregate notice differs from source notice");
+EOF
+"$gateway/runtime/node" --input-type=module - \
+  "$avatar_bundle/Web" <<'EOF'
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const webRoot = process.argv[2];
+const names = ["app.js", "bundle-manifest.json", "bundle-metafile.json", "index.html", "styles.css"];
+const manifest = JSON.parse(await readFile(join(webRoot, "bundle-manifest.json"), "utf8"));
+assert.deepEqual([...manifest.outputs].sort(), [...names].sort());
+assert.deepEqual(Object.keys(manifest.files).sort(), [
+  "app.js", "bundle-metafile.json", "index.html", "styles.css",
+].sort());
+for (const name of ["app.js", "bundle-metafile.json", "index.html", "styles.css"]) {
+  const bytes = await readFile(join(webRoot, name));
+  assert.equal(manifest.files[name].sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(manifest.files[name].bytes, bytes.length);
+}
+EOF
 "$gateway/runtime/node" "$repo_root/scripts/release-inventory.mjs" \
   --verify "$bundle_root" "$inventory"
 codesign --verify --deep --strict "$bundle_root"
@@ -147,18 +252,23 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
+    "Miller Avatar@0.1.0-alpha.1",
     `Miller@${releaseVersion}`,
     `MillerCapabilityBridge@${releaseVersion}`,
     `MillerCapabilities@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime@1.24.4",
     "Sherpa-ONNX@1.13.2",
+    "Three.js@0.180.0",
+    "@pixiv/three-vrm@3.5.5",
+    "@pixiv/three-vrm-animation@3.5.5",
+    "Mapbox Earcut@3.0.1",
     "Miller wake model assets@pinned",
     "openai@6.26.0",
     "partial-json@0.1.7",
   ].sort(),
 );
-assert.equal(sbom.packages.some((entry) => /codex|avatar|cortana/i.test(entry.name)), false);
+assert.equal(sbom.packages.some((entry) => /codex|cortana/i.test(entry.name)), false);
 assert.equal(sbom.packages.some((entry) => entry.name === "Sherpa-ONNX"), true);
 assert.equal(sbom.packages.some((entry) => entry.name === "ONNX Runtime"), true);
 assert.equal(sbom.packages.some((entry) => entry.name === "Miller wake model assets"), true);
@@ -189,6 +299,60 @@ assert.equal(
 );
 assert.match(mcpLicense, /Apache License/i);
 assert.match(mcpLicense, /MIT License/i);
+const avatar = sbom.packages.find((entry) => entry.name === "Miller Avatar");
+assert.ok(avatar);
+assert.equal(avatar.versionInfo, "0.1.0-alpha.1");
+assert.equal(avatar.licenseConcluded, "Apache-2.0");
+assert.equal(avatar.licenseDeclared, "Apache-2.0");
+assert.equal(avatar.downloadLocation, "https://github.com/tim-osterhus/miller-avatar.git");
+assert.equal(
+  avatar.packageFileName,
+  "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
+);
+for (const [name, version, location] of [
+  ["Three.js", "0.180.0", "https://github.com/mrdoob/three.js"],
+  ["@pixiv/three-vrm", "3.5.5", "https://github.com/pixiv/three-vrm"],
+  ["@pixiv/three-vrm-animation", "3.5.5", "https://github.com/pixiv/three-vrm"],
+  ["Mapbox Earcut", "3.0.1", "https://github.com/mapbox/earcut"],
+]) {
+  const packageEntry = sbom.packages.find((entry) => entry.name === name);
+  assert.ok(packageEntry);
+  assert.equal(packageEntry.versionInfo, version);
+  assert.equal(
+    packageEntry.licenseConcluded,
+    name === "Mapbox Earcut" ? "ISC" : "MIT",
+  );
+  assert.equal(
+    packageEntry.licenseDeclared,
+    name === "Mapbox Earcut" ? "ISC" : "MIT",
+  );
+  assert.equal(packageEntry.downloadLocation, location);
+  assert.equal(
+    packageEntry.packageFileName,
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+  );
+}
+assert.equal(
+  sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-Miller"
+      && entry.relationshipType === "DEPENDS_ON"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MillerAvatar"),
+  true,
+);
+for (const relatedSpdxElement of [
+  "SPDXRef-Package-ThreeJS",
+  "SPDXRef-Package-PixivThreeVRM",
+  "SPDXRef-Package-PixivThreeVRMAnimation",
+  "SPDXRef-Package-MapboxEarcut",
+]) {
+  assert.equal(
+    sbom.relationships.some((entry) =>
+      entry.spdxElementId === "SPDXRef-Package-MillerAvatar"
+        && entry.relationshipType === "DEPENDS_ON"
+        && entry.relatedSpdxElement === relatedSpdxElement),
+    true,
+  );
+}
 assert.equal(
   sbom.relationships.some((entry) =>
     entry.spdxElementId === "SPDXRef-Package-Miller"
@@ -224,10 +388,15 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
+    "Miller Avatar@0.1.0-alpha.1",
     `MillerCapabilityBridge@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime wake runtime@1.24.4",
     "Sherpa-ONNX wake runtime@1.13.2",
+    "Three.js@0.180.0",
+    "@pixiv/three-vrm@3.5.5",
+    "@pixiv/three-vrm-animation@3.5.5",
+    "Mapbox Earcut@3.0.1",
     "Miller wake BPE vocabulary@pinned",
     "Miller wake decoder@pinned",
     "Miller wake encoder@pinned",
@@ -239,7 +408,7 @@ assert.deepEqual(
 );
 assert.equal(
   inventory.runtime_inventory.some((entry) =>
-    /codex|cortana|avatar/i.test(entry.name)),
+    /codex|cortana/i.test(entry.name)),
   false,
 );
 EOF

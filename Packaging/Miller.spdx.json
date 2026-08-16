@@ -87,6 +87,61 @@
       "packageFileName": "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt"
     },
     {
+      "name": "Miller Avatar",
+      "SPDXID": "SPDXRef-Package-MillerAvatar",
+      "versionInfo": "0.1.0-alpha.1",
+      "downloadLocation": "https://github.com/tim-osterhus/miller-avatar.git",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "packageFileName": "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle"
+    },
+    {
+      "name": "Three.js",
+      "SPDXID": "SPDXRef-Package-ThreeJS",
+      "versionInfo": "0.180.0",
+      "downloadLocation": "https://github.com/mrdoob/three.js",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright © 2010-2025 three.js authors",
+      "packageFileName": "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js"
+    },
+    {
+      "name": "@pixiv/three-vrm",
+      "SPDXID": "SPDXRef-Package-PixivThreeVRM",
+      "versionInfo": "3.5.5",
+      "downloadLocation": "https://github.com/pixiv/three-vrm",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright © 2019-2026 pixiv Inc.",
+      "packageFileName": "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js"
+    },
+    {
+      "name": "@pixiv/three-vrm-animation",
+      "SPDXID": "SPDXRef-Package-PixivThreeVRMAnimation",
+      "versionInfo": "3.5.5",
+      "downloadLocation": "https://github.com/pixiv/three-vrm",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright © 2019-2026 pixiv Inc.",
+      "packageFileName": "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js"
+    },
+    {
+      "name": "Mapbox Earcut",
+      "SPDXID": "SPDXRef-Package-MapboxEarcut",
+      "versionInfo": "3.0.1",
+      "downloadLocation": "https://github.com/mapbox/earcut",
+      "filesAnalyzed": false,
+      "licenseConcluded": "ISC",
+      "licenseDeclared": "ISC",
+      "copyrightText": "Copyright © 2016 Mapbox",
+      "packageFileName": "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js"
+    },
+    {
       "name": "@miller/pi-mvp-overlay",
       "SPDXID": "SPDXRef-Package-PiOverlay",
       "versionInfo": "0.82.0-a3",
@@ -168,6 +223,31 @@
       "spdxElementId": "SPDXRef-Package-Miller",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-Package-MCPSwiftSDK"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Miller",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MillerAvatar"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerAvatar",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-ThreeJS"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerAvatar",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-PixivThreeVRM"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerAvatar",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-PixivThreeVRMAnimation"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-MillerAvatar",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MapboxEarcut"
     },
     {
       "spdxElementId": "SPDXRef-Package-MillerCapabilityBridge",

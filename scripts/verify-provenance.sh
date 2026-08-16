@@ -57,11 +57,35 @@ grep -Fq '## Node.js 22.22.0 bundled runtime' \
 grep -Fq '## Node.js 22.22.0' "$repo_root/THIRD_PARTY_NOTICES.md"
 grep -Fq '## Model Context Protocol Swift SDK 0.12.1' \
   "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '4f48f55bfeb1fd1f805143bdfadf61ddff541b15' \
+  "$repo_root/Package.resolved"
+grep -Fq '## Miller Avatar v0.1.0-alpha.1' "$repo_root/PROVENANCE.md"
+grep -Fq '## Miller Avatar v0.1.0-alpha.1' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq 'MillerAvatar_MillerAvatarHost.bundle' "$repo_root/PROVENANCE.md"
+grep -Fq 'Web/bundle-manifest.json' "$repo_root/PROVENANCE.md"
+grep -Fq 'Web/bundle-metafile.json' "$repo_root/PROVENANCE.md"
+grep -Fq 'no VRM or VRMA character or motion assets' "$repo_root/PROVENANCE.md"
+grep -Fq 'Three.js 0.180.0' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '@pixiv/three-vrm 3.5.5' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '@pixiv/three-vrm-animation 3.5.5' \
+  "$repo_root/THIRD_PARTY_NOTICES.md"
+for required in \
+  "miller-avatar-NOTICE.txt" \
+  "THIRD_PARTY_NOTICES.md" \
+  "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b" \
+  "134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28" \
+  "Mapbox Earcut 3.0.1" \
+  "Copyright © 2016 Mapbox" \
+  "Permission to use, copy, modify"
+do
+  grep -Fq "$required" "$repo_root/scripts/package-dev-app.sh"
+done
 grep -Fq 'Contents/Resources/WakeWord/model' "$repo_root/PROVENANCE.md"
 grep -Fq 'private generated keyword files' "$repo_root/PROVENANCE.md"
 
 "$node_bin" --input-type=module - "$repo_root" "$inventory_root" <<'EOF'
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
@@ -96,6 +120,29 @@ const expectedBundleRoots = [
   "openai",
   "partial-json",
 ];
+const avatarPackageURL = "https://github.com/tim-osterhus/miller-avatar.git";
+const avatarPackageVersion = "0.1.0-alpha.1";
+const avatarPackageRevision = "4f48f55bfeb1fd1f805143bdfadf61ddff541b15";
+const avatarWebFiles = [
+  "Web/app.js",
+  "Web/bundle-manifest.json",
+  "Web/bundle-metafile.json",
+  "Web/index.html",
+  "Web/styles.css",
+];
+const avatarWebHashes = {
+  "Web/app.js": "2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0",
+  "Web/bundle-manifest.json": "99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7",
+  "Web/bundle-metafile.json": "2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6",
+  "Web/index.html": "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
+  "Web/styles.css": "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
+};
+const avatarLegalHashes = {
+  NOTICE: "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
+  "THIRD_PARTY_NOTICES.md": "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
+};
+const avatarAggregateNoticeSHA256 =
+  "134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -156,6 +203,240 @@ async function bundleInventoryUnder(root) {
     total_bytes: files.reduce((total, entry) => total + entry.bytes, 0),
     inventory_sha256: sha256(Buffer.from(JSON.stringify(files))),
   };
+}
+
+async function assertAvatarCheckout(root) {
+  const rootMetadata = await lstat(root);
+  assert.equal(rootMetadata.isSymbolicLink(), false, `symbolic-link Avatar checkout: ${root}`);
+  assert.equal(rootMetadata.isDirectory(), true, `missing Avatar checkout: ${root}`);
+  const worktreeRoot = execFileSync(
+    "git",
+    ["-C", root, "rev-parse", "--show-toplevel"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(worktreeRoot, resolve(root), `Avatar checkout is not a direct Git worktree: ${root}`);
+  const revision = execFileSync(
+    "git",
+    ["-C", root, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(revision, avatarPackageRevision, `Avatar checkout revision: ${root}`);
+  const trackedIndexState = execFileSync(
+    "git",
+    ["-C", root, "ls-files", "-v"],
+    { encoding: "utf8" },
+  );
+  const flaggedIndexState = trackedIndexState
+    .split(/\r?\n/)
+    .filter((line) => /^[a-zS] /.test(line));
+  assert.deepEqual(
+    flaggedIndexState,
+    [],
+    `Avatar checkout has assume-unchanged or skip-worktree files: ${root}`,
+  );
+  const worktreeStatus = execFileSync(
+    "git",
+    ["-C", root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
+    { encoding: "utf8" },
+  );
+  assert.equal(worktreeStatus, "", `dirty Avatar checkout: ${root}\n${worktreeStatus}`);
+  const webRoot = join(root, "Sources", "MillerAvatarHost", "Resources", "Web");
+  assert.deepEqual(
+    await filesUnder(webRoot),
+    avatarWebFiles.map((path) => path.slice("Web/".length)),
+  );
+  const manifest = JSON.parse(await readFile(join(webRoot, "bundle-manifest.json"), "utf8"));
+  assert.deepEqual([...manifest.outputs].sort(), avatarWebFiles.map((path) => path.slice("Web/".length)).sort());
+  assert.deepEqual(Object.keys(manifest.files).sort(), [
+    "app.js", "bundle-metafile.json", "index.html", "styles.css",
+  ].sort());
+  for (const [relativePath, expected] of Object.entries(avatarWebHashes)) {
+    const bytes = await readFile(join(webRoot, relativePath.slice("Web/".length)));
+    assert.equal(sha256(bytes), expected, `Avatar Web hash: ${relativePath}`);
+    if (relativePath !== "Web/bundle-manifest.json") {
+      const name = relativePath.slice("Web/".length);
+      assert.equal(manifest.files[name].sha256, expected, `Avatar manifest hash: ${name}`);
+      assert.equal(manifest.files[name].bytes, bytes.length, `Avatar manifest bytes: ${name}`);
+    }
+  }
+  for (const [name, expected] of Object.entries(avatarLegalHashes)) {
+    const path = join(root, name);
+    const metadata = await lstat(path);
+    assert.equal(metadata.isSymbolicLink(), false, `symbolic-link Avatar legal input: ${path}`);
+    assert.equal(metadata.isFile(), true, `missing Avatar legal input: ${path}`);
+    const bytes = await readFile(path);
+    assert.equal(sha256(bytes), expected, `Avatar legal hash: ${name}`);
+    const text = bytes.toString("utf8");
+    for (const required of name === "NOTICE"
+      ? ["The distributed web renderer contains Three.js", "THIRD_PARTY_NOTICES.md"]
+      : [
+        "Three.js 0.180.0",
+        "pixiv three-vrm 3.5.5",
+        "@pixiv/three-vrm-animation@3.5.5",
+        "Mapbox Earcut 3.0.1",
+        "Copyright © 2016 Mapbox",
+        "Permission to use, copy, modify",
+        "THE SOFTWARE IS PROVIDED",
+      ]) {
+      assert.ok(text.includes(required), `Avatar legal text: ${name}: ${required}`);
+    }
+  }
+}
+
+const packageDump = JSON.parse(execFileSync(
+  "swift",
+  ["package", "dump-package", "--package-path", repoRoot],
+  { encoding: "utf8" },
+));
+const remoteDependencies = (packageDump.dependencies ?? [])
+  .flatMap((dependency) => dependency.sourceControl ?? []);
+const avatarDependencies = remoteDependencies.filter((dependency) => {
+  const remotes = dependency.location?.remote ?? [];
+  return remotes.length === 1 && remotes[0].urlString === avatarPackageURL;
+});
+assert.equal(
+  avatarDependencies.length,
+  1,
+  "Miller Avatar remote dependency URL is not unique",
+);
+assert.deepEqual(
+  avatarDependencies[0].requirement?.exact,
+  [avatarPackageVersion],
+  "Miller Avatar remote dependency is not exact",
+);
+const expectedAvatarProducts = ["MillerAvatarCore", "MillerAvatarHost"];
+const targets = packageDump.targets ?? [];
+assert.equal(
+  targets.some((target) => target.name === "MillerAvatarApp"),
+  false,
+  "MillerAvatarApp target must not exist",
+);
+const allProductNames = targets.flatMap((target) => target.dependencies ?? [])
+  .map((dependency) => dependency.product?.[0])
+  .filter(Boolean);
+assert.equal(
+  allProductNames.includes("MillerAvatarApp"),
+  false,
+  "MillerAvatarApp product dependency must not exist",
+);
+const millerAppTarget = targets.find((target) => target.name === "MillerApp");
+assert.ok(millerAppTarget, "MillerApp target dependency list is missing");
+const avatarProductNames = (millerAppTarget.dependencies ?? [])
+  .filter((dependency) => dependency.product?.[1] === "miller-avatar")
+  .map((dependency) => dependency.product[0])
+  .sort();
+assert.deepEqual(
+  avatarProductNames,
+  expectedAvatarProducts,
+  "MillerApp must link exactly MillerAvatarCore and MillerAvatarHost",
+);
+
+const packageLock = JSON.parse(await readFile(join(repoRoot, "Package.resolved"), "utf8"));
+const avatarPins = packageLock.pins.filter((pin) => pin.identity === "miller-avatar");
+assert.deepEqual(avatarPins, [{
+  identity: "miller-avatar",
+  kind: "remoteSourceControl",
+  location: avatarPackageURL,
+  state: { revision: avatarPackageRevision, version: avatarPackageVersion },
+}]);
+const sdkPins = packageLock.pins.filter((pin) => pin.identity === "swift-sdk");
+assert.equal(sdkPins.length, 1);
+assert.deepEqual(sdkPins[0].state, {
+  revision: "a0ae212ebf6eab5f754c3129608bc5557637e605",
+  version: "0.12.1",
+});
+
+const packageScript = await readFile(join(repoRoot, "scripts/package-dev-app.sh"), "utf8");
+const inventoryScript = await readFile(join(repoRoot, "scripts/release-inventory.mjs"), "utf8");
+const releaseVerifier = await readFile(join(repoRoot, "scripts/verify-release-package.sh"), "utf8");
+for (const path of avatarWebFiles) {
+  assert.match(packageScript, new RegExp(path.replaceAll(".", "\\.")));
+  assert.match(inventoryScript, new RegExp(path.replaceAll(".", "\\.")));
+  assert.match(releaseVerifier, new RegExp(path.replaceAll(".", "\\.")));
+}
+assert.match(packageScript, /MillerAvatar_MillerAvatarHost\.bundle/);
+assert.doesNotMatch(packageScript, /MillerAvatarApp/);
+assert.match(packageScript, /\*\.vrm/);
+assert.match(packageScript, /\*\.vrma/);
+
+const sourceProvenance = await readFile(join(repoRoot, "PROVENANCE.md"), "utf8");
+const sourceNotices = await readFile(join(repoRoot, "THIRD_PARTY_NOTICES.md"), "utf8");
+assert.equal(
+  sha256(Buffer.from(sourceNotices, "utf8")),
+  avatarAggregateNoticeSHA256,
+  "tracked aggregate Avatar notice changed",
+);
+for (const required of [
+  "Miller Avatar v0.1.0-alpha.1",
+  avatarPackageRevision,
+  "Apache-2.0",
+  "MillerAvatar_MillerAvatarHost.bundle",
+  ...avatarWebFiles,
+  "no VRM or VRMA character or motion assets",
+  "Three.js 0.180.0",
+  "@pixiv/three-vrm 3.5.5",
+  "@pixiv/three-vrm-animation 3.5.5",
+  "Mapbox Earcut 3.0.1",
+]) {
+  assert.match(`${sourceProvenance}\n${sourceNotices}`, new RegExp(
+    required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  ));
+}
+
+const sourceSBOM = JSON.parse(
+  await readFile(join(repoRoot, "Packaging", "Miller.spdx.json"), "utf8"),
+);
+for (const [name, version, license] of [
+  ["Miller Avatar", avatarPackageVersion, "Apache-2.0"],
+  ["Three.js", "0.180.0", "MIT"],
+  ["@pixiv/three-vrm", "3.5.5", "MIT"],
+  ["@pixiv/three-vrm-animation", "3.5.5", "MIT"],
+  ["Mapbox Earcut", "3.0.1", "ISC"],
+]) {
+  const packageEntry = sourceSBOM.packages.find((entry) => entry.name === name);
+  assert.ok(packageEntry, `SBOM missing ${name}`);
+  assert.equal(packageEntry.versionInfo, version);
+  assert.equal(packageEntry.licenseConcluded, license);
+  assert.equal(packageEntry.licenseDeclared, license);
+  if (name === "Mapbox Earcut") {
+    assert.equal(
+      packageEntry.packageFileName,
+      "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    );
+  }
+}
+assert.equal(
+  sourceSBOM.relationships.some((relationship) =>
+    relationship.spdxElementId === "SPDXRef-Package-MillerAvatar"
+      && relationship.relationshipType === "DEPENDS_ON"
+      && relationship.relatedSpdxElement === "SPDXRef-Package-MapboxEarcut"),
+  true,
+  "SBOM missing Miller Avatar to Mapbox Earcut relationship",
+);
+
+const avatarCheckoutCandidates = [
+  join(repoRoot, ".build", "swift-no-wake", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "swift-release", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "swift", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "checkouts", "miller-avatar"),
+  process.env.MILLER_AVATAR_CHECKOUT_ROOT,
+].filter(Boolean);
+for (const candidate of avatarCheckoutCandidates) {
+  let metadata;
+  try {
+    metadata = await lstat(candidate);
+  } catch {
+    // A source-only provenance check may run before SwiftPM has materialized its checkout.
+    continue;
+  }
+  assert.equal(metadata.isSymbolicLink(), false, `symbolic-link Avatar checkout: ${candidate}`);
+  assert.equal(metadata.isDirectory(), true, `non-directory Avatar checkout: ${candidate}`);
+  await assertAvatarCheckout(candidate);
+  const upstreamNotice = await readFile(join(candidate, "THIRD_PARTY_NOTICES.md"));
+  assert.ok(
+    Buffer.from(sourceNotices, "utf8").includes(upstreamNotice),
+    `tracked aggregate notice omitted exact upstream notice: ${candidate}`,
+  );
 }
 
 const manifestBytes = await readFile(manifestPath);

@@ -36,6 +36,18 @@ node_archive_bytes="49923798"
 node_archive_sha256="5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
 node_binary_sha256="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
 node_license_sha256="e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
+avatar_package_revision="4f48f55bfeb1fd1f805143bdfadf61ddff541b15"
+avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
+avatar_third_party_notices_sha256="37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f"
+avatar_aggregate_third_party_notices_sha256="134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28"
+typeset -A avatar_web_hashes=(
+  app.js 2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0
+  bundle-manifest.json 99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7
+  bundle-metafile.json 2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6
+  index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
+  styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
+)
+avatar_checkout="$build_root/checkouts/miller-avatar"
 node_stage=""
 gateway_bundle="$staging_root/Miller.app/Contents/Resources/Gateway"
 gateway_app="$gateway_bundle/app"
@@ -59,6 +71,8 @@ previous_bundle=""
 replacement_installed=0
 resource_bundle_matches=()
 resource_bundle=""
+avatar_resource_bundle_matches=()
+avatar_resource_bundle=""
 bin_path=""
 
 [[ ! -L "$artifacts_root" && ( ! -e "$artifacts_root" || -d "$artifacts_root" ) ]] || {
@@ -83,6 +97,142 @@ require_storage_headroom() {
     print -u2 "insufficient storage for bounded $label package step"
     exit 75
   }
+}
+
+verify_avatar_web_bundle() {
+  local web_root="$1"
+  test -d "$web_root"
+  test ! -L "$web_root"
+  test -z "$(find -P "$web_root" -type l -print -quit)"
+  test "$(
+    find -P "$web_root" -type f -print \
+      | sed "s|$web_root/||" \
+      | LC_ALL=C sort
+  )" = "app.js
+bundle-manifest.json
+bundle-metafile.json
+index.html
+styles.css"
+  for web_file expected in ${(kv)avatar_web_hashes}; do
+    test -f "$web_root/$web_file"
+    test ! -L "$web_root/$web_file"
+    test "$(shasum -a 256 "$web_root/$web_file" | awk '{print $1}')" = "$expected"
+  done
+  "$node_path" --input-type=module - "$web_root" <<'EOF'
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const webRoot = process.argv[2];
+const names = ["app.js", "bundle-manifest.json", "bundle-metafile.json", "index.html", "styles.css"];
+const manifest = JSON.parse(await readFile(join(webRoot, "bundle-manifest.json"), "utf8"));
+assert.deepEqual([...manifest.outputs].sort(), [...names].sort());
+assert.deepEqual(Object.keys(manifest.files).sort(), [
+  "app.js", "bundle-metafile.json", "index.html", "styles.css",
+].sort());
+for (const name of ["app.js", "bundle-metafile.json", "index.html", "styles.css"]) {
+  const bytes = await readFile(join(webRoot, name));
+  assert.equal(manifest.files[name].sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(manifest.files[name].bytes, bytes.length);
+}
+EOF
+}
+
+verify_avatar_checkout() {
+  test -d "$avatar_checkout"
+  test ! -L "$avatar_checkout"
+  local checkout_root
+  checkout_root="$(cd "$avatar_checkout" && pwd -P)"
+  local worktree_root
+  worktree_root="$(git -C "$avatar_checkout" rev-parse --show-toplevel)" || {
+    print -u2 "Avatar checkout is not a Git worktree: $avatar_checkout"
+    return 1
+  }
+  test "$worktree_root" = "$checkout_root"
+  local revision
+  revision="$(git -C "$avatar_checkout" rev-parse HEAD)" || {
+    print -u2 "Avatar checkout revision could not be read: $avatar_checkout"
+    return 1
+  }
+  test "$revision" = "$avatar_package_revision"
+  local flagged_index_state
+  flagged_index_state="$(
+    git -C "$avatar_checkout" ls-files -v \
+      | sed -n '/^[a-zS] /p'
+  )" || {
+    print -u2 "Avatar checkout index state could not be read: $avatar_checkout"
+    return 1
+  }
+  if [[ -n "$flagged_index_state" ]]; then
+    print -u2 "Avatar checkout has assume-unchanged or skip-worktree files: $avatar_checkout"
+    print -u2 "$flagged_index_state"
+    return 1
+  fi
+  local worktree_status
+  worktree_status="$(git -C "$avatar_checkout" status --porcelain=v1 --untracked-files=all --ignored)" || {
+    print -u2 "Avatar checkout status could not be read: $avatar_checkout"
+    return 1
+  }
+  if [[ -n "$worktree_status" ]]; then
+    print -u2 "Avatar checkout is dirty, including ignored files: $avatar_checkout"
+    print -u2 "$worktree_status"
+    return 1
+  fi
+}
+
+verify_avatar_notice_embedding() {
+  local aggregate_path="$1"
+  "$node_path" --input-type=module - \
+    "$avatar_checkout/THIRD_PARTY_NOTICES.md" "$aggregate_path" <<'EOF'
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+const upstream = await readFile(process.argv[2]);
+const aggregate = await readFile(process.argv[3]);
+assert.ok(
+  aggregate.includes(upstream),
+  "aggregate Avatar notice does not contain the exact upstream runtime notice",
+);
+EOF
+}
+
+verify_avatar_legal_source() {
+  test -d "$avatar_checkout"
+  test ! -L "$avatar_checkout"
+  test "$(git -C "$avatar_checkout" rev-parse HEAD)" = "$avatar_package_revision"
+  test -f "$avatar_checkout/NOTICE"
+  test ! -L "$avatar_checkout/NOTICE"
+  test -f "$avatar_checkout/THIRD_PARTY_NOTICES.md"
+  test ! -L "$avatar_checkout/THIRD_PARTY_NOTICES.md"
+  test "$(shasum -a 256 "$avatar_checkout/NOTICE" | awk '{print $1}')" = "$avatar_notice_sha256"
+  test "$(shasum -a 256 "$avatar_checkout/THIRD_PARTY_NOTICES.md" | awk '{print $1}')" = "$avatar_third_party_notices_sha256"
+  test -f "$repo_root/THIRD_PARTY_NOTICES.md"
+  test ! -L "$repo_root/THIRD_PARTY_NOTICES.md"
+  test "$(shasum -a 256 "$repo_root/THIRD_PARTY_NOTICES.md" | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+  verify_avatar_notice_embedding "$repo_root/THIRD_PARTY_NOTICES.md"
+}
+
+verify_avatar_legal_output() {
+  local legal_root="$1"
+  test -f "$legal_root/miller-avatar-NOTICE.txt"
+  test ! -L "$legal_root/miller-avatar-NOTICE.txt"
+  test -f "$legal_root/THIRD_PARTY_NOTICES.md"
+  test ! -L "$legal_root/THIRD_PARTY_NOTICES.md"
+  test "$(shasum -a 256 "$legal_root/miller-avatar-NOTICE.txt" | awk '{print $1}')" = "$avatar_notice_sha256"
+  test "$(shasum -a 256 "$legal_root/THIRD_PARTY_NOTICES.md" | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+  for required in \
+    "Three.js 0.180.0" \
+    "pixiv three-vrm 3.5.5" \
+    "@pixiv/three-vrm-animation@3.5.5" \
+    "Mapbox Earcut 3.0.1" \
+    "Copyright © 2016 Mapbox" \
+    "Permission to use, copy, modify" \
+    "THE SOFTWARE IS PROVIDED"
+  do
+    grep -Fq "$required" "$legal_root/THIRD_PARTY_NOTICES.md"
+  done
+  verify_avatar_notice_embedding "$legal_root/THIRD_PARTY_NOTICES.md"
 }
 
 cleanup_staging() {
@@ -121,12 +271,22 @@ trap cleanup_staging EXIT INT TERM
 require_storage_headroom "gateway-dependencies" 524288
 test -d "$gateway_dependencies"
 test ! -L "$gateway_dependencies"
-"$repo_root/scripts/verify-provenance.sh" --development-bundle-inventory
-require_storage_headroom "wakeword-package" 131072
-"$repo_root/scripts/verify-wakeword-dependencies.sh"
 test "$("$node_path" --version)" = "v22.22.0"
 test -x "$node_path"
 test -x "$npm_path"
+
+require_storage_headroom "swift-resolve" 524288
+env \
+  SWIFTPM_MODULECACHE_OVERRIDE="$swift_cache" \
+  CLANG_MODULE_CACHE_PATH="$clang_cache" \
+  swift package resolve \
+    --package-path "$repo_root" \
+    --scratch-path "$build_root"
+verify_avatar_checkout
+verify_avatar_legal_source
+"$repo_root/scripts/verify-provenance.sh" --development-bundle-inventory
+require_storage_headroom "wakeword-package" 131072
+"$repo_root/scripts/verify-wakeword-dependencies.sh"
 
 require_storage_headroom "swift-build" 3145728
 for product in MillerApp MillerCapabilityBridge; do
@@ -171,6 +331,32 @@ test -d "$resource_bundle"
 test ! -L "$resource_bundle"
 test -z "$(find -P "$resource_bundle" -type l -print -quit)"
 
+avatar_resource_bundle_matches=("$bin_path"/MillerAvatar_MillerAvatarHost.bundle(N))
+if (( ${#avatar_resource_bundle_matches} != 1 )); then
+  exit 1
+fi
+avatar_resource_bundle="${avatar_resource_bundle_matches[1]}"
+test -d "$avatar_resource_bundle"
+test ! -L "$avatar_resource_bundle"
+test -z "$(find -P "$avatar_resource_bundle" -type l -print -quit)"
+test "$(
+  find -P "$avatar_resource_bundle" -type f -print \
+    | sed "s|$avatar_resource_bundle/||" \
+    | LC_ALL=C sort
+)" = "Web/app.js
+Web/bundle-manifest.json
+Web/bundle-metafile.json
+Web/index.html
+Web/styles.css"
+test -z "$(find -P "$avatar_resource_bundle" \( \
+  -iname '*.vrm' -o -iname '*.vrma' \
+\) -print -quit)"
+verify_avatar_checkout
+verify_avatar_legal_source
+verify_avatar_web_bundle \
+  "$avatar_checkout/Sources/MillerAvatarHost/Resources/Web"
+verify_avatar_web_bundle "$avatar_resource_bundle/Web"
+
 case "$bundle_root" in
   "$repo_root"/.artifacts/Miller.app|"$repo_root"/.artifacts/release/Miller.app)
     [[ ! -L "$bundle_root" ]] || {
@@ -205,6 +391,7 @@ cp "$binary_path" "$staging_root/Miller.app/Contents/MacOS/Miller"
 cp "$bridge_binary_path" \
   "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 cp -R "$resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
+cp -R "$avatar_resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
 for wakeword_model in \
   encoder.onnx \
   decoder.onnx \
@@ -251,18 +438,17 @@ if [[ "$package_mode" == "release" ]]; then
     printf '# Miller v%s packaged provenance\n\n' "$release_version"
     printf 'This release candidate is not Developer ID-signed and is not notarized. It contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
     printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
+    printf 'Miller Avatar v0.1.0-alpha.1 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 4f48f55bfeb1fd1f805143bdfadf61ddff541b15 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
+    printf 'The Avatar Web payload includes Three.js 0.180.0 and the @pixiv/three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families under MIT terms.\n\n'
     printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
   } > "$legal_root/PROVENANCE.md"
-  {
-    printf '# Third-party notices for Miller v%s\n\n' "$release_version"
-    printf -- '- Model Context Protocol Swift SDK 0.12.1: Apache-2.0/MIT transition terms; https://github.com/modelcontextprotocol/swift-sdk.git\n'
-    printf -- '- Node.js 22.22.0: MIT and bundled upstream notices; see LICENSE.node-22.22.0.\n'
-    printf -- '- @miller/pi-mvp-overlay 0.82.0-a3, openai 6.26.0, and partial-json 0.1.7: notices reviewed in this repository.\n'
-    printf -- '- Sherpa-ONNX 1.13.2 and ONNX Runtime 1.24.4: linked native wake runtime; verified model/token files are shipped under WakeWord/model. Bootstrap archives, headers, and compiler inputs are not shipped.\n'
-  } > "$legal_root/THIRD_PARTY_NOTICES.md"
+  cp "$repo_root/THIRD_PARTY_NOTICES.md" \
+    "$legal_root/THIRD_PARTY_NOTICES.md"
+  cp "$avatar_checkout/NOTICE" "$legal_root/miller-avatar-NOTICE.txt"
   cp "$repo_root/Gateway/vendor/LICENSES/mcp-swift-sdk-LICENSE.txt" \
     "$legal_root/mcp-swift-sdk-LICENSE.txt"
   cp "$repo_root/Packaging/Miller.spdx.json" "$legal_root/Miller.spdx.json"
+  verify_avatar_legal_output "$legal_root"
 fi
 
 test -z "$(find "$gateway_source" -maxdepth 1 -type f -name '*.mjs' \
@@ -373,6 +559,22 @@ test -z "$(
   find -P "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle" \
     -type l -print -quit
 )"
+test "$(
+  find -P "$staging_root/Miller.app/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle" \
+    -type f -print \
+    | sed "s|$staging_root/Miller.app/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/||" \
+    | LC_ALL=C sort
+)" = "Web/app.js
+Web/bundle-manifest.json
+Web/bundle-metafile.json
+Web/index.html
+Web/styles.css"
+test -z "$(find -P \
+  "$staging_root/Miller.app/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle" \
+  \( -iname '*.vrm' -o -iname '*.vrma' \) \
+  -print -quit)"
+verify_avatar_web_bundle \
+  "$staging_root/Miller.app/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web"
 test -f "$gateway_app/server.mjs"
 test -f "$gateway_app/codex-models.mjs"
 test ! -e "$gateway_bundle/codex-models.mjs"
@@ -418,6 +620,7 @@ test -z "$(find "$staging_root/Miller.app" \
   -iname '*MillerWakeBridge*' -o -iname '*MillerWake*' -o \
   -iname '*sherpa*' -o -iname '*gigaspeech*' -o \
   -iname '*wake-model*' -o -iname '*webrtc*' -o -iname '*fake*helper*' -o \
+  -iname '*.vrm' -o -iname '*.vrma' -o \
   -iname '*fixture*' -o -iname '*credential*.json' -o \
   -iname '*credential*.plist' -o -iname '*credential*.db' -o \
   -iname '*credential*.sqlite*' -o -iname '*credentials' -o \

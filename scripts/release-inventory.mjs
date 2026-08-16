@@ -82,6 +82,36 @@ const runtimeInventory = [
     role: "runtime",
   },
   {
+    name: "Miller Avatar",
+    version: "0.1.0-alpha.1",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
+    role: "renderer_resource_bundle",
+  },
+  {
+    name: "Three.js",
+    version: "0.180.0",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    role: "renderer_web_dependency",
+  },
+  {
+    name: "@pixiv/three-vrm",
+    version: "3.5.5",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    role: "renderer_web_dependency",
+  },
+  {
+    name: "@pixiv/three-vrm-animation",
+    version: "3.5.5",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    role: "renderer_web_dependency",
+  },
+  {
+    name: "Mapbox Earcut",
+    version: "3.0.1",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    role: "renderer_web_dependency",
+  },
+  {
     name: "@miller/pi-mvp-overlay",
     version: "0.82.0-a3",
     path: "Contents/Resources/Gateway/app/node_modules/@miller/pi-mvp-overlay",
@@ -101,6 +131,59 @@ const runtimeInventory = [
   },
 ];
 
+const avatarWebFiles = [
+  {
+    name: "app.js",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    sha256: "2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0",
+  },
+  {
+    name: "bundle-manifest.json",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-manifest.json",
+    sha256: "99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7",
+  },
+  {
+    name: "bundle-metafile.json",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-metafile.json",
+    sha256: "2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6",
+  },
+  {
+    name: "index.html",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/index.html",
+    sha256: "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
+  },
+  {
+    name: "styles.css",
+    path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/styles.css",
+    sha256: "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
+  },
+];
+const avatarLegalFiles = [
+  {
+    path: "Contents/Resources/Legal/miller-avatar-NOTICE.txt",
+    sha256: "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
+    requiredText: [
+      "The distributed web renderer contains Three.js",
+      "THIRD_PARTY_NOTICES.md",
+      "No avatar, animation, texture, font, sound",
+    ],
+  },
+  {
+    path: "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+    sha256: "134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28",
+    requiredText: [
+      "Model Context Protocol Swift SDK 0.12.1",
+      "Three.js 0.180.0",
+      "pixiv three-vrm 3.5.5",
+      "@pixiv/three-vrm-animation@3.5.5",
+      "Mapbox Earcut 3.0.1",
+      "Copyright © 2016 Mapbox",
+      "Permission to use, copy, modify",
+      "THE SOFTWARE IS PROVIDED",
+    ],
+  },
+];
+
 const exactFiles = new Set([
   "Contents/Helpers/MillerCapabilityBridge",
   "Contents/MacOS/Miller",
@@ -116,6 +199,7 @@ const exactFiles = new Set([
   "Contents/Resources/Gateway/runtime/node",
   "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
   "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
+  ...avatarWebFiles.map(({ path }) => path),
   "Contents/Resources/WakeWord/model/encoder.onnx",
   "Contents/Resources/WakeWord/model/decoder.onnx",
   "Contents/Resources/WakeWord/model/joiner.onnx",
@@ -125,6 +209,7 @@ const exactFiles = new Set([
   "Contents/Resources/Legal/NOTICE",
   "Contents/Resources/Legal/PROVENANCE.md",
   "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+  ...avatarLegalFiles.map(({ path }) => path),
   "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt",
   "Contents/Resources/Legal/Miller.spdx.json",
 ]);
@@ -158,7 +243,7 @@ const reviewedBinaryExceptions = new Map([
   ],
 ]);
 
-const forbiddenPath = /(?:^|\/)(?:\.DS_Store|\.env(?:\..*)?|provider[-_]?payload(?:\..*)?|record(?:ing)?[-_][^/]*|history[-_][^/]*|oauth[-_][^/]*\.json|oauth\.json|private[-_]?key[^/]*|transcript(?:[-_][^/]*|\.(?:json|txt|md|csv|db|sqlite(?:3)?|wal|shm))|socket[-_]?token[^/]*|unix[-_]?socket[^/]*|fixture[^/]*|fake[-_]?helper[^/]*)(?:$|\/)|\.(?:db|sqlite|sqlite3|wal|shm|sock|socket|log|wav|mp3|m4a|aac|flac|ogg|opus|pcm|caf|aiff|pem|key|p12|pfx|csv)$/i;
+const forbiddenPath = /(?:^|\/)(?:\.DS_Store|\.env(?:\..*)?|provider[-_]?payload(?:\..*)?|record(?:ing)?[-_][^/]*|history[-_][^/]*|oauth[-_][^/]*\.json|oauth\.json|private[-_]?key[^/]*|transcript(?:[-_][^/]*|\.(?:json|txt|md|csv|db|sqlite(?:3)?|wal|shm))|socket[-_]?token[^/]*|unix[-_]?socket[^/]*|fixture[^/]*|fake[-_]?helper[^/]*)(?:$|\/)|\.(?:db|sqlite|sqlite3|wal|shm|sock|socket|log|wav|mp3|m4a|aac|flac|ogg|opus|pcm|caf|aiff|pem|key|p12|pfx|csv|vrm|vrma)$/i;
 const forbiddenContent = new RegExp(
   [
     String.raw`(?:\/Users\/|\.build(?:\/|$)|Desktop\/Millrace-Dev)`,
@@ -168,6 +253,7 @@ const forbiddenContent = new RegExp(
   ].join("|"),
   "i",
 );
+const legalAggregatePath = "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md";
 const forbiddenDataContent = /(?:\b(?:OPENAI|AZURE_OPENAI|CODEX|MCP)_API_KEY\b\s*[:=]\s*["'][^"']+["']|\b(?:ACCESS|REFRESH|ID)_TOKEN\b\s*[:=]\s*["'][^"']+["']|\b(?:CLIENT|PRIVATE|SHARED)_SECRET\b\s*[:=]\s*["'][^"']+["']|\bauthorization\s*[:=]\s*bearer\s+\S+|-----BEGIN [A-Z0-9 ]+-----|\b(?:provider[-_]?payload|transcript|recording|audio[-_]?data|history[-_]?entry|socket[-_]?token|oauth[-_]?token)\b\s*[:=]\s*["'][^"']+["'])/i;
 
 function sha256(bytes) {
@@ -223,6 +309,63 @@ function assertCredentialStore(path, bytes, digest) {
   }
   if (/-----BEGIN|access_token\s*[:=]\s*["'][^"']+|refresh_token\s*[:=]\s*["'][^"']+/i.test(text)) {
     fail(`credential-store contains credential material: ${path}`);
+  }
+}
+
+async function assertAvatarWebClosure(bundle) {
+  const manifestPath = avatarWebFiles.find(
+    ({ name }) => name === "bundle-manifest.json",
+  ).path;
+  const manifestFile = join(bundle, manifestPath);
+  await requiredRegular(manifestFile, "Avatar Web manifest");
+  const manifestBytes = await readFile(manifestFile);
+  const manifestDigest = sha256(manifestBytes);
+  const manifestEntry = avatarWebFiles.find(({ name }) => name === "bundle-manifest.json");
+  if (manifestDigest !== manifestEntry.sha256) {
+    fail(`Avatar Web manifest hash changed: ${manifestPath}`);
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes);
+  } catch (error) {
+    fail(`invalid Avatar Web manifest: ${error}`);
+  }
+  const expectedOutputs = avatarWebFiles.map(({ name }) => name).sort();
+  if (!Array.isArray(manifest.outputs)
+      || JSON.stringify([...manifest.outputs].sort()) !== JSON.stringify(expectedOutputs)) {
+    fail("Avatar Web output list changed");
+  }
+  const expectedManifestFiles = avatarWebFiles
+    .filter(({ name }) => name !== "bundle-manifest.json")
+    .map(({ name }) => name)
+    .sort();
+  if (!manifest.files || JSON.stringify(Object.keys(manifest.files).sort())
+      !== JSON.stringify(expectedManifestFiles)) {
+    fail("Avatar Web manifest file list changed");
+  }
+  for (const entry of avatarWebFiles.filter(({ name }) => name !== "bundle-manifest.json")) {
+    const path = join(bundle, entry.path);
+    await requiredRegular(path, `Avatar Web file ${entry.name}`);
+    const bytes = await readFile(path);
+    const digest = sha256(bytes);
+    if (digest !== entry.sha256) fail(`Avatar Web hash changed: ${entry.path}`);
+    const listed = manifest.files[entry.name];
+    if (!listed || listed.sha256 !== digest || listed.bytes !== bytes.length) {
+      fail(`Avatar Web manifest entry changed: ${entry.name}`);
+    }
+  }
+}
+
+async function assertAvatarLegalClosure(bundle) {
+  for (const entry of avatarLegalFiles) {
+    const path = join(bundle, entry.path);
+    await requiredRegular(path, `Avatar legal file ${entry.path}`);
+    const bytes = await readFile(path);
+    if (sha256(bytes) !== entry.sha256) fail(`Avatar legal hash changed: ${entry.path}`);
+    const text = bytes.toString("utf8");
+    for (const required of entry.requiredText) {
+      if (!text.includes(required)) fail(`Avatar legal text missing from ${entry.path}: ${required}`);
+    }
   }
 }
 
@@ -322,9 +465,11 @@ async function collectFiles(bundle, { allowSyntheticBinary = false } = {}) {
       ? printableStrings(bytes)
       : bytes.toString("utf8");
     const reviewedBinary = assertReviewedBinary(relativePath, digest, text, { allowSyntheticBinary });
+    const hasForbiddenNonLegalContent =
+      relativePath !== legalAggregatePath && forbiddenContent.test(text);
     if (
       !reviewedBinary
-      && (forbiddenContent.test(text)
+      && (hasForbiddenNonLegalContent
         || (!credentialStoreHashes.has(relativePath) && forbiddenDataContent.test(text)))
     ) {
       fail(`private or forbidden content in bundle: ${relativePath}`);
@@ -362,6 +507,8 @@ async function buildInventory(
   { allowExisting = false, expectedDependencyInventory, allowSyntheticBinary = false } = {},
 ) {
   await assertInventoryOutput(bundle, output, { allowExisting });
+  await assertAvatarWebClosure(bundle);
+  await assertAvatarLegalClosure(bundle);
   const files = await collectFiles(bundle, { allowSyntheticBinary });
   for (const path of exactFiles) {
     await requiredRegular(join(bundle, path), `canonical release file ${path}`);

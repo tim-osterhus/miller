@@ -56,6 +56,10 @@ let package = Package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
             exact: "0.12.1"
         ),
+        .package(
+            url: "https://github.com/tim-osterhus/miller-avatar.git",
+            exact: "0.1.0-alpha.1"
+        ),
     ],
     targets: [
         .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
@@ -106,6 +110,8 @@ let package = Package(
             dependencies: [
                 "MillerCore", "MillerStorage", "MillerGateway", "MillerLive",
                 "MillerLiveAudio", "MillerCapabilities", "MillerWake",
+                .product(name: "MillerAvatarCore", package: "miller-avatar"),
+                .product(name: "MillerAvatarHost", package: "miller-avatar"),
             ],
             resources: [.process("Resources")],
             swiftSettings: [

@@ -13,6 +13,164 @@ Miller capability bridge; no SDK source tree is bundled. The exact reviewed
 license text is packaged at
 `Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
+## Miller Avatar v0.1.0-alpha.1 — Apache License 2.0
+
+Miller links `MillerAvatarCore` and `MillerAvatarHost` from
+`https://github.com/tim-osterhus/miller-avatar.git`, tag `v0.1.0-alpha.1`,
+resolved to commit `4f48f55bfeb1fd1f805143bdfadf61ddff541b15`. The package is
+licensed under Apache-2.0. `MillerAvatarApp` is a diagnostic product and is
+not linked or packaged by Miller.
+
+Only the following fixed host resource files are distributed under
+`Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/`:
+`app.js`, `bundle-manifest.json`, `bundle-metafile.json`, `index.html`, and
+`styles.css`. No VRM or VRMA character or motion assets are distributed.
+
+## Three.js 0.180.0 — MIT License
+
+Source: `https://github.com/mrdoob/three.js`, immutable tag `r180`.
+
+Copyright © 2010-2025 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## @pixiv/three-vrm core family 3.5.5 — MIT License
+
+Package family anchor: `@pixiv/three-vrm 3.5.5`.
+
+Source: `https://github.com/pixiv/three-vrm`, immutable commit
+`ff42fae4fcee1fcbca2cd262c7f5f8cbddeaf5ab`.
+
+The core family is licensed under MIT. It includes the emitted VRM 1.0,
+MToon, expression, look-at, spring-bone, and node-constraint code. It does not
+include any character or model asset.
+
+Copyright © 2019-2026 pixiv Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## @pixiv/three-vrm-animation 3.5.5 — MIT License
+
+Source: `https://github.com/pixiv/three-vrm`, immutable commit
+`ff42fae4fcee1fcbca2cd262c7f5f8cbddeaf5ab`. This package supplies VRMA 1.0
+parsing and conversion code only; it does not supply motion bytes. Its
+embedded core code is covered by the pixiv MIT notice above.
+
+## Embedded Miller Avatar runtime notice
+
+The following block is the exact tagged Miller Avatar runtime notice. It is
+retained unchanged so the packaged standard notice contains the upstream
+runtime license text at the path named by the upstream `NOTICE`.
+
+# Third-party notices
+
+The runtime bundle contains portions of Three.js, pixiv three-vrm, and
+@pixiv/three-vrm-animation@3.5.5. Build tools are listed after the runtime
+notices and are not distributed in the app.
+
+## Three.js 0.180.0 — MIT License
+
+Copyright © 2010-2025 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## pixiv three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families — MIT License
+
+Copyright © 2019-2026 pixiv Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Mapbox Earcut 3.0.1 — ISC License
+
+Copyright © 2016 Mapbox
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+## Build-only tools
+
+TypeScript 7.0.2 and its platform packages use the Apache License 2.0,
+Copyright Microsoft Corporation. The package-supplied
+`NOTICE.txt` governs the tool installation; neither TypeScript nor its notice
+payload is emitted into Miller Avatar.
+
+esbuild 0.28.1 and its platform packages are licensed under the MIT License,
+Copyright © 2020 Evan Wallace. Neither esbuild nor its native executable is
+emitted into Miller Avatar.
+
 ## v0.1.2 application inventory
 
 The application ships the Miller executable with statically linked MCP and

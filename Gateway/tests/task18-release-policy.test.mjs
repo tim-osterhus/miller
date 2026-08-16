@@ -22,6 +22,75 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const node = process.execPath;
 const inventoryScript = join(repoRoot, "scripts", "release-inventory.mjs");
+const avatarPackageRevision = "4f48f55bfeb1fd1f805143bdfadf61ddff541b15";
+const avatarRequiredFiles = [
+  "NOTICE",
+  "THIRD_PARTY_NOTICES.md",
+  "Sources/MillerAvatarHost/Resources/Web/app.js",
+  "Sources/MillerAvatarHost/Resources/Web/bundle-manifest.json",
+  "Sources/MillerAvatarHost/Resources/Web/bundle-metafile.json",
+  "Sources/MillerAvatarHost/Resources/Web/index.html",
+  "Sources/MillerAvatarHost/Resources/Web/styles.css",
+];
+const avatarCheckoutCandidates = [
+  join(repoRoot, ".build", "swift-no-wake", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "swift-release", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "swift", "checkouts", "miller-avatar"),
+  join(repoRoot, ".build", "checkouts", "miller-avatar"),
+];
+
+async function resolveAvatarCheckout() {
+  const failures = [];
+  for (const candidate of avatarCheckoutCandidates) {
+    try {
+      const metadata = await lstat(candidate);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        failures.push(`${candidate}: not a regular directory`);
+        continue;
+      }
+      const revision = execFileSync(
+        "git",
+        ["-C", candidate, "rev-parse", "HEAD"],
+        { encoding: "utf8" },
+      ).trim();
+      if (revision !== avatarPackageRevision) {
+        failures.push(`${candidate}: revision ${revision}`);
+        continue;
+      }
+      for (const relativePath of avatarRequiredFiles) {
+        const file = await lstat(join(candidate, relativePath));
+        if (file.isSymbolicLink() || !file.isFile()) {
+          throw new Error(`${relativePath} is not a regular file`);
+        }
+      }
+      return candidate;
+    } catch (error) {
+      failures.push(`${candidate}: ${String(error)}`);
+    }
+  }
+  throw new Error(
+    `Miller Avatar fixture checkout not found in supported active scratch paths: ${failures.join("; ")}`,
+  );
+}
+
+const avatarCheckout = await resolveAvatarCheckout();
+const avatarWebSourceRoot = join(
+  avatarCheckout,
+  "Sources",
+  "MillerAvatarHost",
+  "Resources",
+  "Web",
+);
+const avatarLegalSources = new Map([
+  [
+    "Contents/Resources/Legal/miller-avatar-NOTICE.txt",
+    join(avatarCheckout, "NOTICE"),
+  ],
+  [
+    "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+    join(repoRoot, "THIRD_PARTY_NOTICES.md"),
+  ],
+]);
 const {
   buildInventory,
   dependencyClosureInventory,
@@ -48,6 +117,11 @@ async function makeBundle() {
     "Contents/Resources/Gateway/runtime/node",
     "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
     "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-manifest.json",
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-metafile.json",
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/index.html",
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/styles.css",
     "Contents/Resources/WakeWord/model/encoder.onnx",
     "Contents/Resources/WakeWord/model/decoder.onnx",
     "Contents/Resources/WakeWord/model/joiner.onnx",
@@ -63,9 +137,18 @@ async function makeBundle() {
   for (const relativePath of files) {
     const path = join(bundle, relativePath);
     await mkdir(dirname(path), { recursive: true });
+    const avatarWebName = relativePath.startsWith(
+      "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/",
+    )
+      ? relativePath.slice(
+        "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/".length,
+      ).slice("Web/".length)
+      : null;
     const contents = relativePath.endsWith("credential-store.mjs")
       ? await readFile(join(repoRoot, "Gateway", "src", "credential-store.mjs"))
-      : `fixture:${relativePath}\n`;
+      : avatarWebName
+        ? await readFile(join(avatarWebSourceRoot, avatarWebName))
+        : `fixture:${relativePath}\n`;
     await writeFile(path, contents);
   }
   for (const dependency of [
@@ -82,7 +165,16 @@ async function makeBundle() {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `{"name":"${dependency}"}\n`);
   }
+  await addAvatarLegalPayload({ bundle });
   return { root, bundle, output };
+}
+
+async function addAvatarLegalPayload(fixture) {
+  for (const [relativePath, sourcePath] of avatarLegalSources) {
+    const destination = join(fixture.bundle, relativePath);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, await readFile(sourcePath));
+  }
 }
 
 function runInventory(args) {
@@ -129,6 +221,15 @@ test("release inventory has an explicit external self-exclusion", async () => {
       scope: "release-root",
       reason: "inventory is outside Miller.app and is never part of its file set",
     });
+    assert.deepEqual(
+      inventory.runtime_inventory.find(({ name }) => name === "Mapbox Earcut"),
+      {
+        name: "Mapbox Earcut",
+        version: "3.0.1",
+        path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+        role: "renderer_web_dependency",
+      },
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -137,6 +238,331 @@ test("release inventory has an explicit external self-exclusion", async () => {
 test("release inventory has no production path-based fixture bypass", async () => {
   const script = await readFile(inventoryScript, "utf8");
   assert.doesNotMatch(script, /isSyntheticPolicyFixture|miller-task18-policy/);
+});
+
+test("Avatar fixture resolver prefers active CI scratch paths and requires the pinned checkout", async () => {
+  assert.deepEqual(
+    avatarCheckoutCandidates.map((candidate) => candidate.slice(`${repoRoot}/`.length)),
+    [
+      ".build/swift-no-wake/checkouts/miller-avatar",
+      ".build/swift-release/checkouts/miller-avatar",
+      ".build/swift/checkouts/miller-avatar",
+      ".build/checkouts/miller-avatar",
+    ],
+  );
+  const script = await readFile(join(repoRoot, "scripts", "package-dev-app.sh"), "utf8");
+  assert.match(script, /swift package resolve[\s\S]*--scratch-path/);
+  assert.match(script, /git -C "\$avatar_checkout" status --porcelain=v1 --untracked-files=all --ignored/);
+  assert.match(script, new RegExp(avatarPackageRevision));
+});
+
+test("Avatar checkout guards reject hidden Git index state before trusting status", async () => {
+  const packageScript = await readFile(
+    join(repoRoot, "scripts", "package-dev-app.sh"),
+    "utf8",
+  );
+  const provenanceScript = await readFile(
+    join(repoRoot, "scripts", "verify-provenance.sh"),
+    "utf8",
+  );
+  assert.match(packageScript, /git -C "\$avatar_checkout" ls-files -v/);
+  assert.match(packageScript, /\^\[a-zS\] /);
+  assert.match(provenanceScript, /["']ls-files["'][\s\S]*["']-v["']/);
+  assert.match(provenanceScript, /\^\[a-zS\] /);
+
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "miller-task18-git-index-"));
+  try {
+    for (const name of [
+      "avatar-assume-unchanged",
+      "avatar-skip-worktree",
+      "avatar-both-flags",
+      "avatar-clean",
+    ]) {
+      await writeFile(join(fixtureRoot, name), `${name}\n`);
+    }
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.email", "miller-task18@example.invalid"],
+      ["config", "user.name", "Miller Task 18"],
+      ["add", "."],
+      ["commit", "--quiet", "-m", "fixture"],
+      ["update-index", "--assume-unchanged", "avatar-assume-unchanged"],
+      ["update-index", "--skip-worktree", "avatar-skip-worktree"],
+      ["update-index", "--assume-unchanged", "avatar-both-flags"],
+      ["update-index", "--skip-worktree", "avatar-both-flags"],
+    ]) {
+      const result = spawnSync("git", args, {
+        cwd: fixtureRoot,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const listed = spawnSync("git", ["ls-files", "-v"], {
+      cwd: fixtureRoot,
+      encoding: "utf8",
+    });
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /^h avatar-assume-unchanged$/m);
+    assert.match(listed.stdout, /^S avatar-skip-worktree$/m);
+    assert.match(listed.stdout, /^s avatar-both-flags$/m);
+    assert.match(listed.stdout, /^H avatar-clean$/m);
+    assert.ok(
+      listed.stdout.split("\n").some((line) => /^[hS] /.test(line)),
+      "the fixture must exercise the hidden index-state prefixes",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("live SwiftPM manifest binds Miller Avatar to the exact official products", async () => {
+  const dump = JSON.parse(execFileSync(
+    "swift",
+    ["package", "dump-package", "--package-path", repoRoot],
+    {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      shell: false,
+      timeout: 30_000,
+    },
+  ));
+  const officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git";
+  const avatarVersion = "0.1.0-alpha.1";
+  const avatarDependencies = (dump.dependencies ?? [])
+    .flatMap((dependency) => dependency.sourceControl ?? [])
+    .filter((dependency) =>
+      (dependency.location?.remote ?? []).length === 1
+        && dependency.location.remote[0].urlString === officialAvatarURL,
+    );
+  assert.equal(avatarDependencies.length, 1);
+  assert.deepEqual(avatarDependencies[0].requirement?.exact, [avatarVersion]);
+
+  const targets = dump.targets ?? [];
+  assert.equal(
+    targets.some((target) => target.name === "MillerAvatarApp"),
+    false,
+    "MillerAvatarApp target must not exist in the live manifest",
+  );
+  const linkedProducts = targets.flatMap((target) => target.dependencies ?? [])
+    .map((dependency) => dependency.product?.[0])
+    .filter(Boolean);
+  assert.equal(
+    linkedProducts.includes("MillerAvatarApp"),
+    false,
+    "MillerAvatarApp product must not be linked in the live manifest",
+  );
+  const millerAppTarget = targets.find((target) => target.name === "MillerApp");
+  assert.ok(millerAppTarget, "MillerApp target is missing from the live manifest");
+  const avatarProducts = (millerAppTarget.dependencies ?? [])
+    .filter((dependency) => dependency.product?.[1] === "miller-avatar")
+    .map((dependency) => dependency.product[0])
+    .sort();
+  assert.deepEqual(avatarProducts, ["MillerAvatarCore", "MillerAvatarHost"]);
+});
+
+test("Avatar package and provenance checks reject dirty or non-semantic manifest authority", async () => {
+  const packageScript = await readFile(
+    join(repoRoot, "scripts", "package-dev-app.sh"),
+    "utf8",
+  );
+  const provenanceScript = await readFile(
+    join(repoRoot, "scripts", "verify-provenance.sh"),
+    "utf8",
+  );
+  assert.match(packageScript, /verify_avatar_checkout/);
+  assert.match(packageScript, /--untracked-files=all --ignored/);
+  assert.match(packageScript, /swift build[\s\S]*verify_avatar_checkout/);
+  assert.match(provenanceScript, /status[\s\S]*--untracked-files=all[\s\S]*--ignored/);
+  assert.match(provenanceScript, /dump-package[\s\S]*--package-path/);
+  assert.doesNotMatch(provenanceScript, /removingSwiftComments|avatarDeclarationPattern/);
+});
+
+test("Miller Avatar packaging closes the exact host Web resource inventory", async () => {
+  const packageScript = await readFile(
+    join(repoRoot, "scripts", "package-dev-app.sh"),
+    "utf8",
+  );
+  const verifier = await readFile(
+    join(repoRoot, "scripts", "verify-release-package.sh"),
+    "utf8",
+  );
+  const provenanceVerifier = await readFile(
+    join(repoRoot, "scripts", "verify-provenance.sh"),
+    "utf8",
+  );
+  const requiredPaths = [
+    "Web/app.js",
+    "Web/bundle-manifest.json",
+    "Web/bundle-metafile.json",
+    "Web/index.html",
+    "Web/styles.css",
+  ];
+
+  assert.match(packageScript, /MillerAvatar_MillerAvatarHost\.bundle/);
+  assert.doesNotMatch(packageScript, /MillerAvatarApp/);
+  for (const path of requiredPaths) {
+    assert.match(packageScript, new RegExp(path.replaceAll(".", "\\.")));
+    assert.match(verifier, new RegExp(path.replaceAll(".", "\\.")));
+    assert.match(provenanceVerifier, new RegExp(path.replaceAll(".", "\\.")));
+  }
+  assert.match(packageScript, /\*\.vrm/);
+  assert.match(packageScript, /\*\.vrma/);
+  assert.match(verifier, /\*\.vrm/);
+  assert.match(verifier, /\*\.vrma/);
+  assert.match(provenanceVerifier, /avatarProductNames/);
+  assert.match(provenanceVerifier, /MillerAvatarCore.*MillerAvatarHost/s);
+});
+
+test("Avatar-Off launch evidence is explicitly deferred at the protected release boundary", async () => {
+  const provenance = await readFile(join(repoRoot, "PROVENANCE.md"), "utf8");
+  assert.match(provenance, /packaged-app Avatar-Off launch test is deferred/);
+  assert.match(provenance, /protected retained release boundary/);
+  assert.match(provenance, /deterministic production source contract/);
+});
+
+test("release inventory accepts only the five Miller Avatar Web files", async () => {
+  const fixture = await makeBundle();
+  const avatarWebRoot = join(
+    fixture.bundle,
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web",
+  );
+  const requiredPaths = [
+    "app.js",
+    "bundle-manifest.json",
+    "bundle-metafile.json",
+    "index.html",
+    "styles.css",
+  ];
+  try {
+    const accepted = await runFixtureInventory(fixture);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    for (const name of requiredPaths) {
+      await unlink(join(avatarWebRoot, name));
+      await rm(fixture.output, { force: true });
+      const missing = await runFixtureInventory(fixture);
+      assert.notEqual(missing.status, 0, `${name} was not mandatory`);
+      await writeFile(
+        join(avatarWebRoot, name),
+        await readFile(join(avatarWebSourceRoot, name)),
+      );
+    }
+    await writeFile(join(avatarWebRoot, "extra.bin"), "unreviewed\n");
+    await rm(fixture.output, { force: true });
+    const extra = await runFixtureInventory(fixture);
+    assert.notEqual(extra.status, 0, "extra Avatar resource was accepted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("release inventory rejects a mutated approved Avatar Web filename", async () => {
+  const fixture = await makeBundle();
+  const app = join(
+    fixture.bundle,
+    "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+  );
+  try {
+    const accepted = await runFixtureInventory(fixture);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    await writeFile(app, `${await readFile(app, "utf8")}\nmutated approved filename\n`);
+    await rm(fixture.output, { force: true });
+    const mutated = await runFixtureInventory(fixture);
+    assert.notEqual(mutated.status, 0, "mutated approved Web filename was accepted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("release inventory closes Avatar legal files to exact bytes, content, and regular-file boundaries", async () => {
+  const fixture = await makeBundle();
+  const cases = [
+    {
+      name: "missing notice",
+      mutate: async (path) => {
+        await unlink(path);
+      },
+    },
+    {
+      name: "symlinked notice",
+      mutate: async (path) => {
+        await unlink(path);
+        await symlink("THIRD_PARTY_NOTICES.md", path);
+      },
+    },
+    {
+      name: "mutated notices",
+      mutate: async (path) => {
+        await writeFile(path, "Mapbox Earcut 3.0.1\n");
+      },
+    },
+  ];
+  const notice = join(
+    fixture.bundle,
+    "Contents/Resources/Legal/miller-avatar-NOTICE.txt",
+  );
+  try {
+    const accepted = await runFixtureInventory(fixture);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    const acceptedNotice = await readFile(notice);
+    const notices = await readFile(
+      join(
+        fixture.bundle,
+        "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+      ),
+      "utf8",
+    );
+    assert.ok(
+      notices.includes(await readFile(join(avatarCheckout, "THIRD_PARTY_NOTICES.md"), "utf8")),
+      "packaged aggregate omitted the exact upstream Avatar runtime notice",
+    );
+    for (const required of [
+      "Three.js 0.180.0",
+      "pixiv three-vrm 3.5.5",
+      "@pixiv/three-vrm-animation@3.5.5",
+      "Mapbox Earcut 3.0.1",
+      "Copyright © 2016 Mapbox",
+      "Permission to use, copy, modify",
+      "THE SOFTWARE IS PROVIDED",
+    ]) {
+      assert.ok(notices.includes(required), `missing legal text: ${required}`);
+    }
+    for (const { name, mutate } of cases) {
+      await rm(notice, { force: true });
+      await writeFile(notice, acceptedNotice);
+      await rm(fixture.output, { force: true });
+      const reset = await runFixtureInventory(fixture);
+      assert.equal(
+        reset.status,
+        0,
+        `${name} did not start from a complete accepted legal fixture: ${reset.stderr}`,
+      );
+      await rm(fixture.output, { force: true });
+      await mutate(notice);
+      const result = await runFixtureInventory(fixture);
+      assert.notEqual(result.status, 0, `${name} was accepted`);
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("release inventory rejects Avatar model and motion payloads", async () => {
+  const fixture = await generateFixture();
+  try {
+    const avatarWebRoot = join(
+      fixture.bundle,
+      "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web",
+    );
+    for (const name of ["character.vrm", "idle.vrma"]) {
+      await writeFile(join(avatarWebRoot, name), "forbidden asset\n");
+      await rm(fixture.output, { force: true });
+      const result = await runFixtureInventory(fixture);
+      assert.notEqual(result.status, 0, `${name} was accepted`);
+      await unlink(join(avatarWebRoot, name));
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("release inventory generation rejects an incomplete canonical bundle", async () => {
@@ -557,6 +983,32 @@ test("application SBOM attributes MCP through MillerApp and MillerCapabilities",
     await readFile(join(repoRoot, "scripts", "package-dev-app.sh"), "utf8"),
     /mcp-swift-sdk-LICENSE\.txt/,
   );
+});
+
+test("application SBOM attributes emitted Mapbox Earcut as ISC code", async () => {
+  const sbom = JSON.parse(
+    await readFile(join(repoRoot, "Packaging", "Miller.spdx.json"), "utf8"),
+  );
+  const earcut = sbom.packages.find(({ name }) => name === "Mapbox Earcut");
+  assert.deepEqual(
+    earcut,
+    {
+      name: "Mapbox Earcut",
+      SPDXID: "SPDXRef-Package-MapboxEarcut",
+      versionInfo: "3.0.1",
+      downloadLocation: "https://github.com/mapbox/earcut",
+      filesAnalyzed: false,
+      licenseConcluded: "ISC",
+      licenseDeclared: "ISC",
+      copyrightText: "Copyright © 2016 Mapbox",
+      packageFileName: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
+    },
+  );
+  assert.ok(sbom.relationships.some((entry) =>
+    entry.spdxElementId === "SPDXRef-Package-MillerAvatar"
+      && entry.relationshipType === "DEPENDS_ON"
+      && entry.relatedSpdxElement === "SPDXRef-Package-MapboxEarcut",
+  ));
 });
 
 test("qualification names idle native Miller RSS without broker attribution", async () => {

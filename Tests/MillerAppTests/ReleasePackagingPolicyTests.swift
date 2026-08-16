@@ -41,12 +41,9 @@ struct ReleasePackagingPolicyTests {
 
     @Test
     func officialMCPDependencyIsPinnedExactly() throws {
-        let manifest = try String(
-            contentsOf: repositoryRoot.appendingPathComponent("Package.swift"),
-            encoding: .utf8
-        )
+        let dump = try semanticPackageDump()
 
-        #expect(ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: manifest))
+        #expect(ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: dump))
     }
 
     @Test
@@ -56,6 +53,133 @@ struct ReleasePackagingPolicyTests {
         let lock = try JSONDecoder().decode(PackageLock.self, from: lockData)
 
         #expect(ReleasePackagingPolicy.hasApprovedSDKLock(lock))
+    }
+
+    @Test
+    func officialMillerAvatarDependencyIsPinnedExactlyAndOnlyHostProductsLinkToMillerApp() throws {
+        let dump = try semanticPackageDump()
+
+        #expect(ReleasePackagingPolicy.hasApprovedAvatarDeclaration(in: dump))
+        #expect(ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: dump))
+    }
+
+    @Test
+    func officialMillerAvatarDependencyIsLockedToTheReviewedTagRevision() throws {
+        let lockURL = repositoryRoot.appendingPathComponent("Package.resolved")
+        let lockData = try Data(contentsOf: lockURL)
+        let lock = try JSONDecoder().decode(PackageLock.self, from: lockData)
+
+        #expect(ReleasePackagingPolicy.hasApprovedAvatarLock(lock))
+    }
+
+    @Test
+    func avatarResourcePackagingIsClosedToTheFiveWebFiles() throws {
+        let packageScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/package-dev-app.sh"),
+            encoding: .utf8
+        )
+        let inventoryScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/release-inventory.mjs"),
+            encoding: .utf8
+        )
+        let verifier = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/verify-release-package.sh"),
+            encoding: .utf8
+        )
+        let requiredPaths = [
+            "Web/app.js",
+            "Web/bundle-manifest.json",
+            "Web/bundle-metafile.json",
+            "Web/index.html",
+            "Web/styles.css",
+        ]
+
+        #expect(packageScript.contains("MillerAvatar_MillerAvatarHost.bundle"))
+        #expect(packageScript.contains("MillerAvatarApp") == false)
+        for path in requiredPaths {
+            #expect(packageScript.contains(path), "missing package assertion: \(path)")
+            #expect(inventoryScript.contains(path), "missing inventory assertion: \(path)")
+            #expect(verifier.contains(path), "missing release assertion: \(path)")
+        }
+        #expect(packageScript.contains("*.vrm"))
+        #expect(packageScript.contains("*.vrma"))
+        #expect(verifier.contains("*.vrm"))
+        #expect(verifier.contains("*.vrma"))
+    }
+
+    @Test
+    func avatarPackagingContractsPinTaggedWebAndLegalPayloads() throws {
+        let packageScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/package-dev-app.sh"),
+            encoding: .utf8
+        )
+        let inventoryScript = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/release-inventory.mjs"),
+            encoding: .utf8
+        )
+        let verifier = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/verify-release-package.sh"),
+            encoding: .utf8
+        )
+        let provenanceVerifier = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/verify-provenance.sh"),
+            encoding: .utf8
+        )
+        let contracts = [packageScript, inventoryScript, verifier, provenanceVerifier]
+        for required in [
+            "miller-avatar-NOTICE.txt",
+            "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
+            "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
+            "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
+            "134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28",
+            "2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0",
+            "99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7",
+            "2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6",
+            "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
+            "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
+            "Mapbox Earcut 3.0.1",
+            "Copyright © 2016 Mapbox",
+            "Permission to use, copy, modify",
+        ] {
+            #expect(
+                contracts.contains { $0.contains(required) },
+                "missing Avatar closure contract: \(required)"
+            )
+        }
+    }
+
+    @Test
+    func avatarDisabledLinkContractDoesNotAccessProfilesOrActivateRenderer() throws {
+        let dump = try semanticPackageDump()
+        #expect(ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: dump))
+
+        let sourceRoot = repositoryRoot.appendingPathComponent("Sources/MillerApp")
+        let sourceFiles = try #require(
+            FileManager.default.enumerator(
+                at: sourceRoot,
+                includingPropertiesForKeys: [.isRegularFileKey]
+            )?.compactMap { $0 as? URL }
+                .filter { $0.pathExtension == "swift" }
+        )
+        let forbiddenActivationTerms = [
+            "import MillerAvatarCore",
+            "import MillerAvatarHost",
+            "MillerAvatarHost",
+            "AvatarProfileStore",
+            "AvatarSurfaceController",
+            "WebKitAvatarRendererDriver",
+            "loadModel",
+            "activateRenderer",
+        ]
+        for sourceFile in sourceFiles {
+            let source = try String(contentsOf: sourceFile, encoding: .utf8)
+            for term in forbiddenActivationTerms {
+                #expect(
+                    source.contains(term) == false,
+                    "Avatar-disabled MillerApp source activates \(term): \(sourceFile.path)"
+                )
+            }
+        }
     }
 
     @Test
@@ -84,52 +208,104 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func manifestMatcherRejectsUnboundURLAndVersionDecoys() {
-        let approved = """
-            dependencies: [
-                .package(
-                    url: "https://github.com/modelcontextprotocol/swift-sdk.git",
-                    exact: "0.12.1"
-                ),
-            ]
-            """
-        let unboundDecoy = """
-            // https://github.com/modelcontextprotocol/swift-sdk.git
-            .package(url: "https://example.invalid/not-mcp.git", exact: "0.12.1")
-            """
-        let wrongRequirement = """
-            .package(
-                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
-                from: "0.12.1"
-            )
-            """
-
-        #expect(ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: approved))
-        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: unboundDecoy))
-        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: wrongRequirement))
+    func sbomDeclaresEmittedMapboxEarcutAsAnISCAvatarDependency() throws {
+        let data = try Data(contentsOf: repositoryRoot.appending(
+            path: "Packaging/Miller.spdx.json"
+        ))
+        let document = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let packages = try #require(document["packages"] as? [[String: Any]])
+        let earcut = try #require(packages.first { package in
+            package["name"] as? String == "Mapbox Earcut"
+        })
+        #expect(earcut["SPDXID"] as? String == "SPDXRef-Package-MapboxEarcut")
+        #expect(earcut["versionInfo"] as? String == "3.0.1")
+        #expect(earcut["licenseConcluded"] as? String == "ISC")
+        #expect(earcut["licenseDeclared"] as? String == "ISC")
+        #expect(
+            earcut["packageFileName"] as? String
+                == "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js"
+        )
+        let relationships = try #require(
+            document["relationships"] as? [[String: Any]]
+        )
+        #expect(relationships.contains { relationship in
+            relationship["spdxElementId"] as? String
+                == "SPDXRef-Package-MillerAvatar"
+                && relationship["relationshipType"] as? String == "DEPENDS_ON"
+                && relationship["relatedSpdxElement"] as? String
+                    == "SPDXRef-Package-MapboxEarcut"
+        })
     }
 
     @Test
-    func manifestMatcherIgnoresCommentedApprovedDeclarations() {
-        let blockCommentDecoy = """
-            /*
-            .package(
-                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
-                exact: "0.12.1"
-            )
-            */
-            .package(
-                url: "https://github.com/modelcontextprotocol/swift-sdk.git",
-                from: "0.12.1"
-            )
-            """
-        let lineCommentDecoy = """
-            // .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1")
-            .package(url: "https://example.invalid/not-mcp.git", exact: "0.12.1")
-            """
+    func semanticManifestAuthorityIgnoresRawStringDecoys() throws {
+        let dump = try semanticPackageDump("""
+            {
+              "rawStringDecoy": ".package(url: \\\"\(ReleasePackagingPolicy.officialAvatarURL)\\\", exact: \\\"0.1.0-alpha.1\\\") .product(name: \\\"MillerAvatarHost\\\", package: \\\"miller-avatar\\\")",
+              "dependencies": [{
+                "sourceControl": [{
+                  "location": {"remote": [{"urlString": "https://example.invalid/not-avatar.git"}]},
+                  "requirement": {"from": ["0.1.0-alpha.1"]}
+                }]
+              }],
+              "targets": [{
+                "name": "MillerApp",
+                "dependencies": [{"product": ["MillerAvatarCore", "miller-avatar", null, null]}]
+              }]
+            }
+            """)
 
-        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: blockCommentDecoy))
-        #expect(!ReleasePackagingPolicy.hasApprovedSDKDeclaration(in: lineCommentDecoy))
+        #expect(!ReleasePackagingPolicy.hasApprovedAvatarDeclaration(in: dump))
+        #expect(!ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: dump))
+    }
+
+    @Test
+    func provenanceManifestAuthorityUsesSwiftPackageDumpJSON() throws {
+        let verifier = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("scripts/verify-provenance.sh"),
+            encoding: .utf8
+        )
+        #expect(verifier.contains("dump-package"))
+        #expect(verifier.contains("--package-path"))
+        #expect(verifier.contains("sourceControl"))
+        #expect(verifier.contains("requirement?.exact"))
+        #expect(verifier.contains("MillerAvatarApp"))
+        #expect(verifier.contains("--ignored"))
+        #expect(verifier.contains("removingSwiftComments") == false)
+        #expect(verifier.contains("avatarDeclarationPattern") == false)
+    }
+
+    @Test
+    func semanticAvatarDataRejectsDuplicateCoreAndMissingHost() throws {
+        let duplicateCore = try semanticPackageDump("""
+            {
+              "dependencies": [],
+              "targets": [{
+                "name": "MillerApp",
+                "dependencies": [
+                  {"product": ["MillerAvatarCore", "miller-avatar", null, null]},
+                  {"product": ["MillerAvatarCore", "miller-avatar", null, null]},
+                  {"product": ["MillerAvatarHost", "miller-avatar", null, null]}
+                ]
+              }]
+            }
+            """)
+        let missingHost = try semanticPackageDump("""
+            {
+              "dependencies": [],
+              "targets": [{
+                "name": "MillerApp",
+                "dependencies": [
+                  {"product": ["MillerAvatarCore", "miller-avatar", null, null]}
+                ]
+              }]
+            }
+            """)
+
+        #expect(!ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: duplicateCore))
+        #expect(!ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: missingHost))
     }
 
     @Test
@@ -384,12 +560,17 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
+            "Miller Avatar@0.1.0-alpha.1",
             "Miller@0.1.2",
             "MillerCapabilityBridge@0.1.2",
             "MillerCapabilities@0.1.2",
             "Node.js@22.22.0",
             "ONNX Runtime@1.24.4",
             "Sherpa-ONNX@1.13.2",
+            "Three.js@0.180.0",
+            "@pixiv/three-vrm@3.5.5",
+            "@pixiv/three-vrm-animation@3.5.5",
+            "Mapbox Earcut@3.0.1",
             "Miller wake model assets@pinned",
             "openai@6.26.0",
             "partial-json@0.1.7",
@@ -503,6 +684,43 @@ struct ReleasePackagingPolicyTests {
             .deletingLastPathComponent()
     }
 
+    private func semanticPackageDump() throws -> [String: Any] {
+        // These are the semantic fields emitted by
+        // `swift package dump-package --package-path REPO`; the focused tests
+        // keep only the fields consumed by the release policy.
+        try semanticPackageDump("""
+            {
+              "dependencies": [
+                {
+                  "sourceControl": [{
+                    "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialSDKURL)"}]},
+                    "requirement": {"exact": ["0.12.1"]}
+                  }]
+                },
+                {
+                  "sourceControl": [{
+                    "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialAvatarURL)"}]},
+                    "requirement": {"exact": ["0.1.0-alpha.1"]}
+                  }]
+                }
+              ],
+              "targets": [
+                {
+                  "name": "MillerApp",
+                  "dependencies": [
+                    {"product": ["MillerAvatarCore", "miller-avatar", null, null]},
+                    {"product": ["MillerAvatarHost", "miller-avatar", null, null]}
+                  ]
+                }
+              ]
+            }
+            """)
+    }
+
+    private func semanticPackageDump(_ json: String) throws -> [String: Any] {
+        try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    }
+
     private func makePolicyFixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("miller-release-policy-\(UUID().uuidString)")
@@ -538,6 +756,9 @@ private enum ReleasePackagingPolicy {
     static let officialSDKURL = "https://github.com/modelcontextprotocol/swift-sdk.git"
     static let approvedSDKVersion = "0.12.1"
     static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
+    static let officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git"
+    static let approvedAvatarVersion = "0.1.0-alpha.1"
+    static let approvedAvatarRevision = "4f48f55bfeb1fd1f805143bdfadf61ddff541b15"
 
     private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
     private static let packageInventories = [
@@ -575,22 +796,12 @@ private enum ReleasePackagingPolicy {
         ("private transcript export", "private transcript export"),
     ]
 
-    static func hasApprovedSDKDeclaration(in manifest: String) -> Bool {
-        let activeManifest = removingSwiftComments(from: manifest)
-        let escapedURL = NSRegularExpression.escapedPattern(for: officialSDKURL)
-        let escapedVersion = NSRegularExpression.escapedPattern(for: approvedSDKVersion)
-        let pattern = #"\.package\s*\(\s*url\s*:\s*""#
-            + escapedURL
-            + #""\s*,\s*exact\s*:\s*""#
-            + escapedVersion
-            + #""\s*,?\s*\)"#
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return false
-        }
-        return expression.numberOfMatches(
-            in: activeManifest,
-            range: NSRange(activeManifest.startIndex..., in: activeManifest)
-        ) == 1
+    static func hasApprovedSDKDeclaration(in dump: [String: Any]) -> Bool {
+        approvedRemoteDependency(
+            in: dump,
+            url: officialSDKURL,
+            version: approvedSDKVersion
+        )
     }
 
     static func hasApprovedSDKLock(_ lock: PackageLock) -> Bool {
@@ -599,6 +810,78 @@ private enum ReleasePackagingPolicy {
             && pins[0].location == officialSDKURL
             && pins[0].state.version == approvedSDKVersion
             && pins[0].state.revision == approvedSDKRevision
+    }
+
+    static func hasApprovedAvatarDeclaration(in dump: [String: Any]) -> Bool {
+        approvedRemoteDependency(
+            in: dump,
+            url: officialAvatarURL,
+            version: approvedAvatarVersion
+        )
+    }
+
+    static func hasApprovedAvatarLock(_ lock: PackageLock) -> Bool {
+        let pins = lock.pins.filter { $0.identity == "miller-avatar" }
+        return pins.count == 1
+            && pins[0].location == officialAvatarURL
+            && pins[0].state.version == approvedAvatarVersion
+            && pins[0].state.revision == approvedAvatarRevision
+    }
+
+    static func hasOnlyAvatarProductsInMillerApp(in dump: [String: Any]) -> Bool {
+        let expectedProductNames: Set<String> = ["MillerAvatarCore", "MillerAvatarHost"]
+        guard let targets = dump["targets"] as? [[String: Any]],
+              !targets.contains(where: { $0["name"] as? String == "MillerAvatarApp" }),
+              let millerApp = targets.first(where: { $0["name"] as? String == "MillerApp" }),
+              let dependencies = millerApp["dependencies"] as? [[String: Any]] else {
+            return false
+        }
+
+        var appProducts: [String] = []
+        for dependency in dependencies {
+            guard let product = dependency["product"] as? [Any],
+                  product.count >= 2,
+                  let name = product[0] as? String,
+                  let package = product[1] as? String else {
+                continue
+            }
+            if package == "miller-avatar" {
+                appProducts.append(name)
+            }
+        }
+        guard appProducts.count == expectedProductNames.count,
+              Set(appProducts) == expectedProductNames else {
+            return false
+        }
+
+        let allProductNames = targets
+            .flatMap { $0["dependencies"] as? [[String: Any]] ?? [] }
+            .compactMap { dependency -> String? in
+                guard let product = dependency["product"] as? [Any] else { return nil }
+                return product.first as? String
+            }
+        return !allProductNames.contains("MillerAvatarApp")
+    }
+
+    private static func approvedRemoteDependency(
+        in dump: [String: Any],
+        url: String,
+        version: String
+    ) -> Bool {
+        let matches = (dump["dependencies"] as? [[String: Any]] ?? [])
+            .flatMap { $0["sourceControl"] as? [[String: Any]] ?? [] }
+            .filter { dependency in
+                guard let location = dependency["location"] as? [String: Any],
+                      let remotes = location["remote"] as? [[String: Any]],
+                      let requirement = dependency["requirement"] as? [String: Any],
+                      let exact = requirement["exact"] as? [String] else {
+                    return false
+                }
+                return remotes.count == 1
+                    && remotes[0]["urlString"] as? String == url
+                    && exact == [version]
+            }
+        return matches.count == 1
     }
 
     static func inventoryViolations(repositoryRoot: URL) throws -> [String] {
@@ -831,66 +1114,6 @@ private enum ReleasePackagingPolicy {
         return patterns.contains {
             trimmed.range(of: $0, options: .regularExpression) != nil
         }
-    }
-
-    private static func removingSwiftComments(from source: String) -> String {
-        var result = ""
-        var index = source.startIndex
-        var inString = false
-        var isEscaped = false
-        var inLineComment = false
-        var blockCommentDepth = 0
-
-        while index < source.endIndex {
-            let character = source[index]
-            if inLineComment {
-                result.append(character.isNewline ? character : " ")
-                if character.isNewline { inLineComment = false }
-                index = source.index(after: index)
-                continue
-            }
-            if blockCommentDepth > 0 {
-                if source[index...].hasPrefix("/*") {
-                    blockCommentDepth += 1
-                    result.append("  ")
-                    index = source.index(index, offsetBy: 2)
-                } else if source[index...].hasPrefix("*/") {
-                    blockCommentDepth -= 1
-                    result.append("  ")
-                    index = source.index(index, offsetBy: 2)
-                } else {
-                    result.append(character.isNewline ? character : " ")
-                    index = source.index(after: index)
-                }
-                continue
-            }
-            if inString {
-                result.append(character)
-                if isEscaped {
-                    isEscaped = false
-                } else if character == "\\" {
-                    isEscaped = true
-                } else if character == "\"" {
-                    inString = false
-                }
-                index = source.index(after: index)
-                continue
-            }
-            if source[index...].hasPrefix("//") {
-                inLineComment = true
-                result.append("  ")
-                index = source.index(index, offsetBy: 2)
-            } else if source[index...].hasPrefix("/*") {
-                blockCommentDepth = 1
-                result.append("  ")
-                index = source.index(index, offsetBy: 2)
-            } else {
-                result.append(character)
-                if character == "\"" { inString = true }
-                index = source.index(after: index)
-            }
-        }
-        return result
     }
 
     private static func invokes(_ command: String, in line: String) -> Bool {
