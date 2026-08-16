@@ -346,6 +346,10 @@ test("preserve-release rejects unknown files and symlinks but removes safe Finde
   await mkdir(join(release, "Miller.app"), { recursive: true });
   await writeFile(join(release, "Miller.app", "Contents"), "synthetic\n");
   await writeFile(join(release, "inventory.json"), "{}\n");
+  await writeFile(
+    join(release, "package-measurement.env"),
+    "schema=miller-v0.1.2-package-measurement-v1\n",
+  );
   await writeFile(join(release, "unknown.log"), "synthetic\n");
   const bridgeParent = `/private/tmp/miller-clean-test-${process.getuid()}-task18-${process.pid}`;
   const clean = spawnSync("/bin/zsh", [join(repoRoot, "scripts", "clean.sh"), "--preserve-release"], {
@@ -372,6 +376,10 @@ test("preserve-release rejects unknown files and symlinks but removes safe Finde
     });
     assert.equal(safe.status, 0, safe.stderr);
     await assert.rejects(lstat(join(release, ".DS_Store")));
+    assert.equal(
+      await readFile(join(release, "package-measurement.env"), "utf8"),
+      "schema=miller-v0.1.2-package-measurement-v1\n",
+    );
     await symlink("inventory.json", join(release, "unexpected-link"));
     const linked = spawnSync("/bin/zsh", [join(repoRoot, "scripts", "clean.sh"), "--preserve-release"], {
       encoding: "utf8",

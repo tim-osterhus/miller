@@ -237,6 +237,7 @@ verify_preserved_release() {
   local retained_release_entries=(
     "$release_root/Miller.app"
     "$release_root/inventory.json"
+    "$release_root/package-measurement.env"
   )
   [[ -d "$artifacts_root" && ! -L "$artifacts_root" ]] || {
     print -u2 "unexpected retained artifacts root"
@@ -280,6 +281,8 @@ verify_preserved_release() {
   done
   [[ -d "$release_root/Miller.app" && ! -L "$release_root/Miller.app" ]] || return 1
   [[ -f "$release_root/inventory.json" && ! -L "$release_root/inventory.json" ]] || return 1
+  [[ -f "$release_root/package-measurement.env" && \
+     ! -L "$release_root/package-measurement.env" ]] || return 1
 }
 
 if (( $# == 0 )); then
