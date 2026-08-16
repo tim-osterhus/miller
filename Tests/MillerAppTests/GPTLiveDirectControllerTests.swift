@@ -2,12 +2,80 @@ import Foundation
 import MillerCore
 import MillerLive
 import MillerLiveAudio
+import MillerRemoteBridge
 import Testing
 @testable import MillerApp
 
 @Suite(.serialized)
 @MainActor
 struct GPTLiveDirectControllerTests {
+    @Test
+    func remoteStartReusesProviderLifecycleWithoutMacMicrophoneOrLocalPeer() async throws {
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: UUID(),
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let peer = RemoteBrowserLivePeer(
+            clientSessionID: UUID(),
+            offerSDP: directControllerSyntheticOffer
+        )
+        let localPeerFactoryCalls = DirectControllerCounter()
+        let microphoneCalls = DirectControllerCounter()
+        let socket = DirectControllerSocket()
+        let controller = try GPTLiveController(
+            helperURL: nil,
+            temporaryParentURL: URL(fileURLWithPath: "/private/tmp/miller-remote-live-test"),
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: {
+                await microphoneCalls.increment()
+                return .denied
+            },
+            makePeer: {
+                await localPeerFactoryCalls.increment()
+                return DirectControllerPeer()
+            },
+            makeDirectSession: { peer, configuration in
+                DirectGPTLiveSession(
+                    peer: peer,
+                    callCreator: GPTLiveCallCreator(loader: DirectControllerLoader()),
+                    sidebandConnector: GPTLiveSidebandConnector(
+                        factory: { _, _ in socket },
+                        sleep: { _ in }
+                    ),
+                    configuration: configuration
+                )
+            }
+        )
+        let states = DirectControllerStateProbe()
+        let run = Task { @MainActor in
+            try? await controller.startRemote(peer: peer) { event in
+                if case let .state(state) = event { states.append(state) }
+            }
+        }
+
+        _ = try await peer.providerAnswer()
+        #expect(peer.markConnected())
+        try await waitUntilDirectController { states.contains(.listening) }
+        await controller.dependencies().end()
+        await run.value
+
+        #expect(await microphoneCalls.value == 0)
+        #expect(await localPeerFactoryCalls.value == 0)
+        #expect(states.valuesSnapshot == [.connecting, .listening])
+    }
+
     @Test
     func noHelperSelectsDirectGPTLiveAndKeepsPeerLifecycleBounded() async throws {
         let profile = try ProviderProfile(
@@ -758,9 +826,7 @@ struct GPTLiveDirectControllerTests {
             mainActorGate.release()
         }
         Task.detached {
-            while !mainActorGate.isBlocked {
-                try? await Task.sleep(for: .milliseconds(1))
-            }
+            await mainActorGate.waitUntilBlocked()
             peer.emitFromAnyActor(
                 LiveAudioOutputSample(
                     isPlaying: true,
@@ -849,9 +915,7 @@ struct GPTLiveDirectControllerTests {
             mainActorGate.block()
         }
         let scenario = Task.detached {
-            while !mainActorGate.isBlocked {
-                try? await Task.sleep(for: .milliseconds(1))
-            }
+            await mainActorGate.waitUntilBlocked()
             try? await Task.sleep(for: .milliseconds(450))
             peer.emitFromAnyActor(
                 LiveAudioOutputSample(
@@ -1064,6 +1128,7 @@ private final class DirectOutputMainActorGate: @unchecked Sendable {
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
     private var blocked = false
+    private var blockedWaiters = [CheckedContinuation<Void, Never>]()
     private var stopWasRequested = false
     private var postStopActiveCount = 0
 
@@ -1080,8 +1145,25 @@ private final class DirectOutputMainActorGate: @unchecked Sendable {
     }
 
     func block() {
-        lock.withLock { blocked = true }
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            blocked = true
+            let waiters = blockedWaiters
+            blockedWaiters.removeAll()
+            return waiters
+        }
+        waiters.forEach { $0.resume() }
         semaphore.wait()
+    }
+
+    func waitUntilBlocked() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if blocked { return true }
+                blockedWaiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
     }
 
     func release() {

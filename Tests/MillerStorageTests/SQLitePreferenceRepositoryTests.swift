@@ -35,6 +35,18 @@ struct SQLitePreferenceRepositoryTests {
     }
 
     @Test
+    func remoteLiveBridgeIsDisabledByDefaultAndPersistsAsATypedPreference() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+
+        #expect(try await repository.value(for: .remoteLiveEnabled) == false)
+        try await repository.set(true, for: .remoteLiveEnabled)
+        #expect(try await repository.value(for: .remoteLiveEnabled))
+        try await repository.delete(.remoteLiveEnabled)
+        #expect(try await repository.value(for: .remoteLiveEnabled) == false)
+    }
+
+    @Test
     func malformedAndOversizeValuesAreRefusedWithoutChangingExistingValue() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLitePreferenceRepository(path: fixture.path)

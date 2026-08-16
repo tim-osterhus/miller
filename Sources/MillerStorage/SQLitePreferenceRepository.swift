@@ -52,6 +52,10 @@ public extension MillerPreferenceKey where Value == Bool {
         Self(rawValue: "wakeword_enabled", defaultValue: false)
     }
 
+    static var remoteLiveEnabled: Self {
+        Self(rawValue: "remote_live_enabled", defaultValue: false)
+    }
+
     static var menuBarEnabled: Self {
         Self(rawValue: "menu_bar_enabled", defaultValue: true)
     }

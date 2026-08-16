@@ -39,6 +39,7 @@ let package = Package(
         .library(name: "MillerGateway", targets: ["MillerGateway"]),
         .library(name: "MillerLive", targets: ["MillerLive"]),
         .library(name: "MillerLiveAudio", targets: ["MillerLiveAudio"]),
+        .library(name: "MillerRemoteBridge", targets: ["MillerRemoteBridge"]),
         .library(name: "MillerCapabilities", targets: ["MillerCapabilities"]),
         .library(name: "MillerWake", targets: ["MillerWake"]),
         .executable(name: "MillerApp", targets: ["MillerApp"]),
@@ -86,6 +87,10 @@ let package = Package(
             linkerSettings: [.linkedFramework("AVFoundation")]
         ),
         .target(
+            name: "MillerRemoteBridge",
+            dependencies: ["MillerLiveAudio"]
+        ),
+        .target(
             name: "MillerWakeBridge",
             path: "Sources/MillerWakeBridge",
             publicHeadersPath: "include",
@@ -109,7 +114,7 @@ let package = Package(
             name: "MillerApp",
             dependencies: [
                 "MillerCore", "MillerStorage", "MillerGateway", "MillerLive",
-                "MillerLiveAudio", "MillerCapabilities", "MillerWake",
+                "MillerLiveAudio", "MillerRemoteBridge", "MillerCapabilities", "MillerWake",
                 .product(name: "MillerAvatarCore", package: "miller-avatar"),
                 .product(name: "MillerAvatarHost", package: "miller-avatar"),
             ],
@@ -141,6 +146,10 @@ let package = Package(
             name: "MillerLiveAudioTests",
             dependencies: ["MillerLiveAudio", "MillerLive"]
         ),
+        .testTarget(
+            name: "MillerRemoteBridgeTests",
+            dependencies: ["MillerRemoteBridge", "MillerLiveAudio"]
+        ),
         .testTarget(name: "MillerWakeTests", dependencies: ["MillerWake"]),
         .testTarget(
             name: "MillerCapabilitiesTests",
@@ -157,6 +166,7 @@ let package = Package(
             dependencies: [
                 "MillerApp", "MillerCore", "MillerStorage",
                 "MillerCapabilities", "MillerGateway", "MillerLive",
+                "MillerLiveAudio", "MillerRemoteBridge",
             ]
         ),
     ]

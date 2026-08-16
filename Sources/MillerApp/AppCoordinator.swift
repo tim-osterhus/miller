@@ -6,6 +6,7 @@ import MillerCore
 import MillerGateway
 import MillerLive
 import MillerLiveAudio
+import MillerRemoteBridge
 import MillerAvatarHost
 import MillerStorage
 import MillerWake
@@ -640,6 +641,14 @@ final class AppPresentationModel: ObservableObject {
     var canStartLiveVoice: Bool {
         [.available, .closed, .stopped, .failed].contains(voiceState)
             && liveVoiceAvailability == .available
+            && !isActiveTurn && !typedSubmissionPending
+            && !liveVoiceStartPending && !liveVoiceCleanupPending
+            && !voiceHistoryDeletionPending
+            && !providerMutationPending && !capabilitySettingsBusy
+    }
+
+    private var canStartRemoteLiveVoice: Bool {
+        [.available, .closed, .stopped, .failed, .unavailable].contains(voiceState)
             && !isActiveTurn && !typedSubmissionPending
             && !liveVoiceStartPending && !liveVoiceCleanupPending
             && !voiceHistoryDeletionPending
@@ -1468,22 +1477,56 @@ final class AppPresentationModel: ObservableObject {
     func startLiveVoice(
         activationSource: VoiceActivationSource = .manual
     ) async {
+        try? await startLiveVoice(
+            activationSource: activationSource,
+            suppliedPeer: nil,
+            rethrowRemoteFailure: false
+        )
+    }
+
+    func startRemoteLiveVoice(peer: any LiveAudioPeer) async throws {
+        guard canStartRemoteLiveVoice else {
+            throw RemoteLiveBridgeHostError.busy
+        }
+        guard await liveVoice.remoteAvailability() == .available else {
+            throw RemoteLiveBridgeHostError.providerUnavailable
+        }
+        try await startLiveVoice(
+            activationSource: .manual,
+            suppliedPeer: peer,
+            rethrowRemoteFailure: true
+        )
+    }
+
+    private func startLiveVoice(
+        activationSource: VoiceActivationSource,
+        suppliedPeer: (any LiveAudioPeer)?,
+        rethrowRemoteFailure: Bool
+    ) async throws {
         let startContext: LiveVoiceStartContext = activationSource == .wakeword
             ? .wakeword
             : .manual
-        guard canStartLiveVoice else {
+        let canStart = rethrowRemoteFailure
+            ? canStartRemoteLiveVoice : canStartLiveVoice
+        guard canStart else {
             if activationSource == .wakeword {
                 let prepared = await prepareLiveStart(activationSource)
                 liveVoiceFinishedDelivered = activationSource == .wakeword
                     ? false : !prepared
                 await deliverLiveVoiceFinishedIfNeeded()
             }
+            if rethrowRemoteFailure {
+                throw RemoteLiveBridgeHostError.busy
+            }
             return
         }
         let prepared = await prepareLiveStart(activationSource)
         liveVoiceFinishedDelivered = activationSource == .wakeword
             ? false : !prepared
-        guard canStartLiveVoice else {
+        guard rethrowRemoteFailure ? canStartRemoteLiveVoice : canStartLiveVoice else {
+            if rethrowRemoteFailure {
+                throw RemoteLiveBridgeHostError.busy
+            }
             await deliverLiveVoiceFinishedIfNeeded()
             return
         }
@@ -1502,6 +1545,9 @@ final class AppPresentationModel: ObservableObject {
         }
         guard await validateLiveStart(activationSource) else {
             await abortLiveVoiceStart(startGeneration: startGeneration)
+            if rethrowRemoteFailure {
+                throw RemoteLiveBridgeHostError.providerUnavailable
+            }
             return
         }
         do {
@@ -1528,8 +1574,9 @@ final class AppPresentationModel: ObservableObject {
             liveVoiceFailureCode = Self.liveFailureCode(error)
             await finishLiveVoiceCleanup(
                 terminalState: .failed,
-                outcome: .failed
+                outcome: rethrowRemoteFailure ? .abandoned : .failed
             )
+            if rethrowRemoteFailure { throw error }
             return
         }
         if let capabilityController {
@@ -1539,8 +1586,11 @@ final class AppPresentationModel: ObservableObject {
                 liveVoiceFailureCode = "provider_unavailable"
                 await finishLiveVoiceCleanup(
                     terminalState: .failed,
-                    outcome: .failed
+                    outcome: rethrowRemoteFailure ? .abandoned : .failed
                 )
+                if rethrowRemoteFailure {
+                    throw RemoteLiveBridgeHostError.providerUnavailable
+                }
                 return
             }
             do {
@@ -1562,8 +1612,9 @@ final class AppPresentationModel: ObservableObject {
                 liveVoiceFailureCode = "capability_bridge_unavailable"
                 await finishLiveVoiceCleanup(
                     terminalState: .failed,
-                    outcome: .failed
+                    outcome: rethrowRemoteFailure ? .abandoned : .failed
                 )
+                if rethrowRemoteFailure { throw error }
                 return
             }
         }
@@ -1590,7 +1641,11 @@ final class AppPresentationModel: ObservableObject {
                     [weak self] event in
                     await self?.applyLiveEvent(event, generation: eventGeneration)
                 }
-                try await liveVoice.start(startContext, receive)
+                if let suppliedPeer {
+                    try await liveVoice.startRemote(suppliedPeer, receive)
+                } else {
+                    try await liveVoice.start(startContext, receive)
+                }
             } onCancel: { [weak self] in
                 Task { @MainActor [weak self] in
                     await self?.cancelLiveVoiceStart(generation: startGeneration)
@@ -1625,6 +1680,17 @@ final class AppPresentationModel: ObservableObject {
             if Self.isLiveAdmissionFailure(error) {
                 nextLiveVoiceAvailabilityGeneration()
                 liveVoiceAvailability = .unavailable
+            }
+            if rethrowRemoteFailure {
+                if !liveVoiceCleanupPending {
+                    let outcome: VoiceSessionTerminalOutcome = liveTranscriptSessionID == nil
+                        ? .abandoned : .failed
+                    await finishLiveVoiceCleanup(
+                        terminalState: .failed,
+                        outcome: outcome
+                    )
+                }
+                throw error
             }
         }
         if !liveVoiceCleanupPending, !voiceState.isActive {
@@ -1776,6 +1842,46 @@ final class AppPresentationModel: ObservableObject {
         await finishLiveVoiceCleanup(
             terminalState: .closed,
             outcome: voiceState == .failed ? .failed : .completed
+        )
+        await refreshLiveVoiceAvailability(allowStartPending: true)
+    }
+
+    func finishRemoteLiveVoice(reason: RemoteLiveTerminalReason) async {
+        guard voiceState.isActive || voiceState == .stopped
+                || liveVoiceStartPending || pendingLiveAdmission != nil
+        else { return }
+        let admitted = liveTranscriptSessionID != nil
+        let historyOutcome = reason.historyOutcome(afterAdmission: admitted)
+        let outcome: VoiceSessionTerminalOutcome = switch historyOutcome {
+        case .completed: .completed
+        case .stopped: .stopped
+        case .failed: .failed
+        case .abandoned: .abandoned
+        }
+        let terminalState: LiveVoiceState = switch historyOutcome {
+        case .completed: .closed
+        case .stopped: .stopped
+        case .failed: .failed
+        case .abandoned: .closed
+        }
+        if reason == .interrupted {
+            capabilityController?.declinePendingApprovals(for: .interrupt)
+        } else {
+            capabilityController?.declinePendingApprovals(for: .close)
+        }
+        nextLiveVoiceAvailabilityGeneration()
+        let terminalEventGeneration = liveVoiceEventGeneration
+        nextLiveVoiceEventGeneration()
+        liveVoiceCleanupTerminalEventGeneration = terminalEventGeneration
+        liveVoiceCleanupPending = true
+        if reason == .interrupted {
+            await liveVoice.interrupt()
+        } else {
+            await liveVoice.end()
+        }
+        await finishLiveVoiceCleanup(
+            terminalState: terminalState,
+            outcome: outcome
         )
         await refreshLiveVoiceAvailability(allowStartPending: true)
     }
@@ -2689,6 +2795,447 @@ actor ProviderRoutingGateway: ReasoningGateway {
     }
 }
 
+private final class MillerRemoteHostAdapterCallbackBox: @unchecked Sendable {
+    weak var adapter: MillerRemoteHostAdapter?
+}
+
+private struct MillerRemoteSessionIdentity: Equatable {
+    let serverGeneration: UUID
+    let lifecycleGeneration: UInt64
+    let sessionID: UUID
+    let peerID: ObjectIdentifier
+}
+
+@MainActor
+final class MillerRemoteHostAdapter {
+    private let model: AppPresentationModel
+    private let homeDirectory: URL
+    private let socketPathValue: URL
+    private let callbackBox: MillerRemoteHostAdapterCallbackBox
+    private var server: MillerRemoteBridgeServer
+    private var generation: UUID
+    private var serverStopped = false
+    private var running = false
+    private var stopping = false
+    private var lifecycleGeneration: UInt64 = 0
+    private var remotePeer: RemoteBrowserLivePeer?
+    private var remoteSessionID: UUID?
+    private var remoteStartTask: Task<Void, Never>?
+    private var remoteStartFailure: Error?
+    private var remoteAnswerDelivered = false
+    private var remoteStartToken: UUID?
+    private var terminalizingSessionID: UUID?
+    private var terminalizingReason: RemoteLiveTerminalReason?
+    private var stopTask: Task<Void, Never>?
+    private var terminalizationTask: Task<Void, Never>?
+    private var remoteIdentity: MillerRemoteSessionIdentity?
+
+    init(
+        model: AppPresentationModel,
+        homeDirectory: URL,
+        generation: UUID = UUID()
+    ) {
+        self.model = model
+        let standardizedHome = homeDirectory.standardizedFileURL
+        self.homeDirectory = standardizedHome
+        socketPathValue = RemoteLiveBridgeContract.socketURL(
+            homeDirectory: standardizedHome
+        )
+        callbackBox = MillerRemoteHostAdapterCallbackBox()
+        self.generation = generation
+        server = Self.makeServer(
+            callbackBox: callbackBox,
+            homeDirectory: standardizedHome,
+            generation: generation
+        )
+        callbackBox.adapter = self
+    }
+
+    var hostGeneration: UUID { generation }
+
+    var socketPath: URL { socketPathValue }
+
+    internal func waitForRemoteTerminalization() async {
+        await remoteStartTask?.value
+        await terminalizationTask?.value
+    }
+
+    func start() async throws {
+        if let stopTask {
+            await stopTask.value
+            if self.stopTask != nil { self.stopTask = nil }
+        }
+        await terminalizationTask?.value
+        guard !running else { return }
+        guard !stopping else { throw RemoteLiveBridgeHostError.unavailable }
+        let startGeneration = lifecycleGeneration
+        if serverStopped {
+            generation = UUID()
+            server = Self.makeServer(
+                callbackBox: callbackBox,
+                homeDirectory: homeDirectory,
+                generation: generation
+            )
+            serverStopped = false
+        }
+        let serverGeneration = generation
+        let startingServer = server
+        try await startingServer.start()
+        guard !stopping,
+              lifecycleGeneration == startGeneration,
+              generation == serverGeneration,
+              !serverStopped else {
+            await startingServer.stop()
+            throw RemoteLiveBridgeHostError.unavailable
+        }
+        running = true
+    }
+
+    func stop() async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStop()
+        }
+        stopTask = task
+        await task.value
+        if stopTask != nil { stopTask = nil }
+    }
+
+    func handle(
+        _ request: RemoteLiveRequest,
+        connectionID: UUID
+    ) async -> RemoteLiveResponse {
+        let activeServer = server
+        return await activeServer.handle(request, connectionID: connectionID)
+    }
+
+    private func performStop() async {
+        lifecycleGeneration &+= 1
+        stopping = true
+        let serverToStop = server
+        let peerToClose = remotePeer
+        if !serverStopped {
+            await serverToStop.stop()
+        }
+        await terminalizationTask?.value
+        remoteStartTask?.cancel()
+        await peerToClose?.close()
+        await waitForRemoteStart()
+        await terminalizationTask?.value
+        running = false
+        serverStopped = true
+        clearRemoteState()
+        stopping = false
+    }
+
+    private static func makeServer(
+        callbackBox: MillerRemoteHostAdapterCallbackBox,
+        homeDirectory: URL,
+        generation: UUID
+    ) -> MillerRemoteBridgeServer {
+        MillerRemoteBridgeServer(
+            host: MillerRemoteBridgeHost(
+                start: { [callbackBox] sessionID, offer in
+                    guard let adapter = callbackBox.adapter else {
+                        throw RemoteLiveBridgeHostError.unavailable
+                    }
+                    return try await adapter.startRemote(
+                        serverGeneration: generation,
+                        sessionID: sessionID,
+                        offerSDP: offer
+                    )
+                },
+                connected: { [callbackBox] sessionID in
+                    guard let adapter = callbackBox.adapter else {
+                        throw RemoteLiveBridgeHostError.unavailable
+                    }
+                    try await adapter.markRemoteConnected(
+                        serverGeneration: generation,
+                        sessionID: sessionID
+                    )
+                },
+                activity: { [callbackBox] sessionID in
+                    guard let adapter = callbackBox.adapter else {
+                        throw RemoteLiveBridgeHostError.unavailable
+                    }
+                    try await adapter.recordRemoteActivity(
+                        serverGeneration: generation,
+                        sessionID: sessionID
+                    )
+                },
+                interrupt: { [callbackBox] sessionID in
+                    guard let adapter = callbackBox.adapter else {
+                        throw RemoteLiveBridgeHostError.unavailable
+                    }
+                    try await adapter.interruptRemote(
+                        serverGeneration: generation,
+                        sessionID: sessionID
+                    )
+                },
+                end: { [callbackBox] sessionID, reason in
+                    guard let adapter = callbackBox.adapter else {
+                        throw RemoteLiveBridgeHostError.unavailable
+                    }
+                    try await adapter.endRemote(
+                        serverGeneration: generation,
+                        sessionID: sessionID,
+                        reason: reason
+                    )
+                }
+            ),
+            homeDirectory: homeDirectory,
+            generation: generation
+        )
+    }
+
+    private func startRemote(
+        serverGeneration: UUID,
+        sessionID: UUID,
+        offerSDP: String
+    ) async throws -> String {
+        guard generation == serverGeneration,
+              running,
+              !stopping,
+              remoteSessionID == nil
+        else {
+            throw RemoteLiveBridgeHostError.busy
+        }
+        let peer = RemoteBrowserLivePeer(
+            clientSessionID: sessionID,
+            offerSDP: offerSDP
+        )
+        let identity = MillerRemoteSessionIdentity(
+            serverGeneration: serverGeneration,
+            lifecycleGeneration: lifecycleGeneration,
+            sessionID: sessionID,
+            peerID: ObjectIdentifier(peer)
+        )
+        let sessionServer = server
+        remotePeer = peer
+        remoteSessionID = sessionID
+        remoteIdentity = identity
+        remoteStartFailure = nil
+        remoteAnswerDelivered = false
+        let model = self.model
+        let startToken = UUID()
+        let startTask = Task { @MainActor [weak self, weak peer] in
+            guard let self, let peer else { return }
+            do {
+                try await model.startRemoteLiveVoice(peer: peer)
+                guard self.isCurrent(identity) else { return }
+                await self.finishProviderRemote(
+                    identity: identity,
+                    peer: peer,
+                    server: sessionServer,
+                    reason: .providerClosed
+                )
+            } catch {
+                guard self.isCurrent(identity) else { return }
+                let mapped: Error = if error is LiveAdmissionError {
+                    RemoteLiveBridgeHostError.busy
+                } else {
+                    error
+                }
+                self.remoteStartFailure = mapped
+                peer.fail(peer.terminalReason ?? .providerFailed)
+                if Self.isBusyError(mapped) || !self.remoteAnswerDelivered {
+                    return
+                }
+                await self.finishProviderRemote(
+                    identity: identity,
+                    peer: peer,
+                    server: sessionServer,
+                    reason: peer.terminalReason ?? .providerFailed
+                )
+            }
+        }
+        remoteStartTask = startTask
+        remoteStartToken = startToken
+        do {
+            let answer = try await peer.providerAnswer()
+            guard isCurrent(identity) else {
+                throw RemoteLiveBridgeHostError.unavailable
+            }
+            remoteAnswerDelivered = true
+            return answer
+        } catch {
+            guard isCurrent(identity) else { throw error }
+            let startTask = remoteStartTask
+            startTask?.cancel()
+            await waitForRemoteStart(token: startToken)
+            guard isCurrent(identity) else { throw error }
+            let failure = remoteStartFailure
+            if terminalizationTask == nil, terminalizingSessionID == nil {
+                clearRemoteState()
+            }
+            if let failure { throw failure }
+            throw error
+        }
+    }
+
+    private func markRemoteConnected(
+        serverGeneration: UUID,
+        sessionID: UUID
+    ) async throws {
+        guard generation == serverGeneration,
+              remoteSessionID == sessionID,
+              let remotePeer else {
+            throw RemoteLiveBridgeHostError.notFound
+        }
+        guard remotePeer.markConnected() else {
+            throw RemoteLiveBridgeHostError.conflict
+        }
+    }
+
+    private func recordRemoteActivity(
+        serverGeneration: UUID,
+        sessionID: UUID
+    ) async throws {
+        guard generation == serverGeneration, remoteSessionID == sessionID else {
+            throw RemoteLiveBridgeHostError.notFound
+        }
+    }
+
+    private func interruptRemote(
+        serverGeneration: UUID,
+        sessionID: UUID
+    ) async throws {
+        guard generation == serverGeneration, remoteSessionID == sessionID else {
+            throw RemoteLiveBridgeHostError.notFound
+        }
+        try await runRemoteTerminalization(
+            sessionID: sessionID,
+            reason: .interrupted
+        )
+    }
+
+    private func endRemote(
+        serverGeneration: UUID,
+        sessionID: UUID,
+        reason: RemoteLiveTerminalReason
+    ) async throws {
+        guard generation == serverGeneration, remoteSessionID == sessionID else {
+            throw RemoteLiveBridgeHostError.notFound
+        }
+        try await runRemoteTerminalization(
+            sessionID: sessionID,
+            reason: reason
+        )
+    }
+
+    private func runRemoteTerminalization(
+        sessionID: UUID,
+        reason: RemoteLiveTerminalReason
+    ) async throws {
+        guard let identity = remoteIdentity,
+              identity.sessionID == sessionID,
+              isCurrent(identity) else {
+            throw RemoteLiveBridgeHostError.notFound
+        }
+        if let terminalizationTask {
+            await terminalizationTask.value
+            return
+        }
+        terminalizingSessionID = sessionID
+        terminalizingReason = reason
+        let task = Task { @MainActor [weak self, weak peer = remotePeer] in
+            guard let self, self.isCurrent(identity) else { return }
+            peer?.fail(reason)
+            await self.model.finishRemoteLiveVoice(reason: reason)
+            guard self.isCurrent(identity) else { return }
+            await self.waitForRemoteStart()
+            guard self.isCurrent(identity) else { return }
+            self.clearRemoteState()
+        }
+        terminalizationTask = task
+        await task.value
+        if terminalizationTask != nil { terminalizationTask = nil }
+        if isCurrent(identity) {
+            terminalizingSessionID = nil
+            terminalizingReason = nil
+        }
+    }
+
+    private func finishProviderRemote(
+        identity: MillerRemoteSessionIdentity,
+        peer: RemoteBrowserLivePeer,
+        server: MillerRemoteBridgeServer,
+        reason: RemoteLiveTerminalReason
+    ) async {
+        guard isCurrent(identity), terminalizationTask == nil else { return }
+        let reserved = await server.beginProviderTermination(
+            sessionID: identity.sessionID,
+            reason: reason
+        )
+        guard reserved else { return }
+        let wasCurrent = isCurrent(identity)
+        if wasCurrent {
+            terminalizingSessionID = identity.sessionID
+            terminalizingReason = reason
+        }
+        let model = self.model
+        let task = Task { @MainActor [weak peer] in
+            await model.finishRemoteLiveVoice(reason: reason)
+            await peer?.close()
+            await server.providerDidTerminate(
+                sessionID: identity.sessionID,
+                reason: reason
+            )
+        }
+        if wasCurrent {
+            terminalizationTask = task
+        }
+        await task.value
+        if wasCurrent, terminalizationTask != nil { terminalizationTask = nil }
+        if isCurrent(identity) {
+            if remoteAnswerDelivered { clearRemoteState() }
+            terminalizingSessionID = nil
+            terminalizingReason = nil
+        }
+    }
+
+    private func isCurrent(_ identity: MillerRemoteSessionIdentity) -> Bool {
+        generation == identity.serverGeneration
+            && lifecycleGeneration == identity.lifecycleGeneration
+            && remoteIdentity == identity
+            && remoteSessionID == identity.sessionID
+            && remotePeer.map(ObjectIdentifier.init) == identity.peerID
+    }
+
+    private static func isBusyError(_ error: Error) -> Bool {
+        if let error = error as? RemoteLiveBridgeHostError {
+            return error == .busy
+        }
+        return false
+    }
+
+    private func waitForRemoteStart() async {
+        await waitForRemoteStart(token: remoteStartToken)
+    }
+
+    private func waitForRemoteStart(token: UUID?) async {
+        let expectedToken = token ?? remoteStartToken
+        let task = expectedToken == remoteStartToken ? remoteStartTask : nil
+        await task?.value
+        guard expectedToken == remoteStartToken else { return }
+        remoteStartTask = nil
+        remoteStartToken = nil
+    }
+
+    private func clearRemoteState() {
+        remotePeer = nil
+        remoteSessionID = nil
+        remoteStartFailure = nil
+        remoteAnswerDelivered = false
+        remoteStartToken = nil
+        remoteIdentity = nil
+    }
+}
+
 @MainActor
 final class AppCoordinator: NSObject, NSMenuDelegate {
     let model: AppPresentationModel
@@ -2712,6 +3259,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private var settingsObserver: NSObjectProtocol?
     private let providerController: ProviderSettingsController
     private let liveController: GPTLiveController?
+    private let remoteHostAdapter: MillerRemoteHostAdapter
+    private let remoteLiveSettings: RemoteLiveSettingsModel
     private let capabilityController: CapabilityController
     private let preferenceRepository: SQLitePreferenceRepository
     private let avatarSettings: AvatarSettingsModel
@@ -3548,6 +4097,27 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             }
         )
         wakeIntegration.model = model
+        let remoteHostAdapter = MillerRemoteHostAdapter(
+            model: model,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
+        let remoteLiveSettings = RemoteLiveSettingsModel(
+            enable: { [remoteHostAdapter, preferenceRepository] in
+                do {
+                    try await remoteHostAdapter.start()
+                    try await preferenceRepository.set(true, for: .remoteLiveEnabled)
+                } catch {
+                    await remoteHostAdapter.stop()
+                    throw error
+                }
+            },
+            disable: { [remoteHostAdapter, preferenceRepository] in
+                await remoteHostAdapter.stop()
+                try await preferenceRepository.set(false, for: .remoteLiveEnabled)
+            }
+        )
+        self.remoteHostAdapter = remoteHostAdapter
+        self.remoteLiveSettings = remoteLiveSettings
         let providerNames: @Sendable () async throws -> [UUID: String] = {
             [repository] in
             Dictionary(uniqueKeysWithValues: try await repository
@@ -3666,8 +4236,14 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 reset: { [model, providerController, voiceHistoryRepository,
                           preferenceRepository, capabilityController,
                           capabilitySettings, avatarSettings,
-                          systemReducedMotionSource] in
-                    await model.performManagedPrivacyReset {
+                          systemReducedMotionSource, remoteLiveSettings,
+                          remoteHostAdapter] in
+                    await remoteLiveSettings.disableForLifecycle()
+                    await remoteHostAdapter.stop()
+                    try? await preferenceRepository.set(
+                        false, for: .remoteLiveEnabled
+                    )
+                    let result = await model.performManagedPrivacyReset {
                         let result = await avatarSettings.withResetFence {
                             await capabilityController.performManagedReset {
                                 await voiceHistoryRepository.close()
@@ -3714,6 +4290,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                         )
                         return result ?? ResetResult(roots: [])
                     }
+                    return result
                 },
                 resetWakePreferences: {
                     [preferenceRepository, wakeProduction, wakeMaterializer,
@@ -3830,6 +4407,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 privacySettings: privacySettings,
                 diagnosticsSettings: diagnosticsSettings,
                 wakeSettings: wakeSettings,
+                remoteLiveSettings: remoteLiveSettings,
                 avatarSettings: avatarSettings
             ))
         )
@@ -3914,6 +4492,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 phrase: wakePhrase,
                 tuning: wakeTuning
             )
+            let remoteLiveEnabled = (try? await preferenceRepository.value(
+                for: .remoteLiveEnabled
+            )) ?? false
+            await remoteLiveSettings.restorePersistedPreferences(
+                enabled: remoteLiveEnabled
+            )
         }
     }
 
@@ -3937,6 +4521,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         avatarProjectionCoordinator.onProjection = { _ in }
         avatarIntegration.disposeForTermination()
         _ = await wakeProduction.shutdown()
+        await remoteLiveSettings.disableForLifecycle()
+        await remoteHostAdapter.stop()
         await model.shutdownLiveVoice()
         await liveController?.shutdown()
         await capabilityController.shutdown()
