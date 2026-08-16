@@ -2630,6 +2630,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private let liveController: GPTLiveController?
     private let capabilityController: CapabilityController
     private let preferenceRepository: SQLitePreferenceRepository
+    private let avatarSettings: AvatarSettingsModel
+    private let systemReducedMotionSource: SystemReducedMotionSource
     private let wakeProduction: WakeWordProductionController
     private let wakeSettings: WakeWordSettingsController
     private let wakeIntegration: WakeWordLiveIntegration
@@ -2648,6 +2650,12 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         try FileManager.default.createDirectory(
             at: cacheURL,
             withIntermediateDirectories: true
+        )
+        let avatarRoot = Self.avatarURL(environment: environment)
+        try FileManager.default.createDirectory(
+            at: avatarRoot,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
         let credentialStore = KeychainCredentialStore()
         let capabilityProviderCallbackAuthorityBox =
@@ -3042,6 +3050,17 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             path: databasePath
         )
         self.preferenceRepository = preferenceRepository
+        let systemReducedMotionSource = SystemReducedMotionSource()
+        let avatarSettings = AvatarSettingsModel(
+            adapter: MillerAvatarProfileAdapter(root: avatarRoot),
+            preferences: preferenceRepository,
+            systemReduceMotion: systemReducedMotionSource.value
+        )
+        systemReducedMotionSource.onChange = { [weak avatarSettings] value in
+            avatarSettings?.setSystemReduceMotion(value)
+        }
+        self.systemReducedMotionSource = systemReducedMotionSource
+        self.avatarSettings = avatarSettings
         let microphoneOwnership = MicrophoneOwnership()
         let wakeIntegration = WakeWordLiveIntegration()
         let wakeModelPaths = try? WakeWordRuntimeResources.resolve(
@@ -3489,48 +3508,67 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 deleteCapabilityAudit: { [capabilityController] in
                     try await capabilityController.deleteCapabilityAuditsFromSettings()
                 },
-                storageUsage: { [databaseURL, cacheURL] in
+                storageUsage: { [databaseURL, cacheURL, avatarRoot] in
                     ManagedStorageUsage.measure(
                         dataURLs: [
                             databaseURL,
                             URL(fileURLWithPath: databaseURL.path + "-wal"),
                             URL(fileURLWithPath: databaseURL.path + "-shm"),
+                            avatarRoot,
                         ],
                         cacheURLs: [cacheURL]
                     )
                 },
                 reset: { [model, providerController, voiceHistoryRepository,
                           preferenceRepository, capabilityController,
-                          capabilitySettings] in
+                          capabilitySettings, avatarSettings,
+                          systemReducedMotionSource] in
                     await model.performManagedPrivacyReset {
-                        let result = await capabilityController.performManagedReset {
-                            await voiceHistoryRepository.close()
-                            await preferenceRepository.close()
-                            var roots = await providerController.reset().roots
-                            await capabilitySettings.clearAfterPrivacyReset()
-                            do {
-                                try await voiceHistoryRepository.reopen()
-                                roots.append(.init(
-                                    root: "sqlite.voice_history.reopen", succeeded: true
-                                ))
-                            } catch {
-                                roots.append(.init(
-                                    root: "sqlite.voice_history.reopen", succeeded: false
-                                ))
+                        let result = await avatarSettings.withResetFence {
+                            await capabilityController.performManagedReset {
+                                await voiceHistoryRepository.close()
+                                await preferenceRepository.close()
+                                let result = await providerController.reset()
+                                await capabilitySettings.clearAfterPrivacyReset()
+                                var roots = result.roots
+                                do {
+                                    try await voiceHistoryRepository.reopen()
+                                    roots.append(.init(
+                                        root: "sqlite.voice_history.reopen", succeeded: true
+                                    ))
+                                } catch {
+                                    roots.append(.init(
+                                        root: "sqlite.voice_history.reopen", succeeded: false
+                                    ))
+                                }
+                                do {
+                                    try await preferenceRepository.reopen()
+                                    roots.append(.init(
+                                        root: "sqlite.preferences.reopen", succeeded: true
+                                    ))
+                                    roots.append(
+                                        await avatarSettings
+                                            .clearPreferencesAfterReopenWhileFenced()
+                                    )
+                                } catch {
+                                    roots.append(.init(
+                                        root: "sqlite.preferences.reopen", succeeded: false
+                                    ))
+                                    roots.append(.init(
+                                        root: "preferences.avatar.reset", succeeded: false
+                                    ))
+                                }
+                                roots.append(
+                                    await avatarSettings.resetMetadataWhileFenced()
+                                )
+                                return ResetResult(roots: roots)
                             }
-                            do {
-                                try await preferenceRepository.reopen()
-                                roots.append(.init(
-                                    root: "sqlite.preferences.reopen", succeeded: true
-                                ))
-                            } catch {
-                                roots.append(.init(
-                                    root: "sqlite.preferences.reopen", succeeded: false
-                                ))
-                            }
-                            return ResetResult(roots: roots)
                         }
-                        return result
+                        await systemReducedMotionSource.refresh()
+                        await avatarSettings.setSystemReduceMotion(
+                            systemReducedMotionSource.value
+                        )
+                        return result ?? ResetResult(roots: [])
                     }
                 },
                 resetWakePreferences: {
@@ -3646,12 +3684,14 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
                 capabilitySettings: capabilitySettings,
                 privacySettings: privacySettings,
                 diagnosticsSettings: diagnosticsSettings,
-                wakeSettings: wakeSettings
+                wakeSettings: wakeSettings,
+                avatarSettings: avatarSettings
             ))
         )
         activationService = GlobalActivationService()
         shortcutPreferences = GlobalShortcutPreferences()
         super.init()
+        systemReducedMotionSource.start()
         Self.wireWakeIntegrationOpener(wakeIntegration) { [weak self] in
             self?.overlayController.show()
         }
@@ -3742,6 +3782,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver($0)
         }
         wakeLifecycleObservers.removeAll()
+        systemReducedMotionSource.stop()
         _ = await wakeProduction.shutdown()
         await model.shutdownLiveVoice()
         await liveController?.shutdown()
@@ -3998,6 +4039,21 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         }
         return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/ai.millrace.miller/helper", isDirectory: true)
+    }
+
+    static func avatarURL(environment: [String: String]) -> URL {
+        if let databasePath = environment["MILLER_DATABASE_PATH"],
+           !databasePath.isEmpty
+        {
+            return URL(fileURLWithPath: databasePath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("avatar", isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/ai.millrace.miller/avatar",
+                isDirectory: true
+            )
     }
 
     static func liveHelperURL(

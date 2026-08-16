@@ -337,7 +337,9 @@ struct PrivacyDataSettingsTab: View {
             Text(
                 "Miller will stop its helpers and remove its managed database, "
                     + "cache, Keychain items, capability records, saved transcripts, "
-                    + "and wake preferences. This does not claim secure erasure."
+                    + "and wake preferences. Original user "
+                    + "model and motion files remain untouched. This does not claim "
+                    + "secure erasure."
             )
         }
     }

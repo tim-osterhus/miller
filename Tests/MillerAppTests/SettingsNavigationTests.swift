@@ -11,6 +11,7 @@ struct SettingsNavigationTests {
             "General",
             "Providers",
             "Voice",
+            "Avatar",
             "Tools & Integrations",
             "Privacy & Data",
             "Diagnostics",
@@ -19,6 +20,7 @@ struct SettingsNavigationTests {
             "General settings",
             "Providers settings",
             "Voice settings",
+            "Avatar settings",
             "Tools and integrations settings",
             "Privacy and data settings",
             "Diagnostics settings",
@@ -27,6 +29,7 @@ struct SettingsNavigationTests {
             "gearshape",
             "network",
             "waveform",
+            "person.crop.circle",
             "wrench.and.screwdriver",
             "hand.raised",
             "stethoscope",
@@ -36,6 +39,9 @@ struct SettingsNavigationTests {
     @Test
     func keyboardNavigationMovesForwardAndBackwardWithoutChangingOrder() {
         #expect(SettingsSection.general.moving(.forward) == .providers)
+        #expect(SettingsSection.voice.moving(.forward) == .avatar)
+        #expect(SettingsSection.avatar.moving(.forward) == .toolsIntegrations)
+        #expect(SettingsSection.avatar.moving(.backward) == .voice)
         #expect(SettingsSection.providers.moving(.backward) == .general)
         #expect(SettingsSection.diagnostics.moving(.forward) == .general)
         #expect(SettingsSection.general.moving(.backward) == .diagnostics)
@@ -134,6 +140,37 @@ struct SettingsNavigationTests {
         #expect(source.contains("Keyword score"))
         #expect(source.contains("Detection threshold"))
         #expect(source.contains("wakeSettings.updateTuning"))
+    }
+
+    @Test
+    func avatarSectionMapsToDedicatedAccessibleSource() throws {
+        #expect(SettingsSection.avatar.sourceFileName == "AvatarSettingsTab.swift")
+        let source = try settingsSource(named: SettingsSection.avatar.sourceFileName)
+        #expect(source.contains("ScrollView"))
+        #expect(source.contains("Enable Avatar"))
+        #expect(source.contains("Choose VRM 1.0 Model"))
+        #expect(source.contains("Reduce Avatar Motion"))
+        #expect(source.contains("Profile name"))
+        #expect(source.contains("renameProfile"))
+        #expect(source.contains("modelConsecutiveLoadFailures > 0"))
+        #expect(source.contains("motion.consecutiveLoadFailures > 0 || motion.lastFailure != nil"))
+        #expect(!source.contains("accessibilityReduceMotion"))
+        #expect(source.contains("accessibilityLabel(section.accessibilityLabel)"))
+    }
+
+    @Test
+    func appCoordinatorOwnsPersistentSystemReducedMotionSource() throws {
+        let source = try String(
+            contentsOf: repositoryRoot().appendingPathComponent(
+                "Sources/MillerApp/AppCoordinator.swift"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("private let systemReducedMotionSource"))
+        #expect(source.contains("systemReduceMotion: systemReducedMotionSource.value"))
+        #expect(source.contains("systemReducedMotionSource.start()"))
+        #expect(source.contains("systemReducedMotionSource.stop()"))
     }
 
     @Test

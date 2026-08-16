@@ -97,4 +97,98 @@ struct SQLitePreferenceRepositoryTests {
         #expect(try await repository.value(for: .wakeKeywordScore) == 7.0)
         #expect(try await repository.value(for: .wakeDetectionThreshold) == 0.08)
     }
+
+    @Test
+    func avatarPreferencesAreOffByDefaultPersistStrictlyAndResetByDeletion() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+
+        let defaults = try await repository.avatarPreferences()
+        #expect(defaults.enabled == false)
+        #expect(defaults.selectedProfileID == nil)
+        #expect(defaults.reduceMotion == false)
+
+        let selected = UUID()
+        try await repository.set(true, for: .avatarEnabled)
+        try await repository.set(selected, for: .selectedAvatarProfileID)
+        try await repository.set(true, for: .reduceAvatarMotion)
+        #expect(try await repository.avatarPreferences() == .init(
+            enabled: true,
+            selectedProfileID: selected,
+            reduceMotion: true
+        ))
+
+        let database = try SQLiteDatabase(path: fixture.path)
+        try database.execute("PRAGMA ignore_check_constraints = ON")
+        try database.execute(
+            "UPDATE miller_preferences SET value_json = 'not-json' WHERE key = 'avatar_enabled'"
+        )
+        let malformed = try await repository.avatarPreferences()
+        #expect(malformed.enabled == false)
+        #expect(malformed.selectedProfileID == selected)
+        #expect(malformed.reduceMotion)
+
+        try database.execute(
+            "UPDATE miller_preferences SET value_json = 'not-json' WHERE key = 'avatar_selected_profile_id'"
+        )
+        let malformedSelection = try await repository.avatarPreferences()
+        #expect(!malformedSelection.enabled)
+        #expect(malformedSelection.selectedProfileID == nil)
+        #expect(malformedSelection.reduceMotion)
+
+        try database.execute(
+            "UPDATE miller_preferences SET value_json = 'not-json' WHERE key = 'avatar_reduce_motion'"
+        )
+        let malformedMotion = try await repository.avatarPreferences()
+        #expect(!malformedMotion.enabled)
+        #expect(malformedMotion.selectedProfileID == nil)
+        #expect(!malformedMotion.reduceMotion)
+
+        try await repository.delete(.avatarEnabled)
+        try await repository.delete(.selectedAvatarProfileID)
+        try await repository.delete(.reduceAvatarMotion)
+        #expect(try await repository.avatarPreferences() == .init(
+            enabled: false,
+            selectedProfileID: nil,
+            reduceMotion: false
+        ))
+
+        try await repository.set(true, for: .avatarEnabled)
+        try await repository.set(selected, for: .selectedAvatarProfileID)
+        try await repository.set(true, for: .reduceAvatarMotion)
+        try await repository.delete(.avatarEnabled)
+        try await repository.delete(.selectedAvatarProfileID)
+        try await repository.delete(.reduceAvatarMotion)
+        #expect(try await repository.avatarPreferences() == .init(
+            enabled: false,
+            selectedProfileID: nil,
+            reduceMotion: false
+        ))
+    }
+
+    @Test
+    func avatarPreferencesPropagateClosedDatabaseErrors() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+
+        await repository.close()
+
+        await #expect(throws: SQLiteError.writeFailed) {
+            _ = try await repository.avatarPreferences()
+        }
+    }
+
+    @Test
+    func distinctAvatarPreferenceWritesSurviveConcurrentChanges() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let first = try SQLitePreferenceRepository(path: fixture.path)
+        let second = try SQLitePreferenceRepository(path: fixture.path)
+
+        async let enabled: Void = first.set(true, for: .avatarEnabled)
+        async let reduced: Void = second.set(true, for: .reduceAvatarMotion)
+        _ = try await (enabled, reduced)
+
+        #expect(try await first.value(for: .avatarEnabled))
+        #expect(try await first.value(for: .reduceAvatarMotion))
+    }
 }

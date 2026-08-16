@@ -9,6 +9,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case general
     case providers
     case voice
+    case avatar
     case toolsIntegrations = "tools-integrations"
     case privacyData = "privacy-data"
     case diagnostics
@@ -20,6 +21,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "General"
         case .providers: "Providers"
         case .voice: "Voice"
+        case .avatar: "Avatar"
         case .toolsIntegrations: "Tools & Integrations"
         case .privacyData: "Privacy & Data"
         case .diagnostics: "Diagnostics"
@@ -31,6 +33,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "General settings"
         case .providers: "Providers settings"
         case .voice: "Voice settings"
+        case .avatar: "Avatar settings"
         case .toolsIntegrations: "Tools and integrations settings"
         case .privacyData: "Privacy and data settings"
         case .diagnostics: "Diagnostics settings"
@@ -42,6 +45,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .providers: "network"
         case .voice: "waveform"
+        case .avatar: "person.crop.circle"
         case .toolsIntegrations: "wrench.and.screwdriver"
         case .privacyData: "hand.raised"
         case .diagnostics: "stethoscope"
@@ -53,6 +57,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "GeneralSettingsTab.swift"
         case .providers: "ProvidersSettingsTab.swift"
         case .voice: "VoiceSettingsTab.swift"
+        case .avatar: "AvatarSettingsTab.swift"
         case .toolsIntegrations: "ToolsIntegrationsSettingsTab.swift"
         case .privacyData: "PrivacyDataSettingsTab.swift"
         case .diagnostics: "DiagnosticsSettingsTab.swift"

@@ -160,6 +160,92 @@ struct ResetServiceTests {
     }
 
     @Test
+    func resetLeavesAvatarMetadataForPackageOwnedReset() async throws {
+        let fixture = try TestRoot(name: #function)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let avatarMetadata = fixture.directory.appendingPathComponent("avatar")
+        let original = fixture.directory.appendingPathComponent("selected.vrm")
+        try FileManager.default.createDirectory(
+            at: avatarMetadata,
+            withIntermediateDirectories: false
+        )
+        try Data("metadata".utf8).write(
+            to: avatarMetadata.appendingPathComponent("profiles-v2.json")
+        )
+        try Data("original".utf8).write(to: original)
+
+        let service = ResetService(
+            databaseURL: fixture.database,
+            cacheURLs: [],
+            credentialStore: MemoryCredentialStore(),
+            stopAndReapHelper: {},
+            closeDatabase: {},
+            reopenDatabase: {},
+            resumeRuntime: {}
+        )
+
+        let result = await service.reset()
+
+        #expect(result.failures.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: avatarMetadata.path))
+        #expect(FileManager.default.fileExists(atPath: original.path))
+    }
+
+    @Test
+    @MainActor
+    func appCoordinatorDerivesManagedAvatarSiblingForDatabaseTests() throws {
+        let database = URL(fileURLWithPath: "/tmp/miller-c3/database.sqlite3")
+        let derived = AppCoordinator.avatarURL(environment: [
+            "MILLER_DATABASE_PATH": database.path,
+            "MILLER_AVATAR_PATH": "/tmp/user-selected-avatar",
+        ])
+
+        #expect(derived == database.deletingLastPathComponent()
+            .appendingPathComponent("avatar", isDirectory: true))
+    }
+
+    @Test
+    func appCoordinatorHasNoUnrestrictedAvatarPathOverride() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MillerApp/AppCoordinator.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(!source.contains("MILLER_AVATAR_PATH"))
+    }
+
+    @Test
+    func resetServiceHasNoAvatarMetadataDeletionAuthority() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MillerApp/Security/ResetService.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(!source.contains("avatarMetadataURLs"))
+        #expect(!source.contains("avatarMetadata"))
+    }
+
+    @Test
+    func appCoordinatorFencesAvatarSettingsDuringManagedReset() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/MillerApp/AppCoordinator.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("withResetFence"))
+        #expect(source.contains("preferences.avatar.reset"))
+        #expect(source.contains("resetMetadataWhileFenced"))
+        #expect(source.contains("clearPreferencesAfterReopenWhileFenced"))
+        #expect(!source.contains("resetView()"))
+    }
+
+    @Test
     func successfulResetReopensRepositoryWithEmptyAuthoritativeState() async throws {
         let fixture = try TestRoot(name: #function)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

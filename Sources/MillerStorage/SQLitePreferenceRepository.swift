@@ -17,6 +17,22 @@ public struct MillerPreferenceKey<Value: Codable & Sendable>: Sendable {
     }
 }
 
+public struct AvatarPreferences: Equatable, Sendable {
+    public let enabled: Bool
+    public let selectedProfileID: UUID?
+    public let reduceMotion: Bool
+
+    public init(
+        enabled: Bool,
+        selectedProfileID: UUID?,
+        reduceMotion: Bool
+    ) {
+        self.enabled = enabled
+        self.selectedProfileID = selectedProfileID
+        self.reduceMotion = reduceMotion
+    }
+}
+
 public extension MillerPreferenceKey where Value == Bool {
     static var voiceTranscriptSavingEnabled: Self {
         Self(
@@ -43,6 +59,15 @@ public extension MillerPreferenceKey where Value == Bool {
     static var launchAtLogin: Self {
         Self(rawValue: "launch_at_login", defaultValue: false)
     }
+
+    static var avatarEnabled: Self {
+        Self(rawValue: "avatar_enabled", defaultValue: false)
+    }
+
+    static var reduceAvatarMotion: Self {
+        Self(rawValue: "avatar_reduce_motion", defaultValue: false)
+    }
+
 }
 
 public extension MillerPreferenceKey where Value == String {
@@ -57,6 +82,13 @@ public extension MillerPreferenceKey where Value == String {
     static var selectedSettingsTab: Self {
         Self(rawValue: "selected_settings_tab", defaultValue: "general")
     }
+}
+
+public extension MillerPreferenceKey where Value == UUID? {
+    static var selectedAvatarProfileID: Self {
+        Self(rawValue: "avatar_selected_profile_id", defaultValue: nil)
+    }
+
 }
 
 public extension MillerPreferenceKey where Value == Double {
@@ -163,6 +195,14 @@ public actor SQLitePreferenceRepository {
         }
     }
 
+    public func avatarPreferences() throws -> AvatarPreferences {
+        AvatarPreferences(
+            enabled: try avatarValue(for: .avatarEnabled),
+            selectedProfileID: try avatarValue(for: .selectedAvatarProfileID),
+            reduceMotion: try avatarValue(for: .reduceAvatarMotion)
+        )
+    }
+
     public func delete<Value>(
         _ key: MillerPreferenceKey<Value>
     ) throws where Value: Codable & Sendable {
@@ -193,6 +233,18 @@ public actor SQLitePreferenceRepository {
     private func preflightWrite() throws {
         if let simulatedWriteFailure {
             throw simulatedWriteFailure
+        }
+    }
+
+    private func avatarValue<Value>(
+        for key: MillerPreferenceKey<Value>
+    ) throws -> Value where Value: Codable & Sendable {
+        do {
+            return try value(for: key)
+        } catch let error as PreferenceRepositoryError
+            where error == .malformedValue
+        {
+            return key.defaultValue
         }
     }
 

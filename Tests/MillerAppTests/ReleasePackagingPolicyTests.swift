@@ -131,7 +131,7 @@ struct ReleasePackagingPolicyTests {
             "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
             "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
             "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
-            "134c871abd0c8b80d029dc67cece05050a2778d7a3dc28d0dcecfea4c8248c28",
+            "2c27a1520795f56844d734a7e7a961667c2f02d7dcb0fc240e51e2d9c81caf76",
             "2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0",
             "99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7",
             "2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6",
@@ -149,7 +149,7 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func avatarDisabledLinkContractDoesNotAccessProfilesOrActivateRenderer() throws {
+    func avatarDisabledLinkContractDefersRendererActivation() throws {
         let dump = try semanticPackageDump()
         #expect(ReleasePackagingPolicy.hasOnlyAvatarProductsInMillerApp(in: dump))
 
@@ -162,10 +162,6 @@ struct ReleasePackagingPolicyTests {
                 .filter { $0.pathExtension == "swift" }
         )
         let forbiddenActivationTerms = [
-            "import MillerAvatarCore",
-            "import MillerAvatarHost",
-            "MillerAvatarHost",
-            "AvatarProfileStore",
             "AvatarSurfaceController",
             "WebKitAvatarRendererDriver",
             "loadModel",
@@ -560,7 +556,7 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
-            "Miller Avatar@0.1.0-alpha.1",
+            "Miller Avatar@0.1.0-alpha.2",
             "Miller@0.1.2",
             "MillerCapabilityBridge@0.1.2",
             "MillerCapabilities@0.1.2",
@@ -700,7 +696,7 @@ struct ReleasePackagingPolicyTests {
                 {
                   "sourceControl": [{
                     "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialAvatarURL)"}]},
-                    "requirement": {"exact": ["0.1.0-alpha.1"]}
+                    "requirement": {"exact": ["0.1.0-alpha.2"]}
                   }]
                 }
               ],
@@ -757,8 +753,8 @@ private enum ReleasePackagingPolicy {
     static let approvedSDKVersion = "0.12.1"
     static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
     static let officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git"
-    static let approvedAvatarVersion = "0.1.0-alpha.1"
-    static let approvedAvatarRevision = "4f48f55bfeb1fd1f805143bdfadf61ddff541b15"
+    static let approvedAvatarVersion = "0.1.0-alpha.2"
+    static let approvedAvatarRevision = "6b34f9ff35a94cdde9c7826bc67f2cfff02abd82"
 
     private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
     private static let packageInventories = [

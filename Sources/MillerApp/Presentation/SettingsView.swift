@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject var privacySettings: PrivacyDataSettingsModel
     @ObservedObject var diagnosticsSettings: DiagnosticsSettingsModel
     @ObservedObject var wakeSettings: WakeWordSettingsController
+    @ObservedObject var avatarSettings: AvatarSettingsModel
     @AppStorage(SettingsSelectionPreferences.key)
     private var selectedSectionRawValue = SettingsSection.general.rawValue
 
@@ -18,13 +19,15 @@ struct SettingsView: View {
         wakeSettings: WakeWordSettingsController = .init(
             enable: { .disabled },
             disable: { .disabled }
-        )
+        ),
+        avatarSettings: AvatarSettingsModel = .init()
     ) {
         self.model = model
         self.capabilitySettings = capabilitySettings
         self.privacySettings = privacySettings
         self.diagnosticsSettings = diagnosticsSettings
         self.wakeSettings = wakeSettings
+        self.avatarSettings = avatarSettings
     }
 
     var body: some View {
@@ -84,6 +87,8 @@ struct SettingsView: View {
             ProvidersSettingsTab(model: model)
         case .voice:
             VoiceSettingsTab(model: model, wakeSettings: wakeSettings)
+        case .avatar:
+            AvatarSettingsTab(model: avatarSettings)
         case .toolsIntegrations:
             ToolsIntegrationsSettingsTab(editor: capabilitySettings)
         case .privacyData:

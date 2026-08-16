@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tim-osterhus/miller-avatar.git",
       "state" : {
-        "revision" : "4f48f55bfeb1fd1f805143bdfadf61ddff541b15",
-        "version" : "0.1.0-alpha.1"
+        "revision" : "6b34f9ff35a94cdde9c7826bc67f2cfff02abd82",
+        "version" : "0.1.0-alpha.2"
       }
     },
     {
