@@ -11,22 +11,21 @@
 - [x] Headless M1 size, process, write-root, and cleanup evidence is retained.
 - [x] Packet 3 Live-text spike is recorded as `INCONCLUSIVE` without product
       support.
-- [x] Packet 5 wake integration is headless-approved; its human gate is
-      `LIVE_NOT_RUN`.
+- [x] Packet 5 wake integration is headless-approved and owner-qualified.
 
-## Owner-visible M1 gate — NOT RUN
+## Owner-visible M1 gate — PARTIAL
 
-- [ ] External Codex readiness/timeout plus one typed turn.
-- [ ] Overlay/full-window selection and Command-C.
-- [ ] GPT-Live speech/transcript/interrupt/end/second session/cleanup.
-- [ ] Default/custom wake phrase.
+- [x] External Codex readiness/timeout plus one typed turn.
+- [x] Overlay/full-window selection and Command-C.
+- [x] GPT-Live speech/transcript/interrupt/end/second session/cleanup.
+- [x] Default/custom wake phrase, automatic Live start, and post-Live rearm.
 - [ ] Typed fallback with wake disabled and Live unavailable.
 - [ ] Reset/removal/relaunch with no lingering helper or microphone owner.
 
 Evidence: `docs/qualification/v0.1.2-headless-report.md` and
 `docs/qualification/v0.1.2-human-protocol.md`. These artifacts explicitly
-record `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN` and do not claim a human
-pass.
+preserve `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN` as the headless result.
+The owner protocol records the later partial human result.
 
 ## Deferred signing and publication
 

@@ -53,9 +53,9 @@ manual Live Voice is active and rearms only after provider, WebKit, transcript,
 and admission cleanup. A sleep, device loss, or shutdown therefore shows a
 paused/unavailable state instead of pretending that capture continues. Moving
 focus away from Miller or closing Settings does not pause enabled wake
-listening. The owner-visible microphone and custom-phrase check is
-`LIVE_NOT_RUN` in the v0.1.2 release closure; deterministic tests do not prove
-speech detection or the wake-only audible acknowledgement.
+listening. The ordinary owner-visible v0.1.2 wake flow passed, including a
+custom phrase and post-Live rearm. Permission denial, sleep recovery, and
+device-loss recovery remain deterministic rather than owner-destructive tests.
 
 ## A reasoning request fails
 

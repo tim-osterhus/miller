@@ -1,15 +1,14 @@
 # Upcoming Miller releases
 
 This document records the public feature order after the v0.1.2 source-release
-closure. The owner-visible M1 gate remains `LIVE_NOT_RUN`, so publication still
-requires separate owner approval.
+closure. The owner-visible M1 gate is `PARTIAL`. Publication still requires
+decisions on two remaining checks and separate owner approval.
 
 ## v0.1.2: daily-use repairs and stable seams — closure candidate
 
 The closure candidate makes the current application easier to use while
-preserving the desktop-only authority boundary. Its deterministic checks are
-headless-ready; they do not prove the owner-visible microphone, audio, or M1
-gate.
+preserving the desktop-only authority boundary. Deterministic checks and the
+principal typed, transcript, Live, and wake flows have passed.
 
 ### Transcript interaction
 
@@ -17,8 +16,8 @@ gate.
 - Allow pointer selection across rendered line breaks and message blocks.
 - Preserve Markdown, links, code blocks, streaming, and follow-tail behavior.
 
-These repairs remain narrow AppKit and presentation work. The owner-visible
-selection and Command-C observation is listed in the unreached M1 gate.
+These repairs remain narrow AppKit and presentation work. Owner-visible
+selection and Command-C passed.
 
 ### Custom wake phrases
 
@@ -29,8 +28,8 @@ selection and Command-C observation is listed in the unreached M1 gate.
 - Treat the phrase only as a trigger: release wake capture, start one ordinary
   Live session, and ask Miller to acknowledge that it is ready before the owner
   speaks the request.
-- The deterministic integration is complete; the microphone, default/custom
-  phrase, and audible acknowledgement qualification remains `LIVE_NOT_RUN`.
+- The deterministic integration and ordinary owner-visible wake flow passed,
+  including default/custom activation and post-Live rearm.
 
 ### Live text feasibility
 

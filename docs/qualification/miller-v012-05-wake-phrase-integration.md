@@ -1,7 +1,6 @@
 # Packet 5 wake-phrase integration qualification
 
-Status: deterministic implementation complete; owner-visible microphone,
-permission, and custom-phrase gate: `LIVE_NOT_RUN`.
+Status: deterministic implementation complete; owner-visible wake flow: `PASS`.
 
 ## Product contract
 
@@ -51,7 +50,7 @@ handoff, failure/interrupt cleanup, sleep/device loss/shutdown, focus
 independence, persisted tuning defaults and rollback, and package
 inventory/provenance/SBOM/notices/cleanup. The final run records exact
 commands, test counts, storage measurements, package-size delta, and cleanup
-in the parent handoff. The current full serial suite passed 1,002 tests.
+in the parent handoff. The latest full serial suite passed 1,024 tests.
 
 The earlier route-fixture observation—three route fixtures returned status 79
 and the Pi-provider fixture returned status 1 in that environment—is retained
@@ -60,10 +59,8 @@ evidence by the later exact v0.1.2 run
 (`./scripts/run-headless-release-qualification.sh`) at release HEAD
 `5dc99351d83027abdb9f9b1fe176b044444d0ed7`. Its committed
 `v0.1.2-headless-report.md` records PASS for the three route checks and the
-Pi-provider check. This supersession is headless evidence only; it does not
-qualify a human wake run, and the owner-visible microphone, permission,
-custom-phrase, audible acknowledgement, Live, and recovery rows remain
-`LIVE_NOT_RUN`.
+Pi-provider check. This supersession remains headless evidence. The later
+owner-visible evidence below qualifies the ordinary wake-to-Live flow.
 
 ## Measurements
 
@@ -87,24 +84,19 @@ custom-phrase, audible acknowledgement, Live, and recovery rows remain
 
 ## Human gate
 
-Partial owner-visible evidence recorded on 2026-08-11 HST:
+Owner-visible evidence recorded through 2026-08-15 HST:
 
-- background-focus wake listening remained active outside Miller Settings;
-- two consecutive wake-triggered Live admissions became usable in
-  approximately 10 seconds each, with no `voice_timeout`;
-- the durable store records a matching completed wakeword session with a
-  10.022-second start-to-completion interval; the second observed session was
-  still open when the sanitized evidence was inspected.
+- **Hey Miller** and a saved custom phrase both activated Miller without a
+  restart.
+- A phrase opened Miller and started one Live session without another click.
+- Live speech, mute, interruption, session end, and a second session passed.
+- Ending a wake-started Live session rearmed capture. A second phrase started
+  another Live session without resaving the phrase.
+- Focus changes and closing Settings did not disable wake listening.
+- A quiet-room observation produced no spontaneous activation.
+- Final initial and follow-up latency were acceptable to the owner.
 
-This closes the prior startup-timeout regression, but it does not promote the
-entire wake gate to PASS.
+Result: `PASS` for the ordinary owner-visible wake flow.
 
-The following rows remain `LIVE_NOT_RUN` and are not inferred from tests:
-
-- real microphone permission request and denial recovery;
-- human speech detection for Hey Miller;
-- owner custom-phrase save and relaunch;
-- automatic Live start from the phrase alone and audible readiness
-  acknowledgement before the owner speaks a request;
-- real Live provider admission, interruption, failure, cleanup, and rearm;
-- observed sleep/device-loss recovery on the owner machine.
+Permission denial, sleep recovery, and device-loss recovery remain covered by
+deterministic tests rather than separate destructive owner exercises.

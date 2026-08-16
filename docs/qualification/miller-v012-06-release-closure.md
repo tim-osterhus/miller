@@ -12,12 +12,12 @@ the owner-visible M1 gate.
 
 | Packet | Result |
 | --- | --- |
-| 1 — external Codex readiness | committed deterministic result; owner gate remains `LIVE_NOT_RUN` |
-| 2 — transcript copy | committed deterministic result; owner gate remains `LIVE_NOT_RUN` |
+| 1 — external Codex readiness | committed deterministic result; owner result `PASS` |
+| 2 — transcript copy | committed deterministic result; owner result `PASS` |
 | 3 — Live-text compatibility spike | `INCONCLUSIVE` |
 | 4 — in-process host seam | committed deterministic result |
-| 5 — custom wake phrase | headless-approved; human gate `LIVE_NOT_RUN` |
-| 6 — release closure | headless-ready; human gate `LIVE_NOT_RUN` |
+| 5 — custom wake phrase | headless-approved; owner wake result `PASS` |
+| 6 — release closure | headless-ready; owner M1 result `PARTIAL` |
 
 ## Required evidence
 
@@ -29,9 +29,8 @@ inventory, SPDX/provenance checks, package/file measurements, and cleanup:
 Packet 5's earlier route-fixture observation is explicitly superseded by the
 later exact v0.1.2 headless run (`./scripts/run-headless-release-qualification.sh`)
 at release HEAD `5dc99351d83027abdb9f9b1fe176b044444d0ed7`, whose committed
-report records PASS for the route and Pi-provider checks. Packet 5 remains
-`LIVE_NOT_RUN` for owner-visible microphone, custom-phrase, and wake behavior;
-Packet 3 remains `INCONCLUSIVE`.
+report records PASS for the route and Pi-provider checks. Packet 5 later passed
+its owner-visible ordinary wake flow. Packet 3 remains `INCONCLUSIVE`.
 
 The release package must retain only the verified `Miller.app` and its sibling
 inventory under `.artifacts/release/`. Build/cache roots, Gateway dependencies,
@@ -39,6 +38,6 @@ wake downloads/extraction/staging roots, temporary App Server/helper/test roots,
 sockets, generated dependency roots, and measurement roots must be absent after
 cleanup.
 
-Publication requires a separate explicit owner instruction after every M1 row
-passes. This closure does not tag, sign, notarize, push, publish, or claim
-publication readiness.
+Publication still requires disposition of the remaining M1 rows and a separate
+explicit owner instruction. This closure does not tag, sign, notarize, publish,
+or claim publication readiness.

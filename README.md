@@ -8,8 +8,8 @@ of local data or tool permissions. It keeps conversation state on your Mac and
 shows tool activity while it runs.
 
 **Current source version:** v0.1.2 for Apple Silicon Macs running macOS 15 or
-newer. This release-closure candidate is headless-ready; the owner-visible M1
-gate remains explicitly unrun, so it is not publication-ready.
+newer. This release-closure candidate is headless-ready and has passed its main
+owner-visible flows. Two M1 checks remain before publication.
 
 ## Build and open Miller
 
@@ -152,8 +152,8 @@ hardware may retain earlier bytes.
 - Hosted reasoning and Live Voice require network access.
 - The bounded Live-text compatibility spike ended `INCONCLUSIVE`; typed input
   during an active Live session is not product-supported in v0.1.2.
-- Wake Listening supports **Hey Miller** and one bounded custom English phrase,
-  but its owner-visible microphone/custom-phrase gate is `LIVE_NOT_RUN`.
+- Wake Listening supports **Hey Miller** and one bounded custom English phrase.
+- A slow first wake-to-Live admission remains a nonblocking optimization target.
 
 ## Runtime boundaries
 
@@ -186,9 +186,10 @@ Remove generated build and dependency roots after qualification:
 ./scripts/clean.sh --dependencies
 ```
 
-The v0.1.2 qualification artifacts record deterministic evidence without
-retaining credentials, audio, transcript content, or provider payloads. The
-owner-visible M1 gate remains `LIVE_NOT_RUN`:
+The v0.1.2 qualification artifacts retain no credentials, audio, transcript
+content, or provider payloads. The owner M1 result is `PARTIAL`. The principal
+typed, transcript, Live, and wake flows pass. The combined fallback test and
+destructive reset/removal check remain.
 
 - `docs/qualification/v0.1.2-headless-report.md`
 - `docs/qualification/v0.1.2-human-protocol.md`

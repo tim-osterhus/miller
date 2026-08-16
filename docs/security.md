@@ -42,8 +42,8 @@ Prepared command PCM is bounded and can be injected into the existing WebKit
 outbound track once; no second process or speech backend is created.
 
 The default wake phrase is **Hey Miller**; one bounded custom English phrase is
-compiled locally. The owner-visible microphone and custom-phrase gate remains
-`LIVE_NOT_RUN` for this release closure.
+compiled locally. The ordinary owner-visible wake flow passed, including
+custom-phrase activation and post-Live rearm.
 
 Live Voice depends on an owner-installed official Codex App Server. Missing or
 incompatible Codex, denied permission, unsupported model, provider refusal,

@@ -67,4 +67,5 @@ when voice is unavailable.
 
 Wake Listening is local and optional. It defaults off, recognizes **Hey
 Miller** or one bounded custom English phrase, and uses only the system-default
-microphone. Its owner-visible microphone/custom-phrase gate is `LIVE_NOT_RUN`.
+microphone. Its ordinary owner-visible wake flow passed on the release
+candidate.

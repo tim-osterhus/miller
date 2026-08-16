@@ -47,5 +47,5 @@ storage forecast passes, then run `./scripts/verify-wakeword-dependencies.sh`.
 Wake remains off by default and ships only the verified runtime model/token
 files plus linked native code; private generated keyword files stay in
 Application Support. The default phrase is **Hey Miller** and one bounded
-custom English phrase is supported. The owner-visible microphone and
-custom-phrase gate remains `LIVE_NOT_RUN`.
+custom English phrase is supported. The ordinary owner-visible wake flow has
+passed on the release candidate.
