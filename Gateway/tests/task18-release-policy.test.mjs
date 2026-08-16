@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const node = process.execPath;
 const inventoryScript = join(repoRoot, "scripts", "release-inventory.mjs");
-const avatarPackageRevision = "6b34f9ff35a94cdde9c7826bc67f2cfff02abd82";
+const avatarPackageRevision = "dac4d0ab432a9c158dca40985b28335bdfc70e2b";
 const avatarRequiredFiles = [
   "NOTICE",
   "THIRD_PARTY_NOTICES.md",
@@ -327,7 +327,7 @@ test("live SwiftPM manifest binds Miller Avatar to the exact official products",
     },
   ));
   const officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git";
-  const avatarVersion = "0.1.0-alpha.2";
+  const avatarVersion = "0.1.0-alpha.3";
   const avatarDependencies = (dump.dependencies ?? [])
     .flatMap((dependency) => dependency.sourceControl ?? [])
     .filter((dependency) =>

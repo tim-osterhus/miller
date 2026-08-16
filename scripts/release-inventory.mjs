@@ -83,7 +83,7 @@ const runtimeInventory = [
   },
   {
     name: "Miller Avatar",
-    version: "0.1.0-alpha.2",
+    version: "0.1.0-alpha.3",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
     role: "renderer_resource_bundle",
   },
@@ -170,7 +170,7 @@ const avatarLegalFiles = [
   },
   {
     path: "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
-    sha256: "2c27a1520795f56844d734a7e7a961667c2f02d7dcb0fc240e51e2d9c81caf76",
+    sha256: "365201299955e46b8731b0fa7e8a9badfcd14e32619b289eb9aa68ae022b9892",
     requiredText: [
       "Model Context Protocol Swift SDK 0.12.1",
       "Three.js 0.180.0",

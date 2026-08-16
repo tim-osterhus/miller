@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-expected_resolved_hash="96ca54c31fa6849a2ead85cc803289bcc03394263d57a99b9c35a99818d71bfb"
+expected_resolved_hash="10c7313d32729acd59f2d88f8185be22b29df56ee95b321a8b8a6d2ab53736ba"
 scratch_root="$repo_root/.build/task18-route-harness"
 
 [[ ! -L "$repo_root/.build" ]] || exit 77

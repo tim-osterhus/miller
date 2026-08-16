@@ -19,7 +19,7 @@ typeset -A avatar_web_hashes=(
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
 avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
-avatar_aggregate_third_party_notices_sha256="2c27a1520795f56844d734a7e7a961667c2f02d7dcb0fc240e51e2d9c81caf76"
+avatar_aggregate_third_party_notices_sha256="365201299955e46b8731b0fa7e8a9badfcd14e32619b289eb9aa68ae022b9892"
 
 test -d "$bundle_root"
 test ! -L "$bundle_root"
@@ -138,8 +138,8 @@ do
   grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.2' \
-  '6b34f9ff35a94cdde9c7826bc67f2cfff02abd82' \
+  'Miller Avatar v0.1.0-alpha.3' \
+  'dac4d0ab432a9c158dca40985b28335bdfc70e2b' \
   'Web/bundle-manifest.json' \
   'Web/bundle-metafile.json' \
   'no VRM or VRMA character or motion assets'
@@ -147,7 +147,7 @@ do
   grep -Fq "$required" "$legal/PROVENANCE.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.2' \
+  'Miller Avatar v0.1.0-alpha.3' \
   'MillerAvatarApp` is a diagnostic product' \
   '## Three.js 0.180.0 — MIT License' \
   '## @pixiv/three-vrm core family 3.5.5 — MIT License' \
@@ -252,7 +252,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.2",
+    "Miller Avatar@0.1.0-alpha.3",
     `Miller@${releaseVersion}`,
     `MillerCapabilityBridge@${releaseVersion}`,
     `MillerCapabilities@${releaseVersion}`,
@@ -301,7 +301,7 @@ assert.match(mcpLicense, /Apache License/i);
 assert.match(mcpLicense, /MIT License/i);
 const avatar = sbom.packages.find((entry) => entry.name === "Miller Avatar");
 assert.ok(avatar);
-assert.equal(avatar.versionInfo, "0.1.0-alpha.2");
+assert.equal(avatar.versionInfo, "0.1.0-alpha.3");
 assert.equal(avatar.licenseConcluded, "Apache-2.0");
 assert.equal(avatar.licenseDeclared, "Apache-2.0");
 assert.equal(avatar.downloadLocation, "https://github.com/tim-osterhus/miller-avatar.git");
@@ -388,7 +388,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.2",
+    "Miller Avatar@0.1.0-alpha.3",
     `MillerCapabilityBridge@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime wake runtime@1.24.4",

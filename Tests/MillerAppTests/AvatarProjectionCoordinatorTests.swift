@@ -430,9 +430,11 @@ struct AvatarProjectionCoordinatorTests {
         model.draft = "typed input"
 
         await model.submit()
-        for _ in 0..<32 {
-            if projections.last?.phase == .failed { break }
-            await Task.yield()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while projections.last?.phase != .failed,
+              ContinuousClock.now < deadline
+        {
+            try? await Task.sleep(for: .milliseconds(5))
         }
 
         #expect(projections.map(\.phase).contains(.failed))

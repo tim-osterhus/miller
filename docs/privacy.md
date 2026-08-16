@@ -75,6 +75,28 @@ Headless qualification uses synthetic fixtures and reports only pass/fail
 status and bounded measurements. It does not use a real provider, microphone,
 audio device, browser, clipboard, or owner account.
 
+## Optional Avatar presentation
+
+Avatar is off by default. When enabled, Miller stores owner-only profile
+metadata under
+`~/Library/Application Support/ai.millrace.miller/avatar/profiles-v2.json`.
+The profile contains security-scoped bookmarks, SHA-256 digests, bounded
+labels, bindings, and failure counters. Miller Avatar does not copy a selected
+VRM or VRMA file into Application Support, the app bundle, a cache, or either
+source repository. The original file remains user-owned.
+
+Admitted model and motion bytes are served only to the local, ephemeral WebKit
+renderer through a session-bound custom scheme. Its content-security policy is
+network closed. No prompt, transcript, provider payload, tool result, account
+secret, microphone sample, or remote audio enters Miller Avatar. Miller sends
+only closed semantic phases, caller-owned identity values, presentation policy,
+and a bounded scalar derived from audible remote output. The scalar is not an
+audio recording.
+
+The user is responsible for the rights to supplied model and motion files.
+Removing a profile or motion removes Miller's bookmark and metadata but leaves
+the original file untouched. See `removal.md` for complete local removal.
+
 ## Wake Listening
 
 Wake Listening is off until the owner enables it. It reads the system-default

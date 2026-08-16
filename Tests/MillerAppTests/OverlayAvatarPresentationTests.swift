@@ -3,6 +3,7 @@ import Foundation
 import MillerAvatarCore
 import MillerAvatarHost
 import MillerCore
+import MillerLiveAudio
 import Testing
 @testable import MillerApp
 
@@ -136,6 +137,148 @@ struct OverlayAvatarPresentationTests {
         coordinator.projectTypedState(.responding, for: turnID)
         #expect(retry.projectionCalls.count == 2)
         #expect(retry.projectionCalls.last?.phase == .responding)
+    }
+
+    @Test
+    func liveMouthCueReachesCurrentSurfaceAfterPhaseProjection() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let surface = try #require(factory.records.first)
+
+        let coordinator = AvatarProjectionCoordinator {
+            integration.project($0)
+        }
+        let sessionID = UUID()
+        let generationID = coordinator.beginLiveSession(sessionID)
+        coordinator.projectLiveState(.responding, for: sessionID)
+        coordinator.projectLiveOutput(
+            .playbackStarted(offsetMilliseconds: 100),
+            for: sessionID
+        )
+        let playbackID = try #require(coordinator.currentPlaybackID)
+        #expect(surface.mouthCalls.isEmpty)
+        surface.resetPresentationRecords()
+
+        coordinator.projectLiveOutput(
+            .mouthCue(offsetMilliseconds: 132, envelope: 0.73),
+            for: sessionID
+        )
+
+        let projection = try #require(coordinator.lastProjection)
+        let cue = try #require(projection.mouthCue)
+        #expect(projection.phase == .speaking)
+        #expect(surface.mouthCalls.count == 1)
+        guard let payload = surface.mouthCalls.first else { return }
+        #expect(payload.generationID == generationID)
+        #expect(payload.generationID == cue.generationID)
+        #expect(payload.playbackID == playbackID)
+        #expect(payload.playbackID == cue.playbackID)
+        #expect(payload.cueIndex == cue.cueIndex)
+        #expect(
+            payload.playbackOffsetMilliseconds
+                == cue.playbackOffsetMilliseconds
+        )
+        #expect(payload.scalar == cue.envelope)
+        #expect(
+            surface.callOrder
+                == [.project, .mouth, .visibility, .reducedMotion]
+        )
+    }
+
+    @Test
+    func synchronousMouthFailureFencesStalePresentationUntilFreshProjection()
+        async throws
+    {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let first = try #require(factory.records.first)
+        first.resetPresentationRecords()
+        first.synchronousMouthFailure = true
+
+        let generationID = UUID()
+        let playbackID = UUID()
+        let staleCue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 1,
+            playbackOffsetMilliseconds: 132,
+            envelope: 0.73
+        )
+        let staleProjection = try AvatarProjection(
+            projectionSequence: 1,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: staleCue
+        )
+
+        integration.project(staleProjection)
+
+        #expect(first.projectionCalls.count == 1)
+        #expect(first.mouthCalls.count == 1)
+        #expect(first.visibilityCalls.isEmpty)
+        #expect(first.reducedMotionCalls.isEmpty)
+        #expect(first.callOrder == [.project, .mouth])
+        #expect(!first.callsAfterDetach)
+        #expect(first.disposeReasons == [.failure])
+        #expect(!integration.isSurfaceAttached)
+
+        integration.retry()
+        try await eventually { factory.records.count == 2 }
+        let replacement = try #require(factory.records.last)
+        replacement.resetPresentationRecords()
+        #expect(replacement.projectionCalls.isEmpty)
+        #expect(replacement.mouthCalls.isEmpty)
+
+        let freshCue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 2,
+            playbackOffsetMilliseconds: 155,
+            envelope: 0.61
+        )
+        let freshProjection = try AvatarProjection(
+            projectionSequence: 2,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: freshCue
+        )
+        integration.project(freshProjection)
+
+        #expect(replacement.projectionCalls.count == 1)
+        #expect(replacement.mouthCalls.count == 1)
+        #expect(replacement.mouthCalls.first?.cueIndex == freshCue.cueIndex)
+        #expect(
+            replacement.callOrder
+                == [.project, .mouth, .visibility, .reducedMotion]
+        )
     }
 
     @Test
@@ -701,6 +844,13 @@ private final class SurfaceFactory {
     }
 }
 
+private enum RecordingSurfaceCall: Equatable {
+    case project
+    case mouth
+    case visibility
+    case reducedMotion
+}
+
 @MainActor
 private final class RecordingSurface: MillerAvatarSurfaceControlling {
     let view: NSView = NoninteractiveAvatarTestView(
@@ -711,10 +861,13 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     var loadCount = 0
     var disposeReasons: [DisposalReason] = []
     var projectionCalls: [ProjectPhasePayload] = []
+    var mouthCalls: [SetMouthPayload] = []
     var visibilityCalls: [EffectiveVisibility] = []
     var reducedMotionCalls: [Bool] = []
+    var callOrder: [RecordingSurfaceCall] = []
     var loadDisposition: ProfileLoadDisposition = .accepted
     var synchronousProjectionFailure = false
+    var synchronousMouthFailure = false
     var callsAfterDetach = false
     private var disposed = false
 
@@ -731,7 +884,17 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     func project(_ payload: ProjectPhasePayload) {
         if disposed { callsAfterDetach = true }
         projectionCalls.append(payload)
+        callOrder.append(.project)
         if synchronousProjectionFailure {
+            onState?(.failed(.renderFailed, retryAvailable: true))
+        }
+    }
+
+    func setMouth(_ payload: SetMouthPayload) {
+        if disposed { callsAfterDetach = true }
+        mouthCalls.append(payload)
+        callOrder.append(.mouth)
+        if synchronousMouthFailure {
             onState?(.failed(.renderFailed, retryAvailable: true))
         }
     }
@@ -739,11 +902,13 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     func setVisibility(_ visibility: EffectiveVisibility) {
         if disposed { callsAfterDetach = true }
         visibilityCalls.append(visibility)
+        callOrder.append(.visibility)
     }
 
     func setReducedMotion(_ enabled: Bool) {
         if disposed { callsAfterDetach = true }
         reducedMotionCalls.append(enabled)
+        callOrder.append(.reducedMotion)
     }
 
     func dispose(reason: DisposalReason) {
@@ -753,6 +918,14 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
 
     func emit(_ state: MillerAvatarSurfaceState) {
         onState?(state)
+    }
+
+    func resetPresentationRecords() {
+        projectionCalls.removeAll()
+        mouthCalls.removeAll()
+        visibilityCalls.removeAll()
+        reducedMotionCalls.removeAll()
+        callOrder.removeAll()
     }
 }
 

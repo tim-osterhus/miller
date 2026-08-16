@@ -44,4 +44,7 @@ The owner protocol records the later approval and both accepted deferrals.
 The candidate is approved for source-only publication. Do not attach the
 ad-hoc application bundle.
 
-Miller Avatar is released separately and is not part of this checklist.
+The published v0.1.2 source release predates Miller Avatar integration. Current
+post-v0.1.2 source pins the optional prerelease package, but its integrated
+release is governed by the separate Miller Avatar C7/C8 qualification and is
+not retroactively part of the v0.1.2 checklist.

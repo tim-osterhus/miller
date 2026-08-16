@@ -47,6 +47,7 @@ protocol MillerAvatarSurfaceControlling: AnyObject {
         from store: AvatarProfileStore?
     ) async -> ProfileLoadDisposition
     func project(_ payload: ProjectPhasePayload)
+    func setMouth(_ payload: SetMouthPayload)
     func setVisibility(_ visibility: EffectiveVisibility)
     func setReducedMotion(_ enabled: Bool)
     func dispose(reason: DisposalReason)
@@ -90,6 +91,10 @@ private final class PackageAvatarSurface: MillerAvatarSurfaceControlling {
 
     func project(_ payload: ProjectPhasePayload) {
         surface.project(payload)
+    }
+
+    func setMouth(_ payload: SetMouthPayload) {
+        surface.setMouth(payload)
     }
 
     func dispose(reason: DisposalReason) {
@@ -567,6 +572,16 @@ final class AvatarIntegrationController {
             phase: phase,
             playbackID: projection.playbackID
         ))
+        guard isCurrent(surface, owner: owner) else { return }
+        if let mouthCue = projection.mouthCue {
+            surface.setMouth(SetMouthPayload(
+                generationID: mouthCue.generationID,
+                playbackID: mouthCue.playbackID,
+                cueIndex: mouthCue.cueIndex,
+                playbackOffsetMilliseconds: mouthCue.playbackOffsetMilliseconds,
+                scalar: mouthCue.envelope
+            ))
+        }
         guard isCurrent(surface, owner: owner) else { return }
         surface.setVisibility(visibility)
         guard isCurrent(surface, owner: owner) else { return }

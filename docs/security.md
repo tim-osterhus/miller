@@ -85,7 +85,32 @@ bounded lifetime.
 
 Signing, notarization, clean-machine distribution, upgrade identity, live
 microphone/audio observation, and public-release security qualification remain
-open release gates. Miller v0.1 has no avatar runtime or asset dependency.
+open release gates.
+
+## Optional Avatar runtime boundary
+
+Miller links the reviewed `MillerAvatarCore` and `MillerAvatarHost` package
+products in process. It does not start an Avatar daemon, sidecar, XPC service,
+or second audio renderer. Avatar is off by default, and a package link alone
+does not construct WebKit, read an asset, or request a permission.
+
+Model and motion selection is owner-mediated. Native admission captures a
+regular user-selected file into bounded immutable memory. It rejects malformed,
+external-resource, symlink, non-VRM 1.0, non-VRMA 1.0, and over-budget content.
+WebKit receives only a session-bound local URL. Three consecutive failures
+quarantine only the affected model or motion. A motion failure cannot
+quarantine a valid model or disable Miller.
+
+The renderer uses an ephemeral WebKit data store, a fixed five-file local
+resource bundle, a network-closed content-security policy, fail-closed
+navigation, a typed command receiver, and generation-fenced callbacks. Miller's
+current source-first package adds no App Sandbox network-client entitlement.
+VRMA controls skeletal tracks only. Miller retains semantic phase, expression,
+gaze, playback, and mouth-cue authority.
+
+Renderer, bridge, asset, and animation failures are Avatar-only failures.
+Typed reasoning, Live admission, history, settings, capability approvals, and
+tool execution remain independently available.
 
 ## Experimental direct GPT-Live comparator security boundary
 

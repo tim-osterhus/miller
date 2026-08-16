@@ -63,6 +63,30 @@ Check the selected profile, model identifier, endpoint, network, and provider
 readiness. Retry only after the visible state becomes terminal. Stopping a turn
 preserves visible partial text without adding it to future completed context.
 
+## Avatar is unavailable or static
+
+Open Settings -> Avatar and check enablement, the selected profile, and the
+bounded status code. `avatar_profile_missing` means no selected profile is
+available. `avatar_asset_rejected` and `avatar_resource_limit` mean native
+admission refused the selected model. `avatar_asset_quarantined` means three
+consecutive model failures require explicit retry or reselection.
+
+`avatar_motion_rejected` and `avatar_motion_unavailable` affect only the
+corresponding motion bindings; the valid model should remain available with
+another role or rest-pose fallback. Restore or reselect the source file, then
+use Retry. Miller does not keep a copied fallback asset.
+
+`avatar_renderer_unavailable`, `avatar_renderer_failed`, and
+`avatar_bridge_invalid` describe the contained local renderer. Use the single
+explicit Retry action after the visible state becomes terminal. If Reduced
+Motion is enabled in Miller or macOS, a static normalized pose is expected.
+Disabling Avatar should detach the surface and leave ordinary Miller usable.
+
+Avatar failure must not disable typed reasoning, Live Voice, history,
+settings, approvals, or tools. If it does, stop using the candidate and report
+that as an integration-isolation defect instead of repeatedly retrying the
+asset.
+
 ## Storage or helper startup fails
 
 Quit and reopen Miller. If the issue persists, use **Reset Miller** only after

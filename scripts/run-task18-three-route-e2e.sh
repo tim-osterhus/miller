@@ -12,7 +12,7 @@ release_app="${MILLER_TASK18_RELEASE_APP:-$repo_root/.artifacts/release/Miller.a
 node_path="$release_app/Contents/Resources/Gateway/runtime/node"
 bridge_path="$release_app/Contents/Helpers/MillerCapabilityBridge"
 node_hash="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
-expected_lock_hash="96ca54c31fa6849a2ead85cc803289bcc03394263d57a99b9c35a99818d71bfb"
+expected_lock_hash="10c7313d32729acd59f2d88f8185be22b29df56ee95b321a8b8a6d2ab53736ba"
 
 [[ -x "$node_path" && ! -L "$node_path" ]] || {
   print -u2 "task18_packaged_node_missing"

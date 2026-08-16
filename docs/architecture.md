@@ -262,9 +262,10 @@ termination.
 ## Remaining Gate 4B exclusions
 
 The deterministic GPT-Live harness does not establish owner-visible voice
-behavior. Local speech and public distribution remain outside this packet.
-Miller Avatar ships separately after v0.1 and is not a Miller package
-dependency. Raw audio is not retained.
+behavior. Local speech and public distribution remain outside that historical
+packet. The current post-v0.1.2 source pins Miller Avatar as an optional
+package dependency; Avatar remains off by default and raw audio is not
+retained.
 
 Later work retains:
 
@@ -285,7 +286,8 @@ Later work retains:
 - The release installer, post-v0.1 updater, and public distribution.
 
 The final local-neural voice and numerical qualification profiles remain
-unresolved. Miller Avatar, post-MVP providers, tools, channels, and Millrace
+unresolved. Miller Avatar's integrated release remains gated by its separate
+C7/C8 qualification, while post-MVP providers, tools, channels, and Millrace
 integrations remain outside Miller v0.1.
 
 ## Capability broker and trust

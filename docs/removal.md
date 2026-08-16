@@ -40,6 +40,18 @@ app bundle and disappear when the app is removed; bootstrap archives and
 extraction roots are temporary and are deleted by their scripts. This applies
 to the default **Hey Miller** phrase and any bounded custom phrase.
 
+Avatar reset disables presentation, disposes the renderer, removes Avatar
+preferences, and removes Miller-owned profile, bookmark, binding, digest,
+quarantine, and failure metadata under:
+
+```text
+~/Library/Application Support/ai.millrace.miller/avatar/
+```
+
+It does not delete, move, or modify the original user-selected VRM or VRMA
+files. Remove those separately only if desired. Miller distributes no default
+model or animation pack, so app removal has no character asset to preserve.
+
 An externally installed Codex CLI is owned by the user or its package manager.
 Miller reset, repository cleanup, and app removal never remove or modify that
 installation.
