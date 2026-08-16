@@ -168,6 +168,27 @@ struct ReleasePackagingPolicyTests {
             "activateRenderer",
         ]
         for sourceFile in sourceFiles {
+            if sourceFile.lastPathComponent == "AvatarIntegrationController.swift" {
+                let source = try String(contentsOf: sourceFile, encoding: .utf8)
+                #expect(
+                    source.components(separatedBy: "AvatarSurfaceController").count == 2,
+                    "C4 permits exactly one package surface construction site"
+                )
+                #expect(source.contains("private let surface = AvatarSurfaceController()"))
+                #expect(source.contains("surfaceFactory: @escaping SurfaceFactory = { PackageAvatarSurface() }"))
+                let visibleGuard = try #require(
+                    source.range(of: "guard !terminated, desiredVisibility == .visible else { return }")
+                )
+                let construction = try #require(source.range(of: "let fresh = surfaceFactory()"))
+                #expect(visibleGuard.lowerBound < construction.lowerBound)
+                for term in forbiddenActivationTerms.dropFirst() {
+                    #expect(
+                        source.contains(term) == false,
+                        "Avatar integration activates forbidden term \(term)"
+                    )
+                }
+                continue
+            }
             let source = try String(contentsOf: sourceFile, encoding: .utf8)
             for term in forbiddenActivationTerms {
                 #expect(

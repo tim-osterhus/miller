@@ -158,6 +158,8 @@ final class AvatarSettingsModel: ObservableObject {
     @Published private(set) var reduceMotion = false
     @Published private(set) var profiles: [AvatarProfileSummary] = []
     @Published private(set) var status = ""
+    @Published private(set) var runtimeStatus = "Avatar disabled"
+    @Published private(set) var runtimeRetryAvailable = false
     @Published private(set) var isBusy = false
     @Published private(set) var isResetting = false
     @Published private(set) var resetEpoch = 0
@@ -172,6 +174,8 @@ final class AvatarSettingsModel: ObservableObject {
     private var latestPreferenceOperation: [AvatarPreferenceField: UInt64] = [:]
     private var pendingSystemReduceMotion: Bool?
     var onCommittedProfileChange: ((AvatarCommittedProfileChange) -> Void)?
+    var onStateChange: (() -> Void)?
+    var onRuntimeRetry: (() -> Void)?
 
     init(
         dependencies: AvatarSettingsDependencies = .unavailable,
@@ -219,6 +223,26 @@ final class AvatarSettingsModel: ObservableObject {
             return
         }
         systemReduceMotion = value
+        onStateChange?()
+    }
+
+    func setRuntimeReadiness(_ readiness: AvatarReadiness, canRetry: Bool) {
+        runtimeRetryAvailable = canRetry
+        switch readiness {
+        case .disabled:
+            runtimeStatus = "Avatar disabled"
+        case .starting:
+            runtimeStatus = "Avatar starting"
+        case .ready:
+            runtimeStatus = "Avatar ready"
+        case .unavailable(let code), .failed(let code):
+            runtimeStatus = "Avatar unavailable (\(code.rawValue))"
+        }
+    }
+
+    func retryRuntime() {
+        guard runtimeRetryAvailable else { return }
+        onRuntimeRetry?()
     }
 
     func load() async {
@@ -302,11 +326,16 @@ final class AvatarSettingsModel: ObservableObject {
 
     @discardableResult
     func importModel(at url: URL, displayName: String) async -> AvatarCommittedProfileChange? {
-        await performMutation("Avatar model could not be imported") {
-            try await self.dependencies.importModel(url, displayName)
-        } afterSuccess: { change in
-            _ = await self.persistSelectedProfile(change.profileID)
-        }
+        await performMutation(
+            "Avatar model could not be imported",
+            operation: {
+                try await self.dependencies.importModel(url, displayName)
+            },
+            afterSuccess: { change in
+                _ = await self.persistSelectedProfile(change.profileID)
+            },
+            notifyBeforeAfterSuccess: true
+        )
     }
 
     @discardableResult
@@ -398,6 +427,7 @@ final class AvatarSettingsModel: ObservableObject {
         if let pendingSystemReduceMotion {
             self.systemReduceMotion = pendingSystemReduceMotion
             self.pendingSystemReduceMotion = nil
+            onStateChange?()
         }
         operationGeneration &+= 1
         resetEpoch &+= 1
@@ -436,6 +466,7 @@ final class AvatarSettingsModel: ObservableObject {
             reduceMotion = false
             preferenceGeneration &+= 1
             status = ""
+            onStateChange?()
             return .init(root: "preferences.avatar.reset", succeeded: true)
         } catch {
             await reloadPreferencesAuthoritatively()
@@ -470,6 +501,7 @@ final class AvatarSettingsModel: ObservableObject {
             else { return false }
             apply()
             status = ""
+            onStateChange?()
             return true
         } catch {
             guard isCurrentOperation(token) else { return false }
@@ -481,7 +513,8 @@ final class AvatarSettingsModel: ObservableObject {
     private func performMutation(
         _ failure: String,
         operation: () async throws -> AvatarCommittedProfileChange?,
-        afterSuccess: ((AvatarCommittedProfileChange) async -> Void)? = nil
+        afterSuccess: ((AvatarCommittedProfileChange) async -> Void)? = nil,
+        notifyBeforeAfterSuccess: Bool = false
     ) async -> AvatarCommittedProfileChange? {
         guard !isBusy, let token = beginOperation() else { return nil }
         isBusy = true
@@ -499,9 +532,14 @@ final class AvatarSettingsModel: ObservableObject {
             {
                 self.profiles = profiles
             }
+            if notifyBeforeAfterSuccess {
+                onCommittedProfileChange?(change)
+            }
             await afterSuccess?(change)
             guard isCurrentOperation(token) else { return nil }
-            onCommittedProfileChange?(change)
+            if !notifyBeforeAfterSuccess {
+                onCommittedProfileChange?(change)
+            }
             return change
         } catch {
             guard isCurrentOperation(token) else { return nil }
@@ -514,6 +552,7 @@ final class AvatarSettingsModel: ObservableObject {
         isEnabled = preferences.enabled
         selectedProfileID = preferences.selectedProfileID
         reduceMotion = preferences.reduceMotion
+        onStateChange?()
     }
 
     private func reloadPreferencesAuthoritatively() async {

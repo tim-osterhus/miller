@@ -19,6 +19,14 @@ struct AvatarSettingsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SettingsLayout.contentSpacing) {
                 enablementSection
+                HStack {
+                    Text(model.runtimeStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.runtimeRetryAvailable {
+                        Button("Retry Renderer") { model.retryRuntime() }
+                    }
+                }
                 profileSection
                 if let profile = model.selectedProfile {
                     motionLibrarySection(profile)

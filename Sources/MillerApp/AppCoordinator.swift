@@ -6,6 +6,7 @@ import MillerCore
 import MillerGateway
 import MillerLive
 import MillerLiveAudio
+import MillerAvatarHost
 import MillerStorage
 import MillerWake
 import SwiftUI
@@ -2631,6 +2632,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
     private let capabilityController: CapabilityController
     private let preferenceRepository: SQLitePreferenceRepository
     private let avatarSettings: AvatarSettingsModel
+    private let avatarIntegration: AvatarIntegrationController
     private let systemReducedMotionSource: SystemReducedMotionSource
     private let wakeProduction: WakeWordProductionController
     private let wakeSettings: WakeWordSettingsController
@@ -3051,16 +3053,42 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         )
         self.preferenceRepository = preferenceRepository
         let systemReducedMotionSource = SystemReducedMotionSource()
+        let avatarProfileStore = AvatarProfileStore(root: avatarRoot)
+        let avatarProfileAdapter = MillerAvatarProfileAdapter(
+            store: avatarProfileStore
+        )
+        let avatarIntegration = AvatarIntegrationController(
+            adapter: avatarProfileAdapter,
+            profileStore: avatarProfileStore
+        )
         let avatarSettings = AvatarSettingsModel(
-            adapter: MillerAvatarProfileAdapter(root: avatarRoot),
+            adapter: avatarProfileAdapter,
             preferences: preferenceRepository,
             systemReduceMotion: systemReducedMotionSource.value
         )
+        avatarSettings.onStateChange = { [weak avatarSettings, weak avatarIntegration] in
+            guard let avatarSettings else { return }
+            avatarIntegration?.update(
+                enabled: avatarSettings.isEnabled,
+                selectedProfileID: avatarSettings.selectedProfileID,
+                reduceMotion: avatarSettings.effectiveReducedMotion
+            )
+        }
+        avatarSettings.onCommittedProfileChange = { [weak avatarIntegration] change in
+            avatarIntegration?.profileDidCommit(change)
+        }
+        avatarSettings.onRuntimeRetry = { [weak avatarIntegration] in
+            avatarIntegration?.retry()
+        }
+        avatarIntegration.onReadinessChange = { [weak avatarSettings] readiness, canRetry in
+            avatarSettings?.setRuntimeReadiness(readiness, canRetry: canRetry)
+        }
         systemReducedMotionSource.onChange = { [weak avatarSettings] value in
             avatarSettings?.setSystemReduceMotion(value)
         }
         self.systemReducedMotionSource = systemReducedMotionSource
         self.avatarSettings = avatarSettings
+        self.avatarIntegration = avatarIntegration
         let microphoneOwnership = MicrophoneOwnership()
         let wakeIntegration = WakeWordLiveIntegration()
         let wakeModelPaths = try? WakeWordRuntimeResources.resolve(
@@ -3675,7 +3703,8 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         overlayController = OverlayPanelController(
             model: model,
-            peerHost: livePeerHost
+            peerHost: livePeerHost,
+            avatarIntegration: avatarIntegration
         )
         conversationController = ConversationWindowController(model: model)
         settingsController = NSWindowController(
@@ -3751,6 +3780,7 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             try? await repository.recoverInterruptedTurns()
             await model.recoverInterruptedVoiceSessions()
             try? await providerController.restoreSelectedProfile()
+            await avatarSettings.load()
             await model.refresh()
             await model.refreshProviderSettings()
             await model.refreshLiveVoiceAvailability()
@@ -3783,6 +3813,10 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         }
         wakeLifecycleObservers.removeAll()
         systemReducedMotionSource.stop()
+        avatarSettings.onStateChange = nil
+        avatarSettings.onCommittedProfileChange = nil
+        avatarSettings.onRuntimeRetry = nil
+        avatarIntegration.disposeForTermination()
         _ = await wakeProduction.shutdown()
         await model.shutdownLiveVoice()
         await liveController?.shutdown()

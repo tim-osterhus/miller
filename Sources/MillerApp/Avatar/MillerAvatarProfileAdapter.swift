@@ -52,6 +52,7 @@ extension AvatarProfileStore: MillerAvatarProfileStoreAPI {}
 
 final class MillerAvatarProfileAdapter: Sendable {
     private let store: any MillerAvatarProfileStoreAPI
+    let renderingStore: AvatarProfileStore?
 
     init(root: URL) {
         try? FileManager.default.createDirectory(
@@ -59,11 +60,14 @@ final class MillerAvatarProfileAdapter: Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        store = AvatarProfileStore(root: root)
+        let store = AvatarProfileStore(root: root)
+        self.store = store
+        renderingStore = store
     }
 
     init(store: any MillerAvatarProfileStoreAPI) {
         self.store = store
+        renderingStore = store as? AvatarProfileStore
     }
 
     func list() async throws -> [AvatarProfileSummary] {
