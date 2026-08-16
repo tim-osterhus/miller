@@ -466,7 +466,7 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
-    func qualificationDocumentsAreSanitizedAndKeepHumanGateUnrun() throws {
+    func qualificationDocumentsKeepHeadlessResultAndRecordOwnerApproval() throws {
         let reportURL = repositoryRoot.appendingPathComponent(
             "docs/qualification/v0.1.2-headless-report.md"
         )
@@ -482,7 +482,9 @@ struct ReleasePackagingPolicyTests {
             #expect(report.contains("MILLER_V0_1_2_RELEASE_APPROVED") == false)
         }
         #expect(protocolDocument.contains("HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN"))
-        #expect(protocolDocument.contains("LIVE_NOT_RUN"))
+        #expect(protocolDocument.contains("MILLER_V0_1_2_RELEASE_APPROVED"))
+        #expect(protocolDocument.contains("RELEASE_APPROVED_WITH_ACCEPTED_DEFERRALS"))
+        #expect(protocolDocument.contains("DEFERRED_BY_OWNER"))
         #expect(protocolDocument.contains("External Codex readiness/timeout plus one typed turn"))
         #expect(protocolDocument.contains("Overlay/full-window selection and Command-C"))
         #expect(protocolDocument.contains("GPT-Live speech/transcript/interrupt/end/second session/cleanup"))

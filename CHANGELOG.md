@@ -15,10 +15,13 @@
 - Updated the source package, inventory, SPDX SBOM, notices, provenance, and
   qualification schemas to v0.1.2.
 
-Headless closure result: `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN`. The later
-owner M1 result is `PARTIAL`. Principal typed, transcript, Live, and wake flows
-passed. The combined fallback test and destructive reset/removal check remain.
-Signing, notarization, tagging, and publication were not run.
+Headless closure result: `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN`. Principal
+typed, transcript, Live, and wake flows later passed owner qualification. The
+owner accepted deterministic coverage for the forced combined-fallback scenario
+and deferred destructive reset/removal testing to a signed, clean-account build.
+
+This is a source-only release. Signing, notarization, and binary distribution
+remain deferred; no ad-hoc application bundle is published.
 
 ## 0.1.1
 

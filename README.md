@@ -8,8 +8,8 @@ of local data or tool permissions. It keeps conversation state on your Mac and
 shows tool activity while it runs.
 
 **Current source version:** v0.1.2 for Apple Silicon Macs running macOS 15 or
-newer. This release-closure candidate is headless-ready and has passed its main
-owner-visible flows. Two M1 checks remain before publication.
+newer. The source release passed its principal owner-visible flows. The owner
+accepted two bounded deferrals documented in the qualification record.
 
 ## Build and open Miller
 
@@ -187,9 +187,9 @@ Remove generated build and dependency roots after qualification:
 ```
 
 The v0.1.2 qualification artifacts retain no credentials, audio, transcript
-content, or provider payloads. The owner M1 result is `PARTIAL`. The principal
-typed, transcript, Live, and wake flows pass. The combined fallback test and
-destructive reset/removal check remain.
+content, or provider payloads. The owner approved the source release with two
+deferrals: the forced combined-fallback scenario and destructive reset/removal
+testing on a real account.
 
 - `docs/qualification/v0.1.2-headless-report.md`
 - `docs/qualification/v0.1.2-human-protocol.md`

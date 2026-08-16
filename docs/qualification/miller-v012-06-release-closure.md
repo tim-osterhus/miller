@@ -4,6 +4,8 @@ Target: Miller v0.1.2
 
 Terminal result: `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN`
 
+Later release disposition: `RELEASE_APPROVED_WITH_ACCEPTED_DEFERRALS`
+
 Packet 6 aligns the v0.1.2 source, package, inventory, SPDX SBOM, notices,
 provenance, and qualification schemas. It does not reopen Packets 1–5 or claim
 the owner-visible M1 gate.
@@ -17,7 +19,7 @@ the owner-visible M1 gate.
 | 3 — Live-text compatibility spike | `INCONCLUSIVE` |
 | 4 — in-process host seam | committed deterministic result |
 | 5 — custom wake phrase | headless-approved; owner wake result `PASS` |
-| 6 — release closure | headless-ready; owner M1 result `PARTIAL` |
+| 6 — release closure | source release approved with two accepted deferrals |
 
 ## Required evidence
 
@@ -38,6 +40,6 @@ wake downloads/extraction/staging roots, temporary App Server/helper/test roots,
 sockets, generated dependency roots, and measurement roots must be absent after
 cleanup.
 
-Publication still requires disposition of the remaining M1 rows and a separate
-explicit owner instruction. This closure does not tag, sign, notarize, publish,
-or claim publication readiness.
+The owner deferred the forced combined-fallback scenario and destructive
+reset/removal testing. The owner separately authorized source-only publication.
+Signing, notarization, and binary publication remain deferred.

@@ -13,21 +13,23 @@
       support.
 - [x] Packet 5 wake integration is headless-approved and owner-qualified.
 
-## Owner-visible M1 gate — PARTIAL
+## Owner-visible M1 gate — APPROVED WITH DEFERRALS
 
 - [x] External Codex readiness/timeout plus one typed turn.
 - [x] Overlay/full-window selection and Command-C.
 - [x] GPT-Live speech/transcript/interrupt/end/second session/cleanup.
 - [x] Default/custom wake phrase, automatic Live start, and post-Live rearm.
-- [ ] Typed fallback with wake disabled and Live unavailable.
-- [ ] Reset/removal/relaunch with no lingering helper or microphone owner.
+- [x] Typed fallback with wake disabled and Live unavailable: owner accepted
+      deterministic coverage and deferred the forced human scenario.
+- [x] Reset/removal/relaunch: owner deferred destructive testing to a future
+      signed, clean-account build.
 
 Evidence: `docs/qualification/v0.1.2-headless-report.md` and
 `docs/qualification/v0.1.2-human-protocol.md`. These artifacts explicitly
 preserve `HEADLESS_RELEASE_READY_HUMAN_GATE_NOT_RUN` as the headless result.
-The owner protocol records the later partial human result.
+The owner protocol records the later approval and both accepted deferrals.
 
-## Deferred signing and publication
+## Source publication and deferred binary distribution
 
 - [ ] Build from a clean checkout on a Mac with the full Xcode toolchain.
 - [ ] Apply Developer ID signing without exposing credentials to the repo.
@@ -36,9 +38,10 @@ The owner protocol records the later partial human result.
 - [ ] Complete a small beta and correct release blockers.
 - [x] Freeze version, changelog, checksums, SBOM, and notices for the closure
       candidate.
-- [ ] Publish source and the signed/notarized application.
+- [x] Owner authorized the source-only v0.1.2 tag and GitHub release.
+- [ ] Publish a signed/notarized application in a later release.
 
-The closure candidate is not publication-ready until the owner-visible M1 gate
-passes and publication is separately authorized.
+The candidate is approved for source-only publication. Do not attach the
+ad-hoc application bundle.
 
 Miller Avatar is released separately and is not part of this checklist.

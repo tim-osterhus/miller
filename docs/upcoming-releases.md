@@ -1,12 +1,11 @@
 # Upcoming Miller releases
 
-This document records the public feature order after the v0.1.2 source-release
-closure. The owner-visible M1 gate is `PARTIAL`. Publication still requires
-decisions on two remaining checks and separate owner approval.
+This document records the public feature order after v0.1.2. The owner approved
+the source release with two bounded deferrals recorded in the M1 protocol.
 
-## v0.1.2: daily-use repairs and stable seams — closure candidate
+## v0.1.2: daily-use repairs and stable seams
 
-The closure candidate makes the current application easier to use while
+The release makes the current application easier to use while
 preserving the desktop-only authority boundary. Deterministic checks and the
 principal typed, transcript, Live, and wake flows have passed.
 
