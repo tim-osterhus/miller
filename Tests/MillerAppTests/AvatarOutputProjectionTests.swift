@@ -133,15 +133,16 @@ struct AvatarOutputProjectionTests {
         )
 
         #expect(projections.map(\.phase) == [
-            .idle, .responding, .speaking, .speaking, .speaking, .responding,
+            .idle, .responding, .speaking, .speaking, .speaking, .speaking,
         ])
         let speaking = projections.filter { $0.phase == .speaking }
         #expect(speaking.allSatisfy {
             $0.generationID == generationID && $0.playbackID != nil
         })
         let cues = speaking.compactMap(\.mouthCue)
-        #expect(cues.map(\.cueIndex) == [1, 2])
-        #expect(cues.map(\.playbackOffsetMilliseconds) == [132, 132])
+        #expect(cues.map(\.cueIndex) == [1, 2, 3])
+        #expect(cues.map(\.playbackOffsetMilliseconds) == [132, 132, 132])
+        #expect(cues.map(\.envelope) == [0.8, 0.4, 0])
         #expect(Set(speaking.compactMap(\.playbackID)).count == 1)
     }
 
@@ -161,9 +162,51 @@ struct AvatarOutputProjectionTests {
     }
 
     @Test
-    func measuredOutputReturnsToRespondingAfterSilence() {
+    func sentenceSilenceKeepsOneSpeakingLeaseUntilAnAuthoritativePhaseChange() throws {
         var projections = [AvatarProjection]()
         let coordinator = AvatarProjectionCoordinator {
+            projections.append($0)
+        }
+        let sessionID = UUID()
+
+        coordinator.beginLiveSession(sessionID)
+        coordinator.projectLiveOutput(
+            .playbackStarted(offsetMilliseconds: 10), for: sessionID
+        )
+        let playbackID = try #require(coordinator.currentPlaybackID)
+        coordinator.projectLiveOutput(
+            .mouthCue(offsetMilliseconds: 15, envelope: 0.7), for: sessionID
+        )
+        coordinator.projectLiveOutput(
+            .playbackStopped(offsetMilliseconds: 20), for: sessionID
+        )
+        coordinator.projectLiveOutput(
+            .playbackStarted(offsetMilliseconds: 30), for: sessionID
+        )
+        coordinator.projectLiveOutput(
+            .mouthCue(offsetMilliseconds: 35, envelope: 0.5), for: sessionID
+        )
+
+        #expect(coordinator.currentPlaybackID == playbackID)
+        #expect(projections.suffix(4).allSatisfy { $0.phase == .speaking })
+        #expect(projections.compactMap(\.playbackID).allSatisfy { $0 == playbackID })
+        #expect(projections.compactMap(\.mouthCue).map(\.cueIndex) == [1, 2, 3])
+        #expect(projections.compactMap(\.mouthCue).map(\.envelope) == [0.7, 0, 0.5])
+
+        coordinator.projectLiveState(.listening, for: sessionID)
+
+        #expect(coordinator.currentPlaybackID == nil)
+        #expect(projections.last?.phase == .listening)
+        #expect(projections.last?.playbackID == nil)
+        #expect(projections.last?.mouthCue == nil)
+    }
+
+    @Test
+    func finalResponseSilenceExpiresTheSpeakingLease() async {
+        var projections = [AvatarProjection]()
+        let coordinator = AvatarProjectionCoordinator(
+            speakingSilenceGrace: .zero
+        ) {
             projections.append($0)
         }
         let sessionID = UUID()
@@ -175,9 +218,41 @@ struct AvatarOutputProjectionTests {
         coordinator.projectLiveOutput(
             .playbackStopped(offsetMilliseconds: 20), for: sessionID
         )
+        for _ in 0..<8 where coordinator.currentPlaybackID != nil {
+            await Task.yield()
+        }
 
-        #expect(projections.map(\.phase).last == .responding)
+        #expect(coordinator.currentPlaybackID == nil)
+        #expect(projections.last?.phase == .responding)
+        #expect(projections.last?.playbackID == nil)
         #expect(projections.last?.mouthCue == nil)
+    }
+
+    @Test
+    func reentrantDuplicateStopEmitsOnlyOneZeroCue() {
+        var projections = [AvatarProjection]()
+        var coordinator: AvatarProjectionCoordinator!
+        let sessionID = UUID()
+        var reentered = false
+        coordinator = AvatarProjectionCoordinator { projection in
+            projections.append(projection)
+            guard projection.mouthCue?.envelope == 0, !reentered else { return }
+            reentered = true
+            coordinator.projectLiveOutput(
+                .playbackStopped(offsetMilliseconds: 20), for: sessionID
+            )
+        }
+
+        coordinator.beginLiveSession(sessionID)
+        coordinator.projectLiveOutput(
+            .playbackStarted(offsetMilliseconds: 10), for: sessionID
+        )
+        coordinator.projectLiveOutput(
+            .playbackStopped(offsetMilliseconds: 20), for: sessionID
+        )
+
+        #expect(projections.compactMap(\.mouthCue).filter { $0.envelope == 0 }.count == 1)
+        #expect(coordinator.currentPlaybackID != nil)
     }
 
     @Test(arguments: [AvatarVisibility.occluded, .hidden])

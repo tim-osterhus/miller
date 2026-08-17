@@ -29,6 +29,9 @@ final class AvatarProjectionCoordinator {
     private var playbackID: UUID?
     private var cueIndex: UInt64 = 0
     private var playbackOffsetMilliseconds: UInt64 = 0
+    private var playbackSilenced = false
+    private var speakingSilenceTask: Task<Void, Never>?
+    private let speakingSilenceGrace: Duration
 
     private(set) var currentGenerationID: UUID?
     var currentPlaybackID: UUID? {
@@ -43,6 +46,7 @@ final class AvatarProjectionCoordinator {
         initialProjectionSequence: UInt64 = 0,
         visibility: AvatarVisibility = .visible,
         reduceMotion: Bool = false,
+        speakingSilenceGrace: Duration = .milliseconds(1_500),
         onProjection: @escaping ProjectionSink = { _ in }
     ) {
         projectionSequence = min(
@@ -51,6 +55,7 @@ final class AvatarProjectionCoordinator {
         )
         self.visibility = visibility
         self.reduceMotion = reduceMotion
+        self.speakingSilenceGrace = speakingSilenceGrace
         self.onProjection = onProjection
     }
 
@@ -152,7 +157,16 @@ final class AvatarProjectionCoordinator {
                 clearPlayback()
                 return
             }
-            guard playbackID == nil else { return }
+            speakingSilenceTask?.cancel()
+            speakingSilenceTask = nil
+            playbackSilenced = false
+            if playbackID != nil {
+                playbackOffsetMilliseconds = min(
+                    max(playbackOffsetMilliseconds, offsetMilliseconds),
+                    Self.maximumSafeProjectionSequence
+                )
+                return
+            }
             playbackID = UUID()
             cueIndex = 0
             playbackOffsetMilliseconds = min(
@@ -169,39 +183,25 @@ final class AvatarProjectionCoordinator {
                 playbackID: playbackID
             )
         case let .mouthCue(offsetMilliseconds, envelope):
-            guard let playbackID,
-                  visibility == .visible,
-                  !reduceMotion,
-                  cueIndex < Self.maximumSafeProjectionSequence
-            else { return }
-            let offset = min(
-                max(playbackOffsetMilliseconds, offsetMilliseconds),
-                Self.maximumSafeProjectionSequence
+            _ = emitMouthCue(
+                offsetMilliseconds: offsetMilliseconds,
+                envelope: envelope
             )
-            let nextCueIndex = cueIndex + 1
-            guard let generationID = currentGenerationID else { return }
-            let cue: AvatarMouthCue
-            do {
-                cue = try AvatarMouthCue(
-                    generationID: generationID,
-                    playbackID: playbackID,
-                    cueIndex: nextCueIndex,
-                    playbackOffsetMilliseconds: offset,
-                    envelope: envelope
-                )
-            } catch {
+        case let .playbackStopped(offsetMilliseconds):
+            guard playbackID != nil, !playbackSilenced else { return }
+            playbackSilenced = true
+            if semanticPhase == .responding,
+               visibility == .visible,
+               !reduceMotion,
+               emitMouthCue(
+                   offsetMilliseconds: offsetMilliseconds,
+                   envelope: 0
+               )
+            {
+                scheduleSpeakingSilenceExpiry()
                 return
             }
-            cueIndex = nextCueIndex
-            playbackOffsetMilliseconds = offset
-            _ = emit(
-                .speaking,
-                generationID: generationID,
-                playbackID: playbackID,
-                mouthCue: cue
-            )
-        case .playbackStopped:
-            guard playbackID != nil else { return }
+            playbackSilenced = false
             clearPlayback()
             guard visibility == .visible, !reduceMotion else { return }
             project(state: semanticPhase)
@@ -274,7 +274,7 @@ final class AvatarProjectionCoordinator {
 
     private func project(state phase: AvatarPresentationPhase) {
         semanticPhase = phase
-        if Self.isTerminal(phase) {
+        if Self.isTerminal(phase) || !Self.keepsPlaybackActive(phase) {
             clearPlayback()
         }
         if playbackID != nil,
@@ -443,9 +443,81 @@ final class AvatarProjectionCoordinator {
     }
 
     private func clearPlayback() {
+        speakingSilenceTask?.cancel()
+        speakingSilenceTask = nil
         playbackID = nil
         cueIndex = 0
         playbackOffsetMilliseconds = 0
+        playbackSilenced = false
+    }
+
+    private func scheduleSpeakingSilenceExpiry() {
+        guard let playbackID, let generationID = currentGenerationID else {
+            return
+        }
+        let expectedSession = session
+        speakingSilenceTask?.cancel()
+        speakingSilenceTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: speakingSilenceGrace)
+            } catch {
+                return
+            }
+            guard session == expectedSession,
+                  currentGenerationID == generationID,
+                  self.playbackID == playbackID,
+                  playbackSilenced,
+                  semanticPhase == .responding
+            else { return }
+            speakingSilenceTask = nil
+            clearPlayback()
+            project(state: .responding)
+        }
+    }
+
+    @discardableResult
+    private func emitMouthCue(
+        offsetMilliseconds: UInt64,
+        envelope: Double
+    ) -> Bool {
+        guard let playbackID,
+              let generationID = currentGenerationID,
+              visibility == .visible,
+              !reduceMotion,
+              cueIndex < Self.maximumSafeProjectionSequence
+        else { return false }
+        let offset = min(
+            max(playbackOffsetMilliseconds, offsetMilliseconds),
+            Self.maximumSafeProjectionSequence
+        )
+        let nextCueIndex = cueIndex + 1
+        let cue: AvatarMouthCue
+        do {
+            cue = try AvatarMouthCue(
+                generationID: generationID,
+                playbackID: playbackID,
+                cueIndex: nextCueIndex,
+                playbackOffsetMilliseconds: offset,
+                envelope: envelope
+            )
+        } catch {
+            return false
+        }
+        cueIndex = nextCueIndex
+        playbackOffsetMilliseconds = offset
+        return emit(
+            .speaking,
+            generationID: generationID,
+            playbackID: playbackID,
+            mouthCue: cue
+        )
+    }
+
+    private static func keepsPlaybackActive(
+        _ phase: AvatarPresentationPhase
+    ) -> Bool {
+        phase == .responding || phase == .speaking
     }
 
     private static func isTerminal(_ phase: AvatarPresentationPhase) -> Bool {
