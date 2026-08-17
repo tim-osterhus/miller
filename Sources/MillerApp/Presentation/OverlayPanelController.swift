@@ -109,7 +109,6 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
-        avatarIntegration?.show()
         Task { [weak self] in
             guard let self else { return }
             await self.model.refreshLiveVoiceAvailability()
@@ -117,6 +116,7 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
             window.center()
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
+            self.avatarIntegration?.show()
             self.model.requestInputFocus()
         }
     }

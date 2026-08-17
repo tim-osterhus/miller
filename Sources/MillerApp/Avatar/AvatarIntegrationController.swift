@@ -465,9 +465,9 @@ final class AvatarIntegrationController {
         attach(fresh, to: hostRegion)
         isSurfaceAttached = true
         onSurfaceAttachmentChange?(true)
+        fresh.start()
         fresh.setReducedMotion(reduceMotion)
         fresh.setVisibility(.visible)
-        fresh.start()
         applyLatestProjection()
     }
 

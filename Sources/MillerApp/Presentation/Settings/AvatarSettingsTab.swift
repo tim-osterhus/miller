@@ -1,3 +1,4 @@
+import AppKit
 import MillerAvatarCore
 import MillerAvatarHost
 import SwiftUI
@@ -6,9 +7,6 @@ import UniformTypeIdentifiers
 struct AvatarSettingsTab: View {
     let section = SettingsSection.avatar
     @ObservedObject var model: AvatarSettingsModel
-    @State private var importingModel = false
-    @State private var importingMotion = false
-    @State private var motionImportProfileID: UUID?
     @State private var renameDrafts: [UUID: String] = [:]
 
     init(model: AvatarSettingsModel = .init()) {
@@ -42,20 +40,6 @@ struct AvatarSettingsTab: View {
         }
         .accessibilityLabel(section.accessibilityLabel)
         .task { await model.load() }
-        .fileImporter(
-            isPresented: $importingModel,
-            allowedContentTypes: [Self.modelType],
-            allowsMultipleSelection: false
-        ) { result in
-            importModel(result)
-        }
-        .fileImporter(
-            isPresented: $importingMotion,
-            allowedContentTypes: [Self.motionType],
-            allowsMultipleSelection: false
-        ) { result in
-            importMotion(result)
-        }
     }
 
     private var enablementSection: some View {
@@ -106,7 +90,7 @@ struct AvatarSettingsTab: View {
                 .pickerStyle(.menu)
                 .disabled(!model.isEnabled || model.isBusy)
 
-                Button("Choose VRM 1.0 Model…") { importingModel = true }
+                Button("Choose VRM 1.0 Model…") { chooseModel() }
                     .disabled(!model.isEnabled || model.isBusy)
 
                 ForEach(model.profiles, id: \.id) { profile in
@@ -169,8 +153,7 @@ struct AvatarSettingsTab: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Button("Import VRMA 1.0 Motion…") {
-                        motionImportProfileID = profile.id
-                        importingMotion = true
+                        chooseMotion(profileID: profile.id)
                     }
                     .disabled(!model.isEnabled || model.isBusy || profile.motions.count >= 32)
                     Text("\(profile.motions.count)/32")
@@ -278,16 +261,15 @@ struct AvatarSettingsTab: View {
         }
     }
 
-    private func importModel(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
+    private func chooseModel() {
+        guard let url = chooseFile(contentType: Self.modelType, prompt: "Choose Model")
+        else { return }
         let name = url.deletingPathExtension().lastPathComponent
         Task { _ = await model.importModel(at: url, displayName: name) }
     }
 
-    private func importMotion(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result,
-              let url = urls.first,
-              let profileID = motionImportProfileID
+    private func chooseMotion(profileID: UUID) {
+        guard let url = chooseFile(contentType: Self.motionType, prompt: "Choose Motion")
         else { return }
         let name = url.deletingPathExtension().lastPathComponent
         Task {
@@ -297,6 +279,17 @@ struct AvatarSettingsTab: View {
                 displayName: name
             )
         }
+    }
+
+    private func chooseFile(contentType: UTType, prompt: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [contentType]
+        panel.prompt = prompt
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     private static let modelType = UTType(filenameExtension: "vrm") ?? .data

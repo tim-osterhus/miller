@@ -554,6 +554,35 @@ struct OverlayAvatarPresentationTests {
     }
 
     @Test
+    func overlayIsVisibleBeforeStartingAvatarRenderer() async throws {
+        let profileID = UUID()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID)
+        )
+        var controller: OverlayPanelController!
+        var panelWasVisibleWhenAvatarBecameVisible: Bool?
+        integration.onPresentationPolicyChange = { visibility, _ in
+            guard visibility == .visible else { return }
+            panelWasVisibleWhenAvatarBecameVisible = controller.window?.isVisible
+        }
+        controller = OverlayPanelController(
+            model: makeModel(),
+            avatarIntegration: integration
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+
+        controller.show()
+
+        try await eventually { panelWasVisibleWhenAvatarBecameVisible != nil }
+        #expect(panelWasVisibleWhenAvatarBecameVisible == true)
+        controller.window?.orderOut(nil)
+    }
+
+    @Test
     func profileLoadsExactlyOnceAfterTheFreshSurfaceReportsRendererReady() async throws {
         let profileID = UUID()
         let factory = SurfaceFactory()
@@ -578,6 +607,32 @@ struct OverlayAvatarPresentationTests {
         surface.emit(.rendererReady)
         await Task.yield()
         #expect(surface.loadCount == 1)
+    }
+
+    @Test
+    func surfaceStartsBeforeReceivingInitialPresentationConfiguration() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        factory.configure = { surface in
+            surface.emitsAbsentWhenConfiguredBeforeStart = true
+        }
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+
+        integration.show()
+
+        try await eventually { factory.records.count == 1 }
+        let surface = try #require(factory.records.first)
+        #expect(surface.startCount == 1)
+        #expect(surface.configurationCallsBeforeStart == 0)
+        #expect(integration.isSurfaceAttached)
     }
 
     @Test
@@ -836,9 +891,11 @@ private enum TestError: Error {
 @MainActor
 private final class SurfaceFactory {
     private(set) var records: [RecordingSurface] = []
+    var configure: ((RecordingSurface) -> Void)?
 
     func make() -> any MillerAvatarSurfaceControlling {
         let surface = RecordingSurface()
+        configure?(surface)
         records.append(surface)
         return surface
     }
@@ -868,6 +925,8 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     var loadDisposition: ProfileLoadDisposition = .accepted
     var synchronousProjectionFailure = false
     var synchronousMouthFailure = false
+    var emitsAbsentWhenConfiguredBeforeStart = false
+    var configurationCallsBeforeStart = 0
     var callsAfterDetach = false
     private var disposed = false
 
@@ -900,12 +959,14 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     }
 
     func setVisibility(_ visibility: EffectiveVisibility) {
+        emitPreStartConfigurationIfNeeded()
         if disposed { callsAfterDetach = true }
         visibilityCalls.append(visibility)
         callOrder.append(.visibility)
     }
 
     func setReducedMotion(_ enabled: Bool) {
+        emitPreStartConfigurationIfNeeded()
         if disposed { callsAfterDetach = true }
         reducedMotionCalls.append(enabled)
         callOrder.append(.reducedMotion)
@@ -926,6 +987,14 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
         visibilityCalls.removeAll()
         reducedMotionCalls.removeAll()
         callOrder.removeAll()
+    }
+
+    private func emitPreStartConfigurationIfNeeded() {
+        guard startCount == 0 else { return }
+        configurationCallsBeforeStart += 1
+        if emitsAbsentWhenConfiguredBeforeStart {
+            onState?(.absent)
+        }
     }
 }
 

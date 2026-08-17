@@ -154,6 +154,9 @@ struct SettingsNavigationTests {
         #expect(source.contains("renameProfile"))
         #expect(source.contains("modelConsecutiveLoadFailures > 0"))
         #expect(source.contains("motion.consecutiveLoadFailures > 0 || motion.lastFailure != nil"))
+        #expect(source.contains("NSOpenPanel()"))
+        #expect(source.contains("panel.runModal() == .OK"))
+        #expect(!source.contains(".fileImporter("))
         #expect(!source.contains("accessibilityReduceMotion"))
         #expect(source.contains("accessibilityLabel(section.accessibilityLabel)"))
     }
