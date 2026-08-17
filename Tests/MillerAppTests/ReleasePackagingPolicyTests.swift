@@ -131,10 +131,10 @@ struct ReleasePackagingPolicyTests {
             "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
             "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
             "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
-            "83f28f856dbd27f691e928339ecff9778371e86159aaf0422d4978e11f9e3d19",
-            "2efb0201ab0877fdf4d9a7414b937de601d76f19409957c582b0e0839f6891a0",
-            "99d30351f5616d95f49794ff07190354fe85608da3a7a801ef688ab36e84c0c7",
-            "2f2f955c5e611edd9f52e8178519150768304396cca65fc1777fa46e646b6db6",
+            "ed48dd24ef622b477d19b91336b264c7669c6273878492cf328408d7ce9e5797",
+            "3e70330a13e7ca0e12e3ba717cd03d43a1bf32496ac4f5cec649410a6dfc419d",
+            "a8d0e3b584c785a248098904d22802bc54f666256bcf5ccd10b25c7f2180a914",
+            "a99297433d84ba0663394ba17fa3331a6b3ff6e36bb7f2633d236f8023508edf",
             "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
             "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
             "Mapbox Earcut 3.0.1",
@@ -577,7 +577,7 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
-            "Miller Avatar@0.1.0-alpha.4",
+            "Miller Avatar@0.1.0-alpha.5",
             "Miller@0.1.2",
             "MillerCapabilityBridge@0.1.2",
             "MillerCapabilities@0.1.2",
@@ -717,7 +717,7 @@ struct ReleasePackagingPolicyTests {
                 {
                   "sourceControl": [{
                     "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialAvatarURL)"}]},
-                    "requirement": {"exact": ["0.1.0-alpha.4"]}
+                    "requirement": {"exact": ["0.1.0-alpha.5"]}
                   }]
                 }
               ],
@@ -774,8 +774,8 @@ private enum ReleasePackagingPolicy {
     static let approvedSDKVersion = "0.12.1"
     static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
     static let officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git"
-    static let approvedAvatarVersion = "0.1.0-alpha.4"
-    static let approvedAvatarRevision = "0e7f906e7bf07c949649921e94ef0287e5e5cc58"
+    static let approvedAvatarVersion = "0.1.0-alpha.5"
+    static let approvedAvatarRevision = "0a63ef310514f758079caf9f16490507e128dc92"
 
     private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
     private static let packageInventories = [

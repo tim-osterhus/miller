@@ -11,16 +11,18 @@ real Live audio, signing, notarization, publication, or M1 performance.
 
 ## Qualified source boundary
 
-- Miller's reviewed C7 implementation checkpoint is
-  `fb544cb5c3cf7ae0764a51bd473a0ca82973ed9b`. It descends from C6 head
-  `4be0f3b0e2a1fc51938d1aaa58e565c32b0e57aa`. This report's subsequent
-  documentation-only update does not change the qualified implementation.
+- Miller's reviewed Avatar integration and sentence-gap continuity checkpoint
+  is `886cf2181f9bb7e9ee8c92cc53fb406c0d8c9faa`. It descends from the prior
+  package-integration checkpoint
+  `6d2c3e98c9a544c22224c1639033a245ca392430`. The packaging/provenance
+  update containing this report does not change coordinator behavior.
 - Published Miller v0.1.2 commit
   `6280a38c3b0c0afa936f3af6550645306221ded4` is an ancestor of that head.
-- Miller resolves Miller Avatar `v0.1.0-alpha.4` at the exact reviewed commit
-  `0e7f906e7bf07c949649921e94ef0287e5e5cc58`.
-- That reviewed alpha.3 checkpoint contains the package-head
-  renderer-persistence repair exercised by this matrix.
+- Miller resolves Miller Avatar `v0.1.0-alpha.5` at the exact reviewed commit
+  `0a63ef310514f758079caf9f16490507e128dc92`.
+- That reviewed alpha.5 checkpoint contains the renderer-persistence repair,
+  authored root-motion preservation, and fixed root-motion camera envelope
+  exercised by this matrix.
 - Avatar is off by default. Ordinary Avatar-off startup does not construct a
   renderer, capture a model, request microphone access, or add a network
   request.
@@ -40,7 +42,7 @@ real Live audio, signing, notarization, publication, or M1 performance.
 | Presentation policy | `PASS` | Avatar Off, no-profile, static fallback, hidden, occluded, and Reduced Motion states revoke mouth cues and do not restore stale playback. Reduced Motion stops animation advancement and restores rest pose. |
 | Noninteraction and accessibility contract | `PASS_HEADLESS` | The 200-point Avatar region and installed WebKit view cannot accept first responder, do not join key-view traversal, ignore hit testing, and expose no accessibility children. Physical focus preservation, Tab/Shift-Tab, and VoiceOver remain human checks. |
 | Typed lifecycle | `PASS` | Accepted typed turns own their generation and project only bounded semantic states; stale, failed, stopped, and replaced turns cannot mutate a newer projection. |
-| Live lifecycle and mouth cues | `PASS` | Only measured audible remote output creates `speaking` and ordered mouth cues. Silence, stop, failure, renderer loss, hide, occlusion, Reduced Motion, and close return neutral and fence late samples. |
+| Live lifecycle and mouth cues | `PASS` | Only measured audible remote output creates `speaking` and ordered mouth cues. Short sentence gaps retain one playback identity and animation action; final silence, failure, renderer loss, hide, occlusion, Reduced Motion, and close return neutral and fence late samples. |
 | Feature isolation | `PASS` | Avatar errors are Avatar readiness failures. Typed operation, Live admission, history, settings, capability approvals, tool execution, wake start, and microphone ownership retain their existing authorities. |
 | Source packaging and provenance contract | `PASS_HEADLESS` | Miller links only `MillerAvatarCore` and `MillerAvatarHost`, declares the fixed five-file Web bundle, inventories the exact prerelease revision, and rejects VRM, VRMA, and private-fixture content from package inputs. A fresh integrated app artifact has not yet been built or inspected. |
 | Source-test cleanup | `PASS_HEADLESS` | Avatar's release gate proved deterministic native builds, failed-publication rollback, shared-cache stability, scoped cleanup, and no retained build process. Miller's nonlaunching tests left the protected release processes unchanged. Integrated app and WebKit child-process cleanup remain human checks. |
@@ -49,8 +51,8 @@ real Live audio, signing, notarization, publication, or M1 performance.
 
 | Repository | Command | Result |
 | --- | --- | --- |
-| Miller Avatar | `./scripts/test.sh` | `PASS`: 74 Web tests, TypeScript check, 310 Swift tests, shell contracts, deterministic independent builds, rollback, cache containment, and cleanup. |
-| Miller | `./scripts/test.sh` | `PASS`: 49 Gateway tests and 1,130 Swift tests. The command builds tests but does not launch Miller. |
+| Miller Avatar | `./scripts/test.sh` | `PASS`: 78 Web tests, TypeScript check, 311 Swift tests, shell contracts, deterministic independent builds, rollback, cache containment, and cleanup. |
+| Miller | `./scripts/test.sh` plus `swift test --filter oversizedUnterminatedStdioFrameFailsQuickly` | `PASS_WITH_FOCUSED_TIMING_RERUN`: all 49 Gateway tests passed. The loaded full Swift run passed 1,183 of 1,184 tests; the sole failure was a pre-existing 500 ms transport timing assertion that completed in 565 ms. Its immediate isolated rerun passed in 7 ms. Neither command launches Miller. |
 | Miller | `./scripts/run-task18-three-route-e2e.sh all` | `PASS`: the three synthetic tool routes passed against the exact resolved dependency lock after the pre-existing generated wake root was temporarily isolated and restored. This harness does not launch Miller. |
 | Miller | `swift build --product MillerApp` | `PASS`: the integrated source builds without launching the app. |
 | Miller | `git merge-base --is-ancestor 6280a38c3b0c0afa936f3af6550645306221ded4 HEAD` | `PASS` |
@@ -70,6 +72,16 @@ pass in Miller. Exact-once failure, three-session quarantine, validated
 first-frame recovery, startup/stale-session exclusion, and motion-isolation
 regressions now pass in Miller Avatar. The complete source gates above were
 rerun after both repairs.
+
+The alpha.5 correction was driven by exact private-fixture diagnosis without
+copying private content into either repository. The imported motion bindings
+and hashes were correct. One test motion deliberately turns the avatar around,
+and another begins crouched and has a large loop seam; those are authored clip
+properties. The actual renderer defect was an extra first-frame hips
+reanchoring step combined with rest-pose-only camera framing. Alpha.5 preserves
+Pixiv's target-relative conversion and computes one fixed root-motion envelope.
+Miller separately retains the speaking playback identity across bounded
+sentence gaps so one animation action is not restarted for every audio segment.
 
 ## Human gate
 

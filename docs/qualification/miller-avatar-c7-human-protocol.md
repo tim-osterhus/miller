@@ -15,8 +15,8 @@ as integration evidence.
    harness. Nonlaunching source builds may run while the retained app is
    active. Do not run the two Miller app instances concurrently.
 2. Build and package the candidate from the reviewed C7 Miller source and
-   Miller Avatar `v0.1.0-alpha.4` at exact commit
-   `0e7f906e7bf07c949649921e94ef0287e5e5cc58`. Do not replace the retained
+   Miller Avatar `v0.1.0-alpha.5` at exact commit
+   `0a63ef310514f758079caf9f16490507e128dc92`. Do not replace the retained
    release bundle. Treat
    a packaging script that executes the candidate for a smoke test as a launch
    and run it only after the retained processes are paused.
@@ -30,8 +30,8 @@ as integration evidence.
 5. Leave normal networking available. This protocol does not require or
    authorize disabling network interfaces.
 6. Verify the packaged candidate inventory before launch. It must resolve
-   Miller Avatar `v0.1.0-alpha.4` at
-   `0e7f906e7bf07c949649921e94ef0287e5e5cc58`, include the fixed renderer
+   Miller Avatar `v0.1.0-alpha.5` at
+   `0a63ef310514f758079caf9f16490507e128dc92`, include the fixed renderer
    resources, and
    contain no VRM, VRMA, texture, thumbnail, private fixture, transcript, or
    audio asset.
