@@ -17,8 +17,8 @@ real Live audio, signing, notarization, publication, or M1 performance.
   documentation-only update does not change the qualified implementation.
 - Published Miller v0.1.2 commit
   `6280a38c3b0c0afa936f3af6550645306221ded4` is an ancestor of that head.
-- Miller resolves Miller Avatar `v0.1.0-alpha.3` at the exact reviewed commit
-  `dac4d0ab432a9c158dca40985b28335bdfc70e2b`.
+- Miller resolves Miller Avatar `v0.1.0-alpha.4` at the exact reviewed commit
+  `0e7f906e7bf07c949649921e94ef0287e5e5cc58`.
 - That reviewed alpha.3 checkpoint contains the package-head
   renderer-persistence repair exercised by this matrix.
 - Avatar is off by default. Ordinary Avatar-off startup does not construct a
