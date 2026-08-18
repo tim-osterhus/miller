@@ -1,6 +1,6 @@
 # Miller Avatar C7 owner-visible protocol
 
-Status: `HUMAN_NOT_RUN`
+Status: `HUMAN_IN_PROGRESS_RETEST_REQUIRED`
 
 Expected success marker: `MILLER_AVATAR_C7_HUMAN_PASS`
 
@@ -15,8 +15,8 @@ as integration evidence.
    harness. Nonlaunching source builds may run while the retained app is
    active. Do not run the two Miller app instances concurrently.
 2. Build and package the candidate from the reviewed C7 Miller source and
-   Miller Avatar `v0.1.0-alpha.5` at exact commit
-   `0a63ef310514f758079caf9f16490507e128dc92`. Do not replace the retained
+   Miller Avatar `v0.1.0-alpha.6` at exact commit
+   `cdd8b54f92a2d7282d50d65f08a502e155fd7de8`. Do not replace the retained
    release bundle. Treat
    a packaging script that executes the candidate for a smoke test as a launch
    and run it only after the retained processes are paused.
@@ -30,8 +30,8 @@ as integration evidence.
 5. Leave normal networking available. This protocol does not require or
    authorize disabling network interfaces.
 6. Verify the packaged candidate inventory before launch. It must resolve
-   Miller Avatar `v0.1.0-alpha.5` at
-   `0a63ef310514f758079caf9f16490507e128dc92`, include the fixed renderer
+   Miller Avatar `v0.1.0-alpha.6` at
+   `cdd8b54f92a2d7282d50d65f08a502e155fd7de8`, include the fixed renderer
    resources, and
    contain no VRM, VRMA, texture, thumbnail, private fixture, transcript, or
    audio asset.
@@ -55,6 +55,8 @@ as integration evidence.
   controls have clear labels and status.
 - Enable Avatar and confirm one noninteractive 200-point leading surface
   appears without narrowing or covering Miller's 520-point content.
+- With animation active, confirm the avatar uses the available surface without
+  excessive deadspace and remains fully in frame throughout the active clip.
 
 ### 3. Typed presentation
 
@@ -71,6 +73,9 @@ as integration evidence.
 - Confirm provider lifecycle alone does not create mouth motion.
 - Confirm audible remote speech selects the speaking presentation and produces
   bounded mouth motion; silence returns neutral promptly.
+- Use a response containing several sentence breaks. Confirm those short
+  acoustic gaps do not restart the speaking animation; the action ends once
+  when the WebRTC output buffer actually stops.
 - Interrupt once, mute and unmute the microphone once, end the session, then
   start a second session. Confirm mute does not stop remote-output motion and
   every terminal path returns neutral.
@@ -88,7 +93,11 @@ as integration evidence.
 
 - Enable Miller's Avatar Reduced Motion setting, then the macOS setting.
 - Confirm either authority stops skeletal and mouth motion and restores the
-  normalized static pose without disabling typed or Live operation.
+  normalized static rest pose without deformation, clipping, or stale spring
+  state. A neutral T-pose is the current v0.1 Reduced Motion policy.
+- Confirm the static pose uses the surface without excessive deadspace. Its
+  scale may differ from an animated pose, but toggling Reduced Motion must not
+  produce a malformed frame or repeated zoom changes.
 - Disable Avatar and confirm the surface detaches and the ordinary Miller
   layout returns.
 - Re-enable with no selected profile and confirm a truthful static/no-avatar
@@ -119,3 +128,13 @@ Record each section as `PASS`, `FAIL`, or `NOT_RUN`. A C7 human pass requires
 all eight sections to pass. Any visual, audio, focus, accessibility, lifecycle,
 or feature-isolation failure blocks C8. Store only the section results, bounded
 timings if collected, source revisions, and sanitized failure codes.
+
+Current owner-observed state before the alpha.6-integrated retest:
+
+- Physical Tab and Shift-Tab traversal: `PASS`.
+- VoiceOver traversal: `NOT_RUN`.
+- Disable/re-enable, profile replacement, retry, and repeated cycles: `PASS`.
+- Live sentence-boundary continuity: `FAIL_RETEST_REQUIRED` on the prior
+  candidate.
+- Active-motion scale/deadspace and Reduced Motion static-pose integrity:
+  `FAIL_RETEST_REQUIRED` on the prior candidate.
