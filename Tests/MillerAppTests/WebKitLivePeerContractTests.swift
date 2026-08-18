@@ -66,6 +66,10 @@ struct WebKitLivePeerContractTests {
         #expect(html.contains("createAnalyser()"))
         #expect(html.components(separatedBy: "createAnalyser()").count - 1 == 1)
         #expect(html.contains("outputSample()"))
+        #expect(html.contains("output_audio_buffer.started"))
+        #expect(html.contains("output_audio_buffer.stopped"))
+        #expect(html.contains("output_audio_buffer.cleared"))
+        #expect(html.contains("outputBufferActive"))
         #expect(html.contains("outputSource.disconnect()"))
         #expect(html.contains("outputAnalyser.disconnect()"))
         #expect(!html.contains("createMediaStreamSource(localStream).connect"))
@@ -111,7 +115,9 @@ struct WebKitLivePeerContractTests {
         }
 
         try await waitUntil { await MainActor.run { evaluator.closeCalls == 1 } }
-        #expect(await samples.value.count == 1)
+        let captured = await samples.value
+        #expect(captured.count == 1)
+        #expect(captured.first?.outputBufferActive == true)
         await peer.close()
         try await Task.sleep(for: .milliseconds(20))
 
@@ -452,7 +458,7 @@ private final class FailingOutputSampleEvaluator: WebKitLivePeerScriptEvaluating
         case .outputSample:
             outputSampleCalls += 1
             if outputSampleCalls == 1 {
-                return "{\"isPlaying\":true,\"offsetMilliseconds\":12,\"envelope\":0.5}"
+                return "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5}"
             }
             throw FakeEvaluatorError.missingResult
         case .close:

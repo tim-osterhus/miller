@@ -453,6 +453,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
         else {
             return LiveAudioOutputSample(
                 isPlaying: false,
+                outputBufferActive: nil,
                 offsetMilliseconds: 0,
                 envelope: 0
             )
@@ -461,6 +462,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
             ? min(max(payload.envelope ?? 0, 0), 1) : 0
         return LiveAudioOutputSample(
             isPlaying: payload.isPlaying ?? false,
+            outputBufferActive: payload.outputBufferActive,
             offsetMilliseconds: payload.offsetMilliseconds ?? 0,
             envelope: envelope
         )
@@ -527,7 +529,9 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
       let outputSource = null;
       let outputAnalyser = null;
       let lastOutputOffset = 0;
+      let outputBufferActive = null;
       const maximumSafeInteger = 9007199254740991;
+      const maximumEventCharacters = 65536;
       let channel = null;
       let audio = null;
       let closed = false;
@@ -593,6 +597,19 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
             }
           };
           channel = pc.createDataChannel("oai-events");
+          channel.addEventListener("message", event => {
+            if (typeof event.data !== "string"
+                || event.data.length > maximumEventCharacters) return;
+            let payload;
+            try { payload = JSON.parse(event.data); } catch (_) { return; }
+            if (!payload || typeof payload.type !== "string") return;
+            if (payload.type === "output_audio_buffer.started") {
+              outputBufferActive = true;
+            } else if (payload.type === "output_audio_buffer.stopped"
+                || payload.type === "output_audio_buffer.cleared") {
+              outputBufferActive = false;
+            }
+          });
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           if (!pc.localDescription || !pc.localDescription.sdp) throw new Error("missing offer");
@@ -646,6 +663,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (!outputAnalyser) {
             return JSON.stringify({
               isPlaying: false,
+              outputBufferActive,
               offsetMilliseconds: lastOutputOffset,
               envelope: 0
             });
@@ -675,6 +693,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
             && tracks.some(track => track.readyState === "live");
           return JSON.stringify({
             isPlaying,
+            outputBufferActive,
             offsetMilliseconds: lastOutputOffset,
             envelope
           });
@@ -683,6 +702,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (closed) return "ok";
           closed = true;
           responseGeneration.value = null;
+          outputBufferActive = false;
           if (localStream) for (const track of localStream.getTracks()) track.stop();
           if (outboundStream) for (const track of outboundStream.getTracks()) track.stop();
           if (microphoneSource) microphoneSource.disconnect();
@@ -733,6 +753,7 @@ private final class WebKitLivePeerCallRace<Value: Sendable>: @unchecked Sendable
 
 private struct OutputSamplePayload: Decodable {
     let isPlaying: Bool?
+    let outputBufferActive: Bool?
     let offsetMilliseconds: UInt64?
     let envelope: Double?
 }

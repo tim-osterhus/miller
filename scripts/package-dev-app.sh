@@ -36,14 +36,14 @@ node_archive_bytes="49923798"
 node_archive_sha256="5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
 node_binary_sha256="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
 node_license_sha256="e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
-avatar_package_revision="0a63ef310514f758079caf9f16490507e128dc92"
+avatar_package_revision="cdd8b54f92a2d7282d50d65f08a502e155fd7de8"
 avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
 avatar_third_party_notices_sha256="37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f"
-avatar_aggregate_third_party_notices_sha256="ed48dd24ef622b477d19b91336b264c7669c6273878492cf328408d7ce9e5797"
+avatar_aggregate_third_party_notices_sha256="d91d655d974925fa03bdac67fabf170c89c3cbe3021397fd1df0d6d132445145"
 typeset -A avatar_web_hashes=(
-  app.js 3e70330a13e7ca0e12e3ba717cd03d43a1bf32496ac4f5cec649410a6dfc419d
-  bundle-manifest.json a8d0e3b584c785a248098904d22802bc54f666256bcf5ccd10b25c7f2180a914
-  bundle-metafile.json a99297433d84ba0663394ba17fa3331a6b3ff6e36bb7f2633d236f8023508edf
+  app.js 02f5193c159eb8125c2fad33ecd63bc8b72112d19cdd0b4a9e530485bd0d34ba
+  bundle-manifest.json 989f21f0bd84ec48eb51245353da05f9e5776f5d8227c70ac66dd188afbe6776
+  bundle-metafile.json 5c17be094ae023a9f54c4a4b0e73d88aba36571dc88fd3c5532841e2c011aab4
   index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
@@ -438,7 +438,7 @@ if [[ "$package_mode" == "release" ]]; then
     printf '# Miller v%s packaged provenance\n\n' "$release_version"
     printf 'This release candidate is not Developer ID-signed and is not notarized. It contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
     printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
-    printf 'Miller Avatar v0.1.0-alpha.5 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 0a63ef310514f758079caf9f16490507e128dc92 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
+    printf 'Miller Avatar v0.1.0-alpha.6 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit cdd8b54f92a2d7282d50d65f08a502e155fd7de8 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
     printf 'The Avatar Web payload includes Three.js 0.180.0 and the @pixiv/three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families under MIT terms.\n\n'
     printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
   } > "$legal_root/PROVENANCE.md"

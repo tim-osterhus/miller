@@ -5,15 +5,18 @@ import Foundation
 /// data.
 public struct LiveAudioOutputSample: Equatable, Sendable {
     public let isPlaying: Bool
+    public let outputBufferActive: Bool?
     public let offsetMilliseconds: UInt64
     public let envelope: Double
 
     public init(
         isPlaying: Bool,
+        outputBufferActive: Bool? = nil,
         offsetMilliseconds: UInt64,
         envelope: Double
     ) {
         self.isPlaying = isPlaying
+        self.outputBufferActive = outputBufferActive
         self.offsetMilliseconds = offsetMilliseconds
         self.envelope = envelope
     }
@@ -32,9 +35,10 @@ public enum LiveAudioOutputObservation: Equatable, Sendable {
 ///
 /// The processor accepts at most one sample every 34 ms (strictly below
 /// 30 Hz), requires two consecutive above-threshold samples to attack, and
-/// releases after 400 ms without an above-threshold sample. The explicit time
-/// overload keeps tests deterministic; the convenience overload uses the
-/// sample's monotonic playback offset as its clock.
+/// uses an authoritative WebRTC output-buffer boundary when available, and
+/// otherwise releases after 400 ms without an above-threshold sample. The
+/// explicit time overload keeps tests deterministic; the convenience overload
+/// uses the sample's monotonic playback offset as its clock.
 public struct LiveAudioOutputObservationProcessor: Sendable {
     public static let maximumSampleRateHz = 30
     public static let minimumSampleIntervalMilliseconds: UInt64 = 34
@@ -95,7 +99,16 @@ public struct LiveAudioOutputObservationProcessor: Sendable {
         )
         lastOffsetMilliseconds = offset
         let envelope = Self.sanitizeEnvelope(sample.envelope)
-        let aboveThreshold = sample.isPlaying && envelope > threshold
+        if active, sample.outputBufferActive == false {
+            active = false
+            consecutiveAboveThreshold = 0
+            lastAboveThresholdTimestampMilliseconds = nil
+            return [.playbackStopped(offsetMilliseconds: offset)]
+        }
+
+        let aboveThreshold = sample.isPlaying
+            && sample.outputBufferActive != false
+            && envelope > threshold
         if aboveThreshold {
             consecutiveAboveThreshold = min(consecutiveAboveThreshold + 1, 2)
             lastAboveThresholdTimestampMilliseconds = timestamp
@@ -118,7 +131,8 @@ public struct LiveAudioOutputObservationProcessor: Sendable {
             return [.mouthCue(offsetMilliseconds: offset, envelope: envelope)]
         }
 
-        guard let lastAboveThresholdTimestampMilliseconds,
+        guard sample.outputBufferActive == nil,
+              let lastAboveThresholdTimestampMilliseconds,
               timestamp >= lastAboveThresholdTimestampMilliseconds,
               timestamp - lastAboveThresholdTimestampMilliseconds
                 >= releaseAfterMilliseconds

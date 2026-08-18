@@ -73,6 +73,57 @@ struct LiveAudioOutputObservationTests {
     }
 
     @Test
+    func authoritativeOutputBufferKeepsOnePlaybackAcrossSentenceSilence() {
+        var observation = LiveAudioOutputObservationProcessor()
+        _ = observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 0,
+                envelope: 0.5
+            ),
+            atMilliseconds: 0
+        )
+        _ = observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 34,
+                envelope: 0.5
+            ),
+            atMilliseconds: 34
+        )
+
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 434,
+                envelope: 0
+            ),
+            atMilliseconds: 434
+        ).isEmpty)
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 2_000,
+                envelope: 0
+            ),
+            atMilliseconds: 2_000
+        ).isEmpty)
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: false,
+                offset: 2_034,
+                envelope: 0
+            ),
+            atMilliseconds: 2_034
+        ) == [.playbackStopped(offsetMilliseconds: 2_034)])
+    }
+
+    @Test
     func offsetsAreMonotonicAndSamplesAreRateLimitedToThirtyHertz() {
         var observation = LiveAudioOutputObservationProcessor()
         _ = observation.observe(
@@ -96,11 +147,13 @@ struct LiveAudioOutputObservationTests {
 
     private func sample(
         isPlaying: Bool,
+        outputBufferActive: Bool? = nil,
         offset: UInt64,
         envelope: Double
     ) -> LiveAudioOutputSample {
         LiveAudioOutputSample(
             isPlaying: isPlaying,
+            outputBufferActive: outputBufferActive,
             offsetMilliseconds: offset,
             envelope: envelope
         )

@@ -59,7 +59,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/tim-osterhus/miller-avatar.git",
-            exact: "0.1.0-alpha.5"
+            exact: "0.1.0-alpha.6"
         ),
     ],
     targets: [

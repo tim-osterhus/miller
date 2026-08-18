@@ -83,7 +83,7 @@ const runtimeInventory = [
   },
   {
     name: "Miller Avatar",
-    version: "0.1.0-alpha.5",
+    version: "0.1.0-alpha.6",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
     role: "renderer_resource_bundle",
   },
@@ -135,17 +135,17 @@ const avatarWebFiles = [
   {
     name: "app.js",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
-    sha256: "3e70330a13e7ca0e12e3ba717cd03d43a1bf32496ac4f5cec649410a6dfc419d",
+    sha256: "02f5193c159eb8125c2fad33ecd63bc8b72112d19cdd0b4a9e530485bd0d34ba",
   },
   {
     name: "bundle-manifest.json",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-manifest.json",
-    sha256: "a8d0e3b584c785a248098904d22802bc54f666256bcf5ccd10b25c7f2180a914",
+    sha256: "989f21f0bd84ec48eb51245353da05f9e5776f5d8227c70ac66dd188afbe6776",
   },
   {
     name: "bundle-metafile.json",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-metafile.json",
-    sha256: "a99297433d84ba0663394ba17fa3331a6b3ff6e36bb7f2633d236f8023508edf",
+    sha256: "5c17be094ae023a9f54c4a4b0e73d88aba36571dc88fd3c5532841e2c011aab4",
   },
   {
     name: "index.html",
@@ -170,7 +170,7 @@ const avatarLegalFiles = [
   },
   {
     path: "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
-    sha256: "ed48dd24ef622b477d19b91336b264c7669c6273878492cf328408d7ce9e5797",
+    sha256: "d91d655d974925fa03bdac67fabf170c89c3cbe3021397fd1df0d6d132445145",
     requiredText: [
       "Model Context Protocol Swift SDK 0.12.1",
       "Three.js 0.180.0",

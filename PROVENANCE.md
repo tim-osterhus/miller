@@ -90,12 +90,12 @@ Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
 the v0.1.2 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
 
-## Miller Avatar v0.1.0-alpha.5
+## Miller Avatar v0.1.0-alpha.6
 
 Miller links the public Miller Avatar package from
 `https://github.com/tim-osterhus/miller-avatar.git` at the immutable reviewed
-commit `0a63ef310514f758079caf9f16490507e128dc92`, published as version
-`v0.1.0-alpha.5`. The package is distributed under
+commit `cdd8b54f92a2d7282d50d65f08a502e155fd7de8`, published as version
+`v0.1.0-alpha.6`. The package is distributed under
 Apache-2.0. MillerApp links only `MillerAvatarCore` and `MillerAvatarHost`;
 the diagnostic `MillerAvatarApp` product is neither linked nor packaged.
 
