@@ -15,8 +15,8 @@ as integration evidence.
    harness. Nonlaunching source builds may run while the retained app is
    active. Do not run the two Miller app instances concurrently.
 2. Build and package the candidate from the reviewed C7 Miller source and
-   Miller Avatar `v0.1.0-alpha.6` at exact commit
-   `cdd8b54f92a2d7282d50d65f08a502e155fd7de8`. Do not replace the retained
+   Miller Avatar `v0.1.0-alpha.7` at exact commit
+   `34f9e58315e3f41c3202bf593276a5dd9d89cc26`. Do not replace the retained
    release bundle. Treat
    a packaging script that executes the candidate for a smoke test as a launch
    and run it only after the retained processes are paused.
@@ -30,8 +30,8 @@ as integration evidence.
 5. Leave normal networking available. This protocol does not require or
    authorize disabling network interfaces.
 6. Verify the packaged candidate inventory before launch. It must resolve
-   Miller Avatar `v0.1.0-alpha.6` at
-   `cdd8b54f92a2d7282d50d65f08a502e155fd7de8`, include the fixed renderer
+   Miller Avatar `v0.1.0-alpha.7` at
+   `34f9e58315e3f41c3202bf593276a5dd9d89cc26`, include the fixed renderer
    resources, and
    contain no VRM, VRMA, texture, thumbnail, private fixture, transcript, or
    audio asset.
@@ -53,8 +53,12 @@ as integration evidence.
   `speaking`. Exercise `success` and `failure` when compatible clips exist.
 - Confirm motion bindings, Reduced Motion, retry, remove, and enablement
   controls have clear labels and status.
-- Enable Avatar and confirm one noninteractive 200-point leading surface
-  appears without narrowing or covering Miller's 520-point content.
+- Enable Avatar and confirm one noninteractive leading surface appears without
+  narrowing or covering Miller's fixed 520-point content.
+- Adjust the selected profile's Avatar surface-width control across its range.
+  Confirm the window resizes live, the Avatar region changes width without
+  changing Miller's content width, and the setting survives a profile switch
+  and application restart.
 - With animation active, confirm the avatar uses the available surface without
   excessive deadspace and remains fully in frame throughout the active clip.
 
@@ -70,6 +74,9 @@ as integration evidence.
 ### 4. Real Live presentation
 
 - Start one real Live session and speak normally.
+- Continue speaking through several partial transcript updates. Confirm the
+  listening animation remains one continuous action rather than restarting for
+  every transcribed word.
 - Confirm provider lifecycle alone does not create mouth motion.
 - Confirm audible remote speech selects the speaking presentation and produces
   bounded mouth motion; silence returns neutral promptly.
@@ -129,12 +136,14 @@ all eight sections to pass. Any visual, audio, focus, accessibility, lifecycle,
 or feature-isolation failure blocks C8. Store only the section results, bounded
 timings if collected, source revisions, and sanitized failure codes.
 
-Current owner-observed state before the alpha.6-integrated retest:
+Current owner-observed state before the alpha.7-integrated retest:
 
 - Physical Tab and Shift-Tab traversal: `PASS`.
 - VoiceOver traversal: `NOT_RUN`.
 - Disable/re-enable, profile replacement, retry, and repeated cycles: `PASS`.
-- Live sentence-boundary continuity: `FAIL_RETEST_REQUIRED` on the prior
-  candidate.
+- Live speaking sentence-boundary continuity: `PASS` on the prior candidate.
+- Live listening transcript-delta continuity: `FAIL_RETEST_REQUIRED` on the
+  prior candidate.
 - Active-motion scale/deadspace and Reduced Motion static-pose integrity:
   `FAIL_RETEST_REQUIRED` on the prior candidate.
+- Per-profile Avatar surface width: `NOT_RUN` because this is new in alpha.7.

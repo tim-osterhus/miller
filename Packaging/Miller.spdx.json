@@ -89,7 +89,7 @@
     {
       "name": "Miller Avatar",
       "SPDXID": "SPDXRef-Package-MillerAvatar",
-      "versionInfo": "0.1.0-alpha.6",
+      "versionInfo": "0.1.0-alpha.7",
       "downloadLocation": "https://github.com/tim-osterhus/miller-avatar.git",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
