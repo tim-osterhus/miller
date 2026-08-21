@@ -10,16 +10,14 @@ as integration evidence.
 
 ## Preconditions
 
-1. Coordinate a clean pause for the retained v0.1.2 Miller and Gateway
-   processes before running any command that launches an app or app smoke
-   harness. Nonlaunching source builds may run while the retained app is
-   active. Do not run the two Miller app instances concurrently.
+1. Coordinate a clean stop for any existing Miller and Gateway processes
+   before replacing or launching the integrated candidate. Do not run two
+   Miller app instances concurrently.
 2. Build and package the candidate from the reviewed C7 Miller source and
    Miller Avatar `v0.1.0-alpha.7` at exact commit
-   `34f9e58315e3f41c3202bf593276a5dd9d89cc26`. Do not replace the retained
-   release bundle. Treat
-   a packaging script that executes the candidate for a smoke test as a launch
-   and run it only after the retained processes are paused.
+   `34f9e58315e3f41c3202bf593276a5dd9d89cc26`. Treat a packaging script that
+   executes the candidate for a smoke test as a launch and run it only after
+   existing Miller processes are stopped.
 3. Use a private local VRM 1.0 model and compatible VRMA 1.0 motions sufficient
    to bind `idle`, `listening`, `thinking`, and `speaking`. One motion may serve
    more than one role. Work from disposable copies when testing changed or
