@@ -1,10 +1,1 @@
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"notStarted","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"started","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"partial","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"completed","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"timedOut","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"phase-vocabulary","phase":"uncertain","observed":false,"availability":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
-{"fixture":"v013-codex-screen-control","record":"generic-event-shape","event":"item/started","status":"inProgress","phaseMapping":"started","computerUseSpecific":false}
-{"fixture":"v013-codex-screen-control","record":"generic-event-shape","event":"item/completed","status":"completed","phaseMapping":"completed","computerUseSpecific":false}
-{"fixture":"v013-codex-screen-control","record":"generic-event-shape","event":"item/completed","status":"failed","phaseMapping":"uncertain","computerUseSpecific":false}
-{"fixture":"v013-codex-screen-control","record":"generic-event-shape","event":"turn/completed","status":"interrupted","phaseMapping":"uncertain","computerUseSpecific":false}
+{"fixture":"v013-codex-screen-control","release":"0.146.0","record":"bounded-invocation","observed":false,"result":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}

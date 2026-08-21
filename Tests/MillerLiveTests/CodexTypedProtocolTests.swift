@@ -145,6 +145,109 @@ struct CodexTypedProtocolTests {
     )
 
     @Test
+    func validatesPinnedLocalImageFixtureAgainstTurnStartSchemaWithoutStartingTurn() throws {
+        let records = try typedFixtureObjects(named: "v013-image-input")
+        #expect(records.count == 2)
+
+        let inputRecord = try #require(records.first {
+            $0["record"] as? String == "local-image-input"
+        })
+        #expect(Set(inputRecord.keys) == [
+            "fixture", "release", "record", "method", "input", "imageCount",
+        ])
+        #expect(inputRecord["method"] as? String == "turn/start")
+        #expect(inputRecord["imageCount"] as? Int == 1)
+        let fixtureInput = try #require(inputRecord["input"] as? [[String: Any]])
+        #expect(fixtureInput.count == 2)
+        #expect(Set(fixtureInput[0].keys) == ["type", "text"])
+        #expect(fixtureInput[0]["type"] as? String == "text")
+        #expect(fixtureInput[0]["text"] as? String == "Describe the synthetic fixture image.")
+        #expect(Set(fixtureInput[1].keys) == ["type", "path", "detail"])
+        #expect(fixtureInput[1]["type"] as? String == "localImage")
+        #expect(fixtureInput[1]["path"] as? String == "/fixture/v013/synthetic-image.png")
+        #expect(fixtureInput[1]["detail"] as? String == "high")
+
+        let request = try object(codec.turnStartRequest(
+            id: "request:image-fixture",
+            threadID: "thread",
+            cwd: "/private/runtime",
+            context: [],
+            userText: "Describe the synthetic fixture image.",
+            images: [.init(path: "/fixture/v013/synthetic-image.png", detail: .high)]
+        ))
+        #expect(Set(request.keys) == ["id", "method", "params"])
+        #expect(request["method"] as? String == "turn/start")
+        let params = try #require(request["params"] as? [String: Any])
+        #expect(Set(params.keys) == ["threadId", "input", "cwd", "approvalPolicy"])
+        let encodedInput = try #require(params["input"] as? [[String: Any]])
+        #expect(try JSONSerialization.data(
+            withJSONObject: encodedInput, options: [.sortedKeys]
+        ) == JSONSerialization.data(
+            withJSONObject: fixtureInput, options: [.sortedKeys]
+        ))
+
+        let mediaRecord = try #require(records.first {
+            $0["record"] as? String == "local-image-media-contract"
+        })
+        #expect(Set(mediaRecord.keys) == [
+            "fixture", "release", "record", "userInputType", "serverInputRoute",
+            "promptMediaRoute", "dataURLDecodedInputGuardBytes", "dataURLGuardScope",
+            "resizeToFitMaxDimension", "resizeModes", "originalMode", "qualification",
+        ])
+        #expect(mediaRecord["userInputType"] as? String == "localImage")
+        #expect(mediaRecord["serverInputRoute"] as? String == "local-path")
+        #expect(mediaRecord["promptMediaRoute"] as? String == "image-data-url")
+        #expect(mediaRecord["dataURLDecodedInputGuardBytes"] as? Int == 1_073_741_824)
+        #expect(mediaRecord["dataURLGuardScope"] as? String == "decoded-data-url-input-only")
+        #expect(mediaRecord["resizeToFitMaxDimension"] as? Int == 2_048)
+        #expect(mediaRecord["resizeModes"] as? [String] == ["resizeToFit"])
+        #expect(mediaRecord["originalMode"] as? String == "not_resized")
+        #expect(mediaRecord["qualification"] as? String == "qualified")
+
+        let privatePathRequest = try object(codec.turnStartRequest(
+            id: "request:private-image",
+            threadID: "thread",
+            cwd: "/private/runtime",
+            context: [],
+            userText: "private synthetic path",
+            images: [.init(path: "/private/fixture/synthetic-image.png")]
+        ))
+        let privateInput = try #require(
+            (privatePathRequest["params"] as? [String: Any])?["input"]
+                as? [[String: Any]]
+        )
+        #expect(privateInput[1]["path"] as? String == "/private/fixture/synthetic-image.png")
+        #expect(throws: CodexTypedProtocolError.invalidField) {
+            _ = try codec.turnStartRequest(
+                id: "request:relative-image",
+                threadID: "thread",
+                cwd: "/private/runtime",
+                context: [],
+                userText: "relative synthetic path",
+                images: [.init(path: "relative/image.png")]
+            )
+        }
+    }
+
+    @Test
+    func rejectsMoreThanOneImageAtMillerBoundary() throws {
+        #expect(CodexTypedProtocol.maximumImageInputs == 1)
+        #expect(throws: CodexTypedProtocolError.tooManyItems) {
+            _ = try codec.turnStartRequest(
+                id: "request:two-images",
+                threadID: "thread",
+                cwd: "/private/runtime",
+                context: [],
+                userText: "two synthetic images",
+                images: [
+                    .init(path: "/fixture/v013/first.png"),
+                    .init(path: "/fixture/v013/second.png"),
+                ]
+            )
+        }
+    }
+
+    @Test
     func encodesPinnedLocalImageInputRouteAndBound() throws {
         let turn = try object(codec.turnStartRequest(
             id: "request:image-turn",
@@ -162,7 +265,6 @@ struct CodexTypedProtocolTests {
         #expect(input[1]["type"] as? String == "localImage")
         #expect(input[1]["path"] as? String == "/fixture/v013/synthetic-image.png")
         #expect(input[1]["detail"] as? String == "high")
-        #expect(CodexTypedProtocol.upstreamImageInputSanityLimitBytes == 1_073_741_824)
     }
 
     @Test
@@ -500,4 +602,19 @@ struct CodexTypedProtocolTests {
         }
         return result
     }
+}
+
+private func typedFixtureObjects(named name: String) throws -> [[String: Any]] {
+    let url = try #require(Bundle.module.url(
+        forResource: name,
+        withExtension: "jsonl",
+        subdirectory: "Fixtures"
+    ))
+    return try String(contentsOf: url, encoding: .utf8)
+        .split(whereSeparator: \.isNewline)
+        .map { line in
+            try #require(JSONSerialization.jsonObject(
+                with: Data(line.utf8)
+            ) as? [String: Any])
+        }
 }

@@ -8,26 +8,75 @@ struct CodexCapabilityProtocolTests {
     private let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
 
     @Test
-    func decodesPinnedComputerUsePhaseVocabularyAsUnavailableEvidence() throws {
-        let codec = CodexCapabilityProtocol()
-        let phases = ["notStarted", "started", "partial", "completed", "timedOut", "uncertain"]
+    func validatesPinnedComputerUseInventoryEvidence() throws {
+        let records = try fixtureObjects(named: "v013-computer-use-inventory")
+        #expect(records.count == 5)
 
-        for rawPhase in phases {
-            let evidence = try codec.decodeComputerUsePhaseEvidence(
-                frame(["phase": rawPhase])
-            )
-            #expect(evidence.phase.rawValue == rawPhase)
-            #expect(evidence.availability == .unavailableForV013)
-        }
+        let generic = try #require(records.first {
+            $0["record"] as? String == "generic-capability-discovery"
+        })
+        #expect(Set(generic.keys) == ["fixture", "release", "surface", "record", "methods"])
+        #expect(generic["methods"] as? [String] == [
+            "app/list", "app/read", "app/installed", "mcpServerStatus/list",
+            "skills/list",
+        ])
 
-        #expect(throws: CodexCapabilityProtocolError.invalidField) {
-            try codec.decodeComputerUsePhaseEvidence(frame(["phase": "providerFuturePhase"]))
-        }
-        #expect(throws: CodexCapabilityProtocolError.invalidField) {
-            try codec.decodeComputerUsePhaseEvidence(frame([
-                "phase": "started", "unsupported": true,
-            ]))
-        }
+        let feature = try #require(records.first {
+            $0["record"] as? String == "feature-registry"
+        })
+        #expect(Set(feature.keys) == [
+            "fixture", "release", "surface", "record", "method", "feature",
+            "signal", "boundedInvocation",
+        ])
+        #expect(feature["method"] as? String == "experimentalFeature/list")
+        #expect(feature["feature"] as? String == "computer_use")
+        #expect(feature["signal"] as? String == "configuration")
+        #expect(feature["boundedInvocation"] as? String == "not_proven")
+
+        let requirements = try #require(records.first {
+            $0["record"] as? String == "config-requirements"
+        })
+        #expect(Set(requirements.keys) == [
+            "fixture", "release", "surface", "record", "method", "field",
+            "signal", "boundedInvocation",
+        ])
+        #expect(requirements["method"] as? String == "configRequirements/read")
+        #expect(requirements["field"] as? String == "computerUse")
+        #expect(requirements["signal"] as? String == "admission")
+        #expect(requirements["boundedInvocation"] as? String == "not_proven")
+
+        let finding = try #require(records.first {
+            $0["record"] as? String == "state-admission"
+        })
+        #expect(Set(finding.keys) == [
+            "fixture", "release", "surface", "record", "installed", "enabled",
+            "admitted", "boundedInvocation", "result",
+        ])
+        let result = try #require(finding["result"] as? String)
+        #expect(result == "COMPUTER_USE_UNAVAILABLE_FOR_V013")
+        #expect(CodexCapabilityProtocol.computerUseAvailability.rawValue == result)
+        #expect(finding["boundedInvocation"] as? String == "not_proven")
+
+        let contextual = try #require(records.first {
+            $0["record"] as? String == "documented-surface"
+        })
+        #expect(Set(contextual.keys) == [
+            "fixture", "release", "surface", "record", "authority", "invocation",
+        ])
+        #expect(contextual["authority"] as? String == "contextual-only")
+        #expect(contextual["invocation"] as? String == "not_proven")
+    }
+
+    @Test
+    func validatesComputerUsePhaseFixtureContainsOnlyUnavailableFinding() throws {
+        let records = try fixtureObjects(named: "v013-computer-use-phases")
+        #expect(records.count == 1)
+        let record = try #require(records.first)
+        #expect(Set(record.keys) == ["fixture", "release", "record", "observed", "result"])
+        #expect(record["record"] as? String == "bounded-invocation")
+        #expect(record["observed"] as? Bool == false)
+        #expect(record["phase"] == nil)
+        #expect(record["result"] as? String == "COMPUTER_USE_UNAVAILABLE_FOR_V013")
     }
 
     @Test
@@ -811,4 +860,19 @@ private func frame(_ value: [String: Any]) throws -> Data {
 
 private func object(_ data: Data) throws -> [String: Any] {
     try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+}
+
+private func fixtureObjects(named name: String) throws -> [[String: Any]] {
+    let url = try #require(Bundle.module.url(
+        forResource: name,
+        withExtension: "jsonl",
+        subdirectory: "Fixtures"
+    ))
+    return try String(contentsOf: url, encoding: .utf8)
+        .split(whereSeparator: \.isNewline)
+        .map { line in
+            try #require(JSONSerialization.jsonObject(
+                with: Data(line.utf8)
+            ) as? [String: Any])
+        }
 }

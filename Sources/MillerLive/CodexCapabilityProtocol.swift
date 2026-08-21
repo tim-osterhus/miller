@@ -63,28 +63,6 @@ public enum CodexComputerUseAvailability: String, Equatable, Sendable {
     case unavailableForV013 = "COMPUTER_USE_UNAVAILABLE_FOR_V013"
 }
 
-public enum CodexComputerUsePhase: String, Equatable, Sendable {
-    case notStarted
-    case started
-    case partial
-    case completed
-    case timedOut
-    case uncertain
-}
-
-public struct CodexComputerUsePhaseEvidence: Equatable, Sendable {
-    public let phase: CodexComputerUsePhase
-    public let availability: CodexComputerUseAvailability
-
-    public init(
-        phase: CodexComputerUsePhase,
-        availability: CodexComputerUseAvailability
-    ) {
-        self.phase = phase
-        self.availability = availability
-    }
-}
-
 public enum CodexCapabilityActivityVisibility: String, Equatable, Sendable {
     case opaqueProviderActivity = "opaque_provider_activity"
 }
@@ -158,19 +136,6 @@ public struct CodexCapabilityProtocol: Sendable {
         self.maximumIdentifierBytes = maximumIdentifierBytes
         self.maximumTextBytes = maximumTextBytes
         self.maximumItems = maximumItems
-    }
-
-    public func decodeComputerUsePhaseEvidence(
-        _ data: Data
-    ) throws -> CodexComputerUsePhaseEvidence {
-        let root = try decodedObject(data)
-        guard Set(root.keys) == Set(["phase"]) else {
-            throw CodexCapabilityProtocolError.invalidField
-        }
-        guard let phase = CodexComputerUsePhase(rawValue: try text(root, "phase")) else {
-            throw CodexCapabilityProtocolError.invalidField
-        }
-        return .init(phase: phase, availability: Self.computerUseAvailability)
     }
 
     public func appsListRequest(

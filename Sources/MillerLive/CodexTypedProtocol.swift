@@ -145,7 +145,7 @@ public enum CodexTypedMessage: Equatable, Sendable {
 
 public struct CodexTypedProtocol: Sendable {
     public static let permissionProfileID = "miller-typed-read-only"
-    public static let upstreamImageInputSanityLimitBytes = 1_073_741_824
+    static let maximumImageInputs = 1
     public static let permissionProfileArguments = [
         "-c", "default_permissions=\"\(permissionProfileID)\"",
         "-c", "permissions.\(permissionProfileID).description=\"Miller isolated typed turn\"",
@@ -252,7 +252,9 @@ public struct CodexTypedProtocol: Sendable {
             try validateAbsolutePath(skill.path)
             return ["type": "skill", "name": skill.name, "path": skill.path]
         }
-        guard images.count <= 1 else { throw CodexTypedProtocolError.tooManyItems }
+        guard images.count <= Self.maximumImageInputs else {
+            throw CodexTypedProtocolError.tooManyItems
+        }
         let imageInputs: [[String: Any]] = try images.map { image in
             try validateAbsolutePath(image.path)
             var input: [String: Any] = [
