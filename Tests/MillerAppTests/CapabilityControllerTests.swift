@@ -1741,6 +1741,47 @@ struct CapabilityControllerTests {
     }
 
     @Test
+    func millerSystemProviderApprovalUsesExactOriginLabel() async throws {
+        let fixture = try makeFixture(policy: .fullyTrusted, readOnly: false)
+        await fixture.controller.start()
+        let capabilityID = MillerSystemCapability.screenObserve.capabilityID
+        let descriptor = try CapabilityDescriptor(
+            id: capabilityID,
+            source: .millerSystem,
+            serverID: "system",
+            toolName: "screen_observe",
+            displayName: "Observe screen",
+            summary: "Observe the active window.",
+            inputSchemaJSON: Data("{}".utf8),
+            readOnlyHint: true,
+            providerProfileIDs: [fixture.profileID],
+            isAvailable: true,
+            visibility: .providerManaged
+        )
+        fixture.controller.replaceProviderCatalog(
+            try CapabilityCatalogSnapshot([descriptor])
+        )
+        try fixture.controller.admitTypedAssociation(
+            .typed(
+                conversationID: ConversationID(),
+                turnID: TurnID(),
+                generation: 1
+            ),
+            providerProfileID: fixture.profileID
+        )
+
+        let request = try providerApprovalRequest(capabilityID: capabilityID)
+        let approval = Task { @MainActor in
+            await fixture.controller.resolveProviderApproval(request)
+        }
+        let presentation = try await waitForApproval(fixture.controller)
+
+        #expect(presentation.origin == "Miller system")
+        fixture.controller.resolveApproval(.decline)
+        #expect(await approval.value == .decline)
+    }
+
+    @Test
     func providerTerminalAuditFailureRemainsFencedUntilRecovery() async throws {
         let audit = CapabilityAuditProbe(terminalFailures: 1)
         let fixture = try makeFixture(

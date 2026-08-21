@@ -231,6 +231,7 @@ struct CapabilityActivityRow: Identifiable, Equatable, Sendable {
         case .declined: "Declined"
         case .cancelled: "Cancelled"
         case .timedOut: "Timed out"
+        case .uncertain: "Uncertain"
         }
     }
 
@@ -2739,6 +2740,7 @@ final class CapabilityController: ObservableObject {
         case .millerMCP: "Miller MCP"
         case .codexAccount: "Codex account"
         case .providerNative: "Provider"
+        case .millerSystem: "Miller system"
         }
     }
 

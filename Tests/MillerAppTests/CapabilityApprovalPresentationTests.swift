@@ -45,6 +45,19 @@ struct CapabilityApprovalPresentationTests {
         ])
     }
 
+    @Test
+    func uncertainActivityRowsUseExactStatusLabel() {
+        let row = CapabilityActivityRow(
+            callID: CapabilityCallID(),
+            origin: "Miller MCP",
+            server: "Mail",
+            tool: "Send",
+            outcome: .uncertain
+        )
+
+        #expect(row.status == "Uncertain")
+    }
+
     @Test(arguments: CapabilityTerminalOutcome.allCasesForPresentation)
     func activityRowsExposeOnlySanitizedFixedOutcomes(
         outcome: CapabilityTerminalOutcome
@@ -57,7 +70,7 @@ struct CapabilityApprovalPresentationTests {
             outcome: outcome
         )
 
-        #expect(["Succeeded", "Failed", "Declined", "Cancelled", "Timed out"]
+        #expect(["Succeeded", "Failed", "Declined", "Cancelled", "Timed out", "Uncertain"]
             .contains(row.status))
         #expect(!row.displayText.contains("argument"))
         #expect(!row.displayText.contains("result"))
@@ -67,6 +80,6 @@ struct CapabilityApprovalPresentationTests {
 
 private extension CapabilityTerminalOutcome {
     static let allCasesForPresentation: [Self] = [
-        .succeeded, .failed, .declined, .cancelled, .timedOut,
+        .succeeded, .failed, .declined, .cancelled, .timedOut, .uncertain,
     ]
 }
