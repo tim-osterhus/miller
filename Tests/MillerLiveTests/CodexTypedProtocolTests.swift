@@ -145,6 +145,27 @@ struct CodexTypedProtocolTests {
     )
 
     @Test
+    func encodesPinnedLocalImageInputRouteAndBound() throws {
+        let turn = try object(codec.turnStartRequest(
+            id: "request:image-turn",
+            threadID: "thread",
+            cwd: "/private/runtime",
+            context: [],
+            userText: "Describe the synthetic fixture image.",
+            images: [
+                .init(path: "/fixture/v013/synthetic-image.png", detail: .high),
+            ]
+        ))
+        let params = try #require(turn["params"] as? [String: Any])
+        let input = try #require(params["input"] as? [[String: Any]])
+        #expect(input.count == 2)
+        #expect(input[1]["type"] as? String == "localImage")
+        #expect(input[1]["path"] as? String == "/fixture/v013/synthetic-image.png")
+        #expect(input[1]["detail"] as? String == "high")
+        #expect(CodexTypedProtocol.upstreamImageInputSanityLimitBytes == 1_073_741_824)
+    }
+
+    @Test
     func encodesStableEphemeralThreadAndTurnRequests() throws {
         #expect(CodexTypedProtocol.permissionProfileArguments.contains(
             "default_permissions=\"miller-typed-read-only\""

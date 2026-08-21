@@ -49,6 +49,23 @@ public struct CodexTypedSkillInput: Equatable, Sendable {
     }
 }
 
+public enum CodexTypedImageDetail: String, Equatable, Sendable {
+    case auto
+    case low
+    case high
+    case original
+}
+
+public struct CodexTypedImageInput: Equatable, Sendable {
+    public let path: String
+    public let detail: CodexTypedImageDetail?
+
+    public init(path: String, detail: CodexTypedImageDetail? = nil) {
+        self.path = path
+        self.detail = detail
+    }
+}
+
 public enum CodexTypedTurnOutcome: String, Equatable, Sendable {
     case completed
     case interrupted
@@ -128,6 +145,7 @@ public enum CodexTypedMessage: Equatable, Sendable {
 
 public struct CodexTypedProtocol: Sendable {
     public static let permissionProfileID = "miller-typed-read-only"
+    public static let upstreamImageInputSanityLimitBytes = 1_073_741_824
     public static let permissionProfileArguments = [
         "-c", "default_permissions=\"\(permissionProfileID)\"",
         "-c", "permissions.\(permissionProfileID).description=\"Miller isolated typed turn\"",
@@ -208,7 +226,8 @@ public struct CodexTypedProtocol: Sendable {
         cwd: String,
         context: [CodexTypedContextMessage],
         userText: String,
-        skills: [CodexTypedSkillInput] = []
+        skills: [CodexTypedSkillInput] = [],
+        images: [CodexTypedImageInput] = []
     ) throws -> Data {
         try validateIdentifier(id)
         try validateIdentifier(threadID)
@@ -233,12 +252,25 @@ public struct CodexTypedProtocol: Sendable {
             try validateAbsolutePath(skill.path)
             return ["type": "skill", "name": skill.name, "path": skill.path]
         }
+        guard images.count <= 1 else { throw CodexTypedProtocolError.tooManyItems }
+        let imageInputs: [[String: Any]] = try images.map { image in
+            try validateAbsolutePath(image.path)
+            var input: [String: Any] = [
+                "type": "localImage",
+                "path": image.path,
+            ]
+            if let detail = image.detail {
+                input["detail"] = detail.rawValue
+            }
+            return input
+        }
         return try encode([
             "method": "turn/start",
             "id": id,
             "params": [
                 "threadId": threadID,
-                "input": [["type": "text", "text": prompt]] + skillInputs,
+                "input": [["type": "text", "text": prompt]]
+                    + imageInputs + skillInputs,
                 "cwd": cwd,
                 "approvalPolicy": "never",
             ],

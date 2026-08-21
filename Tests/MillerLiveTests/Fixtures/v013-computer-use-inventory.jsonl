@@ -1,0 +1,3 @@
+{"fixture":"v013-codex-screen-control","release":"0.146.0","surface":"app-server","record":"generic-capability-discovery","methods":["app/list","app/read","app/installed","mcpServerStatus/list","skills/list"],"computerUseMethod":null}
+{"fixture":"v013-codex-screen-control","release":"0.146.0","surface":"computer-use","record":"state-admission","installed":"not_proven","enabled":"not_proven","admitted":"not_proven","boundedInvocation":"unavailable","result":"COMPUTER_USE_UNAVAILABLE_FOR_V013"}
+{"fixture":"v013-codex-screen-control","release":"0.146.0","surface":"desktop-plugin","record":"documented-surface","plugin":"Computer Use","mcpServer":"Computer-use","skill":"Computer Use","appServerContract":"not_present_in_pinned_schema"}

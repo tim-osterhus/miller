@@ -8,6 +8,29 @@ struct CodexCapabilityProtocolTests {
     private let profileID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
 
     @Test
+    func decodesPinnedComputerUsePhaseVocabularyAsUnavailableEvidence() throws {
+        let codec = CodexCapabilityProtocol()
+        let phases = ["notStarted", "started", "partial", "completed", "timedOut", "uncertain"]
+
+        for rawPhase in phases {
+            let evidence = try codec.decodeComputerUsePhaseEvidence(
+                frame(["phase": rawPhase])
+            )
+            #expect(evidence.phase.rawValue == rawPhase)
+            #expect(evidence.availability == .unavailableForV013)
+        }
+
+        #expect(throws: CodexCapabilityProtocolError.invalidField) {
+            try codec.decodeComputerUsePhaseEvidence(frame(["phase": "providerFuturePhase"]))
+        }
+        #expect(throws: CodexCapabilityProtocolError.invalidField) {
+            try codec.decodeComputerUsePhaseEvidence(frame([
+                "phase": "started", "unsupported": true,
+            ]))
+        }
+    }
+
+    @Test
     func encodesBoundedInventoryRequests() throws {
         let codec = CodexCapabilityProtocol(maximumFrameBytes: 4_096)
 
