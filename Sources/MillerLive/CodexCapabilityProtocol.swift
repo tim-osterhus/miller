@@ -59,10 +59,6 @@ public enum CodexCapabilityActivityPhase: String, Equatable, Sendable {
     case terminal
 }
 
-public enum CodexComputerUseAvailability: String, Equatable, Sendable {
-    case unavailableForV013 = "COMPUTER_USE_UNAVAILABLE_FOR_V013"
-}
-
 public enum CodexCapabilityActivityVisibility: String, Equatable, Sendable {
     case opaqueProviderActivity = "opaque_provider_activity"
 }
@@ -115,8 +111,6 @@ public typealias CodexProviderApprovalDetailsResolver = @Sendable (
 
 public struct CodexCapabilityProtocol: Sendable {
     public static let reservedBridgeServerID = "miller-capability-bridge"
-    public static let computerUseAvailability: CodexComputerUseAvailability =
-        .unavailableForV013
 
     public let maximumFrameBytes: Int
     public let maximumRawItemBytes: Int

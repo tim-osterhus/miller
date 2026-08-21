@@ -11,11 +11,16 @@ struct CodexCapabilityProtocolTests {
     func validatesPinnedComputerUseInventoryEvidence() throws {
         let records = try fixtureObjects(named: "v013-computer-use-inventory")
         #expect(records.count == 5)
+        for record in records {
+            #expect(record["fixture"] as? String == "v013-codex-screen-control")
+            #expect(record["release"] as? String == "0.146.0")
+        }
 
         let generic = try #require(records.first {
             $0["record"] as? String == "generic-capability-discovery"
         })
         #expect(Set(generic.keys) == ["fixture", "release", "surface", "record", "methods"])
+        #expect(generic["surface"] as? String == "app-server")
         #expect(generic["methods"] as? [String] == [
             "app/list", "app/read", "app/installed", "mcpServerStatus/list",
             "skills/list",
@@ -28,6 +33,7 @@ struct CodexCapabilityProtocolTests {
             "fixture", "release", "surface", "record", "method", "feature",
             "signal", "boundedInvocation",
         ])
+        #expect(feature["surface"] as? String == "app-server")
         #expect(feature["method"] as? String == "experimentalFeature/list")
         #expect(feature["feature"] as? String == "computer_use")
         #expect(feature["signal"] as? String == "configuration")
@@ -40,6 +46,7 @@ struct CodexCapabilityProtocolTests {
             "fixture", "release", "surface", "record", "method", "field",
             "signal", "boundedInvocation",
         ])
+        #expect(requirements["surface"] as? String == "app-server")
         #expect(requirements["method"] as? String == "configRequirements/read")
         #expect(requirements["field"] as? String == "computerUse")
         #expect(requirements["signal"] as? String == "admission")
@@ -52,10 +59,13 @@ struct CodexCapabilityProtocolTests {
             "fixture", "release", "surface", "record", "installed", "enabled",
             "admitted", "boundedInvocation", "result",
         ])
+        #expect(finding["surface"] as? String == "computer-use")
+        #expect(finding["installed"] as? String == "not_proven")
+        #expect(finding["enabled"] as? String == "not_proven")
+        #expect(finding["admitted"] as? String == "not_proven")
+        #expect(finding["boundedInvocation"] as? String == "not_proven")
         let result = try #require(finding["result"] as? String)
         #expect(result == "COMPUTER_USE_UNAVAILABLE_FOR_V013")
-        #expect(CodexCapabilityProtocol.computerUseAvailability.rawValue == result)
-        #expect(finding["boundedInvocation"] as? String == "not_proven")
 
         let contextual = try #require(records.first {
             $0["record"] as? String == "documented-surface"
@@ -63,6 +73,7 @@ struct CodexCapabilityProtocolTests {
         #expect(Set(contextual.keys) == [
             "fixture", "release", "surface", "record", "authority", "invocation",
         ])
+        #expect(contextual["surface"] as? String == "desktop-plugin")
         #expect(contextual["authority"] as? String == "contextual-only")
         #expect(contextual["invocation"] as? String == "not_proven")
     }
