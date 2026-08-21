@@ -528,6 +528,117 @@ enum SQLiteMigrations {
             DROP TABLE miller_preferences_v6;
             """
         ),
+        SQLiteMigration(
+            version: 8,
+            sql: """
+            ALTER TABLE capability_audit RENAME TO capability_audit_v7;
+            DROP INDEX IF EXISTS capability_audit_started_at;
+
+            CREATE TABLE capability_audit (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT
+                    REFERENCES conversations(id) ON DELETE CASCADE,
+                turn_id TEXT REFERENCES turns(id) ON DELETE CASCADE,
+                voice_session_id TEXT
+                    REFERENCES voice_sessions(id) ON DELETE CASCADE,
+                source TEXT NOT NULL CHECK (
+                    source IN ('codex_account', 'miller_mcp', 'provider_native')
+                ),
+                source_server_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                terminal_at TEXT,
+                effective_policy TEXT NOT NULL CHECK (
+                    effective_policy IN (
+                        'read_only_automatic',
+                        'ask_before_changes',
+                        'fully_trusted'
+                    )
+                ),
+                approval_requested INTEGER NOT NULL CHECK (
+                    approval_requested IN (0, 1)
+                ),
+                approval_decision TEXT CHECK (
+                    approval_decision IS NULL
+                    OR approval_decision IN ('allow_once', 'decline')
+                ),
+                terminal_outcome TEXT CHECK (
+                    terminal_outcome IS NULL OR terminal_outcome IN (
+                        'succeeded', 'failed', 'declined', 'cancelled',
+                        'timed_out', 'uncertain'
+                    )
+                ),
+                sanitized_summary TEXT CHECK (
+                    sanitized_summary IS NULL OR (
+                        length(CAST(sanitized_summary AS BLOB)) <= 1024
+                        AND sanitized_summary IN (
+                            'List calendar events.',
+                            'Create a calendar event.',
+                            'Search email metadata.',
+                            'Read local files.',
+                            'Change local files.',
+                            'Run a local command.',
+                            'Capability request declined by the user.',
+                            'Capability request refused by policy.',
+                            'Provider activity recorded without result details.'
+                        )
+                    )
+                ),
+                visibility TEXT NOT NULL CHECK (
+                    visibility IN ('complete', 'opaque_provider_activity')
+                ),
+                CHECK (
+                    (terminal_at IS NULL AND terminal_outcome IS NULL)
+                    OR (terminal_at IS NOT NULL AND terminal_outcome IS NOT NULL)
+                ),
+                CHECK (
+                    conversation_id IS NOT NULL
+                    OR turn_id IS NOT NULL
+                    OR voice_session_id IS NOT NULL
+                ),
+                CHECK (turn_id IS NULL OR voice_session_id IS NULL),
+                CHECK (terminal_at IS NULL OR terminal_at >= started_at),
+                CHECK (
+                    (CASE
+                        WHEN terminal_outcome IS NULL THEN
+                            approval_decision IS NULL
+                        WHEN approval_requested = 0 THEN
+                            approval_decision IS NULL
+                        WHEN terminal_outcome IN ('succeeded', 'failed') THEN
+                            approval_decision IS NOT NULL
+                            AND approval_decision = 'allow_once'
+                        WHEN terminal_outcome = 'declined' THEN
+                            approval_decision IS NOT NULL
+                            AND approval_decision = 'decline'
+                        WHEN terminal_outcome IN (
+                            'cancelled', 'timed_out', 'uncertain'
+                        ) THEN
+                            approval_decision IS NULL
+                            OR approval_decision = 'allow_once'
+                        ELSE 0
+                    END) IS TRUE
+                )
+            );
+
+            INSERT INTO capability_audit(
+                id, conversation_id, turn_id, voice_session_id, source,
+                source_server_id, tool_name, started_at, terminal_at,
+                effective_policy, approval_requested, approval_decision,
+                terminal_outcome, sanitized_summary, visibility
+            )
+            SELECT
+                id, conversation_id, turn_id, voice_session_id, source,
+                source_server_id, tool_name, started_at, terminal_at,
+                effective_policy, approval_requested, approval_decision,
+                terminal_outcome, sanitized_summary, visibility
+            FROM capability_audit_v7;
+
+            DROP TABLE capability_audit_v7;
+
+            CREATE INDEX capability_audit_started_at
+                ON capability_audit(started_at);
+            """
+        ),
     ]
 
     static let latestVersion = all.last?.version ?? 0

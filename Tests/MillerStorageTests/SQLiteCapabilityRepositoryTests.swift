@@ -682,6 +682,112 @@ struct SQLiteCapabilityRepositoryTests {
     }
 
     @Test
+    func typedUncertainAuditAllowsNilAndAllowOnceButRejectsDecline() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLiteCapabilityRepository(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(
+            conversationID,
+            database: SQLiteDatabase(path: fixture.path)
+        )
+
+        let nilDecisionID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: nilDecisionID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil,
+                approvalRequested: true
+            )
+        )
+        try await repository.terminalizeAudit(
+            id: nilDecisionID,
+            outcome: .uncertain,
+            approvalDecision: nil,
+            terminalAt: Date(timeIntervalSince1970: 101)
+        )
+
+        let allowOnceID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: allowOnceID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil,
+                approvalRequested: true
+            )
+        )
+        try await repository.terminalizeAudit(
+            id: allowOnceID,
+            outcome: .uncertain,
+            approvalDecision: .allowOnce,
+            terminalAt: Date(timeIntervalSince1970: 101)
+        )
+
+        let declineID = CapabilityCallID()
+        try await repository.beginAudit(
+            try makeAudit(
+                id: declineID,
+                conversationID: conversationID,
+                turnID: nil,
+                voiceSessionID: nil,
+                approvalRequested: true
+            )
+        )
+        await #expect(throws: CapabilityStorageError.invalidAudit) {
+            try await repository.terminalizeAudit(
+                id: declineID,
+                outcome: .uncertain,
+                approvalDecision: .decline,
+                terminalAt: Date(timeIntervalSince1970: 101)
+            )
+        }
+
+        #expect(try await repository.audit(id: nilDecisionID)?.terminalOutcome == .uncertain)
+        #expect(try await repository.audit(id: nilDecisionID)?.approvalDecision == nil)
+        #expect(try await repository.audit(id: allowOnceID)?.terminalOutcome == .uncertain)
+        #expect(try await repository.audit(id: allowOnceID)?.approvalDecision == .allowOnce)
+        #expect(try await repository.audit(id: declineID)?.terminalOutcome == nil)
+    }
+
+    @Test
+    func rawSchemaAllowsUncertainWithNilOrAllowOnceButRejectsDecline() throws {
+        let fixture = try TestDatabase(named: #function)
+        let database = try SQLiteDatabase(path: fixture.path)
+        let conversationID = ConversationID()
+        try insertConversation(conversationID, database: database)
+
+        try insertRawTerminalAudit(
+            id: UUID(),
+            conversationID: conversationID,
+            approvalRequested: 1,
+            approvalDecision: nil,
+            terminalOutcome: "uncertain",
+            database: database
+        )
+        try insertRawTerminalAudit(
+            id: UUID(),
+            conversationID: conversationID,
+            approvalRequested: 1,
+            approvalDecision: "allow_once",
+            terminalOutcome: "uncertain",
+            database: database
+        )
+        #expect(throws: SQLiteError.constraintFailed) {
+            try insertRawTerminalAudit(
+                id: UUID(),
+                conversationID: conversationID,
+                approvalRequested: 1,
+                approvalDecision: "decline",
+                terminalOutcome: "uncertain",
+                database: database
+            )
+        }
+        #expect(try database.scalarInt("SELECT COUNT(*) FROM capability_audit") == 2)
+    }
+
+    @Test
     func typedAuditNormalizesParentAndRejectsMismatchWithoutPartialWrite() async throws {
         let fixture = try TestDatabase(named: #function)
         let repository = try SQLiteCapabilityRepository(path: fixture.path)
@@ -1253,7 +1359,8 @@ private func makeAudit(
     id: CapabilityCallID,
     conversationID: ConversationID?,
     turnID: TurnID?,
-    voiceSessionID: UUID?
+    voiceSessionID: UUID?,
+    approvalRequested: Bool = false
 ) throws -> CapabilityAuditRecord {
     CapabilityAuditRecord(
         id: id,
@@ -1266,7 +1373,7 @@ private func makeAudit(
         startedAt: Date(timeIntervalSince1970: 100),
         terminalAt: nil,
         effectivePolicy: .askBeforeChanges,
-        approvalRequested: false,
+        approvalRequested: approvalRequested,
         approvalDecision: nil,
         terminalOutcome: nil,
         summary: SanitizedCapabilitySummary(.readLocalFiles),

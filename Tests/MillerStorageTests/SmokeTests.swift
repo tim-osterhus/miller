@@ -211,7 +211,7 @@ struct MillerStorageTests {
     func testSchemaAllowsExactlyOneSelectedProviderProfile() throws {
         let fixture = try TestDatabase(named: #function)
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 7)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 8)
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"
@@ -251,6 +251,12 @@ struct MillerStorageTests {
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 7"
+            ),
+            1
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8"
             ),
             1
         )
@@ -365,7 +371,7 @@ struct MillerStorageTests {
             try database.execute("PRAGMA user_version = 99")
         }
         XCTAssertThrowsError(try SQLiteConversationRepository(path: newer.path)) {
-            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 7))
+            XCTAssertEqual($0 as? SQLiteError, .newerSchema(found: 99, supported: 8))
         }
     }
 
@@ -414,10 +420,10 @@ struct MillerStorageTests {
         XCTAssertEqual(process.terminationStatus, 0)
 
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 7)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 8)
         XCTAssertEqual(
             try database.scalarInt("SELECT MAX(version) FROM schema_migrations"),
-            7
+            8
         )
         XCTAssertEqual(try database.scalarInt("PRAGMA foreign_keys"), 1)
         XCTAssertEqual(try database.scalarText("PRAGMA quick_check"), "ok")
@@ -514,7 +520,7 @@ struct MillerStorageTests {
             for _ in 0..<2 {
                 group.addTask {
                     let database = try SQLiteDatabase(path: fixture.path)
-                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 7)
+                    XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 8)
                 }
             }
             try await group.waitForAll()
@@ -573,7 +579,7 @@ struct MillerStorageTests {
         XCTAssertEqual(process.terminationStatus, 0)
 
         let database = try SQLiteDatabase(path: fixture.path)
-        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 7)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 8)
         XCTAssertEqual(
             try database.query(
                 """
@@ -596,6 +602,126 @@ struct MillerStorageTests {
         XCTAssertEqual(
             try database.scalarInt(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+            ),
+            1
+        )
+    }
+
+    @Test
+    func testVersionSevenCapabilityAuditRowsMigrateToUncertainOutcomeSupport() throws {
+        let fixture = try TestDatabase(named: #function)
+        let conversationID = UUID().uuidString.lowercased()
+        let auditID = UUID().uuidString.lowercased()
+        let versionSevenSQL = SQLiteMigrations.all
+            .filter { $0.version <= 7 }
+            .map(\.sql)
+            .joined(separator: "\n")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            fixture.path,
+            """
+            PRAGMA foreign_keys = ON;
+            BEGIN;
+            \(versionSevenSQL)
+            INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, '\(now)'), (2, '\(now)'), (3, '\(now)'),
+                       (4, '\(now)'), (5, '\(now)'), (6, '\(now)'),
+                       (7, '\(now)');
+            INSERT INTO conversations
+                (id, title, state, created_at, updated_at, archived_at)
+                VALUES ('\(conversationID)', 'Existing', 'active',
+                        '\(now)', '\(now)', NULL);
+            INSERT INTO capability_audit
+                (id, conversation_id, turn_id, voice_session_id, source,
+                 source_server_id, tool_name, started_at, terminal_at,
+                 effective_policy, approval_requested, approval_decision,
+                 terminal_outcome, sanitized_summary, visibility)
+                VALUES ('\(auditID)', '\(conversationID)', NULL, NULL,
+                        'miller_mcp', 'local-tools', 'search',
+                        '\(now)', '\(now)', 'ask_before_changes', 1,
+                        'allow_once', 'succeeded', 'Read local files.',
+                        'complete');
+            PRAGMA user_version = 7;
+            COMMIT;
+            """,
+        ]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let database = try SQLiteDatabase(path: fixture.path)
+        XCTAssertEqual(try database.scalarInt("PRAGMA user_version"), 8)
+        XCTAssertEqual(
+            try database.scalarInt("SELECT MAX(version) FROM schema_migrations"),
+            8
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8"
+            ),
+            1
+        )
+        XCTAssertEqual(try database.scalarInt("PRAGMA foreign_keys"), 1)
+        XCTAssertEqual(try database.scalarText("PRAGMA quick_check"), "ok")
+        XCTAssertEqual(
+            try database.query(
+                """
+                SELECT id, conversation_id, turn_id, voice_session_id, source,
+                       source_server_id, tool_name, started_at, terminal_at,
+                       effective_policy, approval_requested, approval_decision,
+                       terminal_outcome, sanitized_summary, visibility
+                FROM capability_audit
+                """
+            ),
+            [[
+                .text(auditID), .text(conversationID), .null, .null,
+                .text("miller_mcp"), .text("local-tools"), .text("search"),
+                .text(now), .text(now), .text("ask_before_changes"),
+                .integer(1), .text("allow_once"), .text("succeeded"),
+                .text("Read local files."), .text("complete"),
+            ]]
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'capability_audit_started_at'"
+            ),
+            1
+        )
+        let foreignKeys = try database.query(
+            "PRAGMA foreign_key_list(capability_audit)"
+        )
+        for (table, column) in [
+            ("conversations", "conversation_id"),
+            ("turns", "turn_id"),
+            ("voice_sessions", "voice_session_id"),
+        ] {
+            XCTAssertEqual(foreignKeys.contains { row in
+                row.contains(.text(table))
+                    && row.contains(.text(column))
+                    && row.contains(.text("CASCADE"))
+            }, true)
+        }
+
+        try database.execute(
+            """
+            INSERT INTO capability_audit
+                (id, conversation_id, turn_id, voice_session_id, source,
+                 source_server_id, tool_name, started_at, terminal_at,
+                 effective_policy, approval_requested, approval_decision,
+                 terminal_outcome, sanitized_summary, visibility)
+            VALUES (?, ?, NULL, NULL, 'miller_mcp', 'local-tools', 'observe',
+                    ?, ?, 'ask_before_changes', 1, NULL, 'uncertain', NULL,
+                    'complete')
+            """,
+            bindings: [
+                .text(UUID().uuidString.lowercased()), .text(conversationID),
+                .text(now), .text("2026-07-30T00:00:01.000Z"),
+            ]
+        )
+        XCTAssertEqual(
+            try database.scalarInt(
+                "SELECT COUNT(*) FROM capability_audit WHERE terminal_outcome = 'uncertain'"
             ),
             1
         )

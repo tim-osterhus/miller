@@ -1840,7 +1840,7 @@ public actor SQLiteCapabilityRepository {
             return approvalRequested ? decision == .decline : decision == nil
         case .succeeded, .failed:
             return !approvalRequested || decision == .allowOnce
-        case .cancelled, .timedOut:
+        case .cancelled, .timedOut, .uncertain:
             return decision != .decline
         }
     }
