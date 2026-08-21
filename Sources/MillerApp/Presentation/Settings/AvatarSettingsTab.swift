@@ -27,6 +27,7 @@ struct AvatarSettingsTab: View {
                 }
                 profileSection
                 if let profile = model.selectedProfile {
+                    paneWidthSection(profile)
                     motionLibrarySection(profile)
                     roleBindingsSection(profile)
                 }
@@ -168,6 +169,34 @@ struct AvatarSettingsTab: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func paneWidthSection(_ profile: AvatarProfileSummary) -> some View {
+        GroupBox("Avatar surface") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Width")
+                    Slider(
+                        value: Binding(
+                            get: { model.paneWidth(for: profile.id) },
+                            set: { value in
+                                Task { _ = await model.setPaneWidth(value, for: profile.id) }
+                            }
+                        ),
+                        in: AvatarPaneWidth.minimum...AvatarPaneWidth.maximum,
+                        step: 10
+                    )
+                    Text("\(Int(model.paneWidth(for: profile.id))) pt")
+                        .monospacedDigit()
+                        .frame(width: 58, alignment: .trailing)
+                }
+                Text("Controls the noninteractive Avatar surface width for this profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)

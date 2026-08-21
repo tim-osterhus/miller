@@ -298,6 +298,116 @@ struct GPTLivePresentationTests {
     }
 
     @Test
+    func controllerKeepsUserTranscriptDeltasInListeningState() async throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let temporaryParent = repository.appendingPathComponent(
+            ".artifacts/user-transcript-deltas-\(UUID().uuidString.lowercased())"
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryParent,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryParent) }
+
+        let fixture = repository.appendingPathComponent(
+            "Tests/MillerLiveTests/Fixtures/fake-codex-app-server.mjs"
+        )
+        let helper = temporaryParent.appendingPathComponent("fake-helper")
+        try Data(
+            "#!/bin/sh\nexec /opt/homebrew/opt/node@22/bin/node \(fixture.path) realtime-user-transcript-deltas\n".utf8
+        ).write(to: helper)
+        #expect(chmod(helper.path, 0o700) == 0)
+
+        let reference = UUID()
+        let profile = try ProviderProfile(
+            kind: .codexOAuth,
+            label: "Codex",
+            baseURL: nil,
+            model: "gpt-5.6-terra",
+            credentialReference: reference,
+            isSelected: true
+        )
+        let envelope = try CredentialEnvelope(
+            providerKind: .codexOAuth,
+            payload: Data(
+                #"{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":null,"accountId":"synthetic-account"}"#.utf8
+            )
+        )
+        let controller = try GPTLiveController(
+            helperURL: helper,
+            temporaryParentURL: temporaryParent,
+            selectedProfile: { profile },
+            credentialLoader: GPTLiveCredentialLoader(load: { _ in envelope }),
+            refreshCredential: {},
+            microphonePermission: { .authorized },
+            makeSession: { client in
+                LiveAudioSession(client: client, peer: PresentationTestPeer())
+            },
+            helperVerifier: acceptingLiveHelperVerifier,
+            spawnedProcessVerifier: { _ in }
+        )
+        let events = LiveVoiceEventCapture()
+        let start = Task {
+            try await controller.dependencies().start { event in
+                await events.append(event)
+            }
+        }
+
+        try await waitUntil(timeout: .seconds(6)) {
+            await events.contains { event in
+                if case .state(.closed) = event { return true }
+                return false
+            }
+        }
+        try await start.value
+
+        let captured = await events.events
+        let firstUserDelta = try #require(
+            captured.firstIndex { event in
+                if case .transcriptDelta(role: .user, text: "hello") = event {
+                    return true
+                }
+                return false
+            }
+        )
+        let firstAssistantDelta = try #require(
+            captured.firstIndex { event in
+                if case .transcriptDelta(role: .assistant, text: "Hello") = event {
+                    return true
+                }
+                return false
+            }
+        )
+        let assistantRespondingIndex = firstAssistantDelta - 1
+        #expect(assistantRespondingIndex > firstUserDelta)
+        #expect(captured[assistantRespondingIndex] == .state(.responding))
+        let statesBeforeUser = captured[..<firstUserDelta].compactMap { event -> LiveVoiceState? in
+            if case let .state(state) = event { return state }
+            return nil
+        }
+        #expect(!statesBeforeUser.contains(.responding))
+        #expect(captured[(firstUserDelta + 1)..<assistantRespondingIndex].contains { event in
+            if case .state(.responding) = event { return true }
+            return false
+        } == false)
+        #expect(captured[..<firstAssistantDelta].contains { event in
+            if case .transcriptDelta(role: .user, text: " Miller") = event { return true }
+            return false
+        })
+        #expect(captured[..<assistantRespondingIndex].contains { event in
+            if case .state(.responding) = event { return true }
+            return false
+        } == false)
+        #expect(captured[assistantRespondingIndex...].contains { event in
+            if case .state(.responding) = event { return true }
+            return false
+        })
+    }
+
+    @Test
     func selectedProviderChangesRefreshVoiceAvailabilityInBothDirections() async {
         let codexID = UUID()
         let deepSeekID = UUID()
@@ -5131,6 +5241,20 @@ private actor PresentationNoAudioCaptureDriver: LiveAudioCaptureDriving {
         _ receive: @escaping @Sendable (Result<Data, Error>) -> Void
     ) async throws { starts += 1 }
     func stop() async {}
+}
+
+private actor LiveVoiceEventCapture {
+    private(set) var events: [LiveVoiceEvent] = []
+
+    func append(_ event: LiveVoiceEvent) {
+        events.append(event)
+    }
+
+    func contains(
+        where predicate: @Sendable (LiveVoiceEvent) -> Bool
+    ) -> Bool {
+        events.contains(where: predicate)
+    }
 }
 
 private let presentationSyntheticOffer = """

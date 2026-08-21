@@ -1025,8 +1025,11 @@ actor GPTLiveController {
         case .started:
             await receive(.state(.listening))
         case let .transcriptDelta(_, role, text):
-            await receive(.state(.responding))
-            await receive(.transcriptDelta(role: role == "user" ? .user : .assistant, text: text))
+            let transcriptRole: LiveTranscriptRole = role == "user" ? .user : .assistant
+            if transcriptRole == .assistant {
+                await receive(.state(.responding))
+            }
+            await receive(.transcriptDelta(role: transcriptRole, text: text))
         case let .transcriptDone(_, role, text):
             await receive(.transcriptDone(role: role == "user" ? .user : .assistant, text: text))
         case .outputAudio:

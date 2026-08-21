@@ -554,6 +554,50 @@ struct OverlayAvatarPresentationTests {
     }
 
     @Test
+    func avatarPaneWidthIsBoundedWithoutChangingMillerContentWidth() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        let controller = OverlayPanelController(
+            model: makeModel(),
+            avatarIntegration: integration
+        )
+
+        controller.setAvatarPaneWidth(340)
+        #expect(controller.avatarPaneWidth == 340)
+        controller.setAvatarPaneWidth(999)
+        #expect(controller.avatarPaneWidth == CGFloat(AvatarPaneWidth.maximum))
+        controller.setAvatarPaneWidth(.nan)
+        #expect(controller.avatarPaneWidth == CGFloat(AvatarPaneWidth.defaultValue))
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually {
+            controller.window?.contentView?.frame.width == 720
+                && factory.records.count == 1
+        }
+
+        let region = try #require(controller.avatarRegion)
+        let content = try #require(controller.millerContentRegion)
+        #expect(region.frame.width == CGFloat(AvatarPaneWidth.defaultValue))
+        #expect(content.frame.width == 520)
+        #expect(region.frame.maxX == content.frame.minX)
+
+        controller.setAvatarPaneWidth(340)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        #expect(controller.window?.contentView?.frame.width == 860)
+        #expect(region.frame.width == 340)
+        #expect(content.frame.width == 520)
+    }
+
+    @Test
     func overlayIsVisibleBeforeStartingAvatarRenderer() async throws {
         let profileID = UUID()
         let integration = AvatarIntegrationController(

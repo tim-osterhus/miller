@@ -35,6 +35,88 @@ struct AvatarSettingsModelTests {
 
     @Test
     @MainActor
+    func loadRestoresProfileLocalPaneWidthAndUsesDefaultWhenMissing() async {
+        let profileID = UUID()
+        let otherProfileID = UUID()
+        let profile = makeProfile(id: profileID, revision: 2)
+        let otherProfile = makeProfile(id: otherProfileID, revision: 2)
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: profileID,
+                reduceMotion: false
+            ),
+            profiles: [profile, otherProfile],
+            paneWidths: [profileID: 340],
+            importMotion: { _, _, _ in
+                .init(profileID: profileID, profileRevision: 3)
+            }
+        ))
+
+        await model.load()
+
+        #expect(model.paneWidth(for: profileID) == 340)
+        #expect(model.selectedPaneWidth == 340)
+        #expect(model.paneWidth(for: otherProfileID) == AvatarPaneWidth.defaultValue)
+    }
+
+    @Test
+    @MainActor
+    func paneWidthMutationClampsInvalidValuesAndPersistsByProfile() async {
+        let profileID = UUID()
+        let profile = makeProfile(id: profileID, revision: 2)
+        let writes = AvatarPaneWidthWriteRecorder()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: profileID,
+                reduceMotion: false
+            ),
+            profiles: [profile],
+            setPaneWidth: { id, width in await writes.record(id: id, width: width) },
+            importMotion: { _, _, _ in
+                .init(profileID: profileID, profileRevision: 3)
+            }
+        ))
+
+        #expect(await model.setPaneWidth(999, for: profileID))
+        #expect(model.paneWidth(for: profileID) == AvatarPaneWidth.maximum)
+        #expect(await model.setPaneWidth(.nan, for: profileID))
+        #expect(model.paneWidth(for: profileID) == AvatarPaneWidth.defaultValue)
+        #expect(await writes.values == [
+            .init(id: profileID, width: AvatarPaneWidth.maximum),
+            .init(id: profileID, width: AvatarPaneWidth.defaultValue),
+        ])
+    }
+
+    @Test
+    @MainActor
+    func authoritativeProfileRefreshPrunesRemovedProfilePaneWidths() async {
+        let retainedID = UUID()
+        let removedID = UUID()
+        let retained = makeProfile(id: retainedID, revision: 2)
+        let replacements = AvatarPaneWidthReplacementRecorder()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: retainedID,
+                reduceMotion: false
+            ),
+            profiles: [retained],
+            paneWidths: [retainedID: 240, removedID: 320],
+            replacePaneWidths: { values in await replacements.record(values) },
+            importMotion: { _, _, _ in
+                .init(profileID: retainedID, profileRevision: 3)
+            }
+        ))
+
+        await model.load()
+        #expect(model.paneWidths == [retainedID: 240])
+        #expect(await replacements.values == [[retainedID: 240]])
+    }
+
+    @Test
+    @MainActor
     func reducedMotionComposesUserAndSystemSettings() {
         #expect(!AvatarSettingsModel.effectiveReducedMotion(
             userReduceMotion: false,
@@ -432,10 +514,14 @@ struct AvatarSettingsModelTests {
     private func dependencies(
         preferences: AvatarPreferences,
         profiles: [AvatarProfileSummary],
+        paneWidths: [UUID: Double] = [:],
         loadPreferences: (@Sendable () async throws -> AvatarPreferences)? = nil,
         setEnabled: (@Sendable (Bool) async throws -> Void)? = nil,
         setSelectedProfile: (@Sendable (UUID?) async throws -> Void)? = nil,
         setReduceMotion: (@Sendable (Bool) async throws -> Void)? = nil,
+        loadPaneWidths: (@Sendable () async throws -> [UUID: Double])? = nil,
+        setPaneWidth: (@Sendable (UUID, Double) async throws -> Void)? = nil,
+        replacePaneWidths: (@Sendable ([UUID: Double]) async throws -> Void)? = nil,
         clearAvatarPreferences: (@Sendable () async throws -> Void)? = nil,
         resetMetadata: (@Sendable () async throws -> Void)? = nil,
         importModel: (@Sendable (URL, String) async throws -> AvatarCommittedProfileChange)? = nil,
@@ -453,6 +539,9 @@ struct AvatarSettingsModelTests {
             setEnabled: setEnabled ?? { _ in },
             setSelectedProfile: setSelectedProfile ?? { _ in },
             setReduceMotion: setReduceMotion ?? { _ in },
+            loadPaneWidths: loadPaneWidths ?? { paneWidths },
+            setPaneWidth: setPaneWidth ?? { _, _ in },
+            replacePaneWidths: replacePaneWidths ?? { _ in },
             clearAvatarPreferences: clearAvatarPreferences ?? {},
             listProfiles: { profiles },
             importModel: importModel ?? { _, _ in throw AvatarSettingsError.unavailable },
@@ -466,6 +555,27 @@ struct AvatarSettingsModelTests {
             retryMotion: retryMotion ?? { _, _ in throw AvatarSettingsError.unavailable },
             resetMetadata: resetMetadata ?? { }
         )
+    }
+}
+
+private struct AvatarPaneWidthWrite: Equatable, Sendable {
+    let id: UUID
+    let width: Double
+}
+
+private actor AvatarPaneWidthWriteRecorder {
+    private(set) var values: [AvatarPaneWidthWrite] = []
+
+    func record(id: UUID, width: Double) {
+        values.append(.init(id: id, width: width))
+    }
+}
+
+private actor AvatarPaneWidthReplacementRecorder {
+    private(set) var values: [[UUID: Double]] = []
+
+    func record(_ value: [UUID: Double]) {
+        values.append(value)
     }
 }
 

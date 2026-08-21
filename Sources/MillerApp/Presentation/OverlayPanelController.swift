@@ -29,13 +29,16 @@ private final class OverlayDismissHandler {
 
 @MainActor
 final class OverlayPanelController: NSWindowController, NSWindowDelegate {
+    private static let millerContentWidth: CGFloat = 520
     private let model: AppPresentationModel
     private let peerHost: OverlayLiveVoicePeerHost?
     private let avatarIntegration: AvatarIntegrationController?
     private let avatarRegionView: AvatarPanelRegion
     private let millerContentRegionView: NSView
+    private let avatarWidthConstraint: NSLayoutConstraint
     private let dismissHandler: OverlayDismissHandler
     private var dismissalInProgress = false
+    private(set) var avatarPaneWidth: CGFloat
 
     var avatarRegion: NSView? { avatarRegionView }
     var millerContentRegion: NSView? { millerContentRegionView }
@@ -43,15 +46,23 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
     init(
         model: AppPresentationModel,
         peerHost: OverlayLiveVoicePeerHost? = nil,
-        avatarIntegration: AvatarIntegrationController? = nil
+        avatarIntegration: AvatarIntegrationController? = nil,
+        avatarPaneWidth: CGFloat = AvatarPaneWidth.defaultValue
     ) {
         self.model = model
         self.peerHost = peerHost
         self.avatarIntegration = avatarIntegration
+        let normalizedAvatarPaneWidth = Self.normalizedAvatarPaneWidth(avatarPaneWidth)
+        self.avatarPaneWidth = normalizedAvatarPaneWidth
         let dismissHandler = OverlayDismissHandler()
         self.dismissHandler = dismissHandler
         let panel = MillerOverlayPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: Self.millerContentWidth,
+                height: 360
+            ),
             styleMask: [.titled, .closable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -75,12 +86,16 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
             avatarRegion.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             avatarRegion.topAnchor.constraint(equalTo: root.topAnchor),
             avatarRegion.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            avatarRegion.widthAnchor.constraint(equalToConstant: 200),
             contentRegion.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             contentRegion.topAnchor.constraint(equalTo: root.topAnchor),
             contentRegion.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            contentRegion.widthAnchor.constraint(equalToConstant: 520),
+            contentRegion.widthAnchor.constraint(equalToConstant: Self.millerContentWidth),
         ])
+        let avatarWidthConstraint = avatarRegion.widthAnchor.constraint(
+            equalToConstant: normalizedAvatarPaneWidth
+        )
+        avatarWidthConstraint.isActive = true
+        self.avatarWidthConstraint = avatarWidthConstraint
         let overlayContent = NSHostingView(
             rootView: OverlayView(
                 model: model,
@@ -127,6 +142,18 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
         } else {
             show()
         }
+    }
+
+    func setAvatarPaneWidth(_ width: CGFloat) {
+        let normalized = Self.normalizedAvatarPaneWidth(width)
+        guard normalized != avatarPaneWidth else { return }
+        avatarPaneWidth = normalized
+        avatarWidthConstraint.constant = normalized
+        guard avatarIntegration?.isSurfaceAttached == true else { return }
+        window?.setContentSize(
+            NSSize(width: Self.millerContentWidth + normalized, height: 360)
+        )
+        window?.contentView?.layoutSubtreeIfNeeded()
     }
 
     func dismissAfterLiveVoiceCleanup() {
@@ -180,8 +207,17 @@ final class OverlayPanelController: NSWindowController, NSWindowDelegate {
     private func applyAvatarLayout(attached: Bool) {
         avatarRegionView.isHidden = !attached
         window?.setContentSize(
-            NSSize(width: attached ? 720 : 520, height: 360)
+            NSSize(
+                width: attached
+                    ? Self.millerContentWidth + avatarPaneWidth
+                    : Self.millerContentWidth,
+                height: 360
+            )
         )
         window?.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private static func normalizedAvatarPaneWidth(_ width: CGFloat) -> CGFloat {
+        CGFloat(AvatarPaneWidth.normalized(Double(width)))
     }
 }

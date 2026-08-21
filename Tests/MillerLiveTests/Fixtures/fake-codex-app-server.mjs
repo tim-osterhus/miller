@@ -238,6 +238,27 @@ async function emitLifecycle() {
   const emittedThread = emitRealtimeStarted();
   if (mode === "crash-after-start") process.exit(23);
   emitRealtimeAnswer(emittedThread);
+  if (mode === "realtime-user-transcript-deltas") {
+    notify("thread/realtime/transcript/delta", {
+      threadId: emittedThread, role: "user", delta: "hello",
+    });
+    notify("thread/realtime/transcript/delta", {
+      threadId: emittedThread, role: "user", delta: " Miller",
+    });
+    notify("thread/realtime/transcript/done", {
+      threadId: emittedThread, role: "user", text: "hello Miller",
+    });
+    notify("thread/realtime/transcript/delta", {
+      threadId: emittedThread, role: "assistant", delta: "Hello",
+    });
+    notify("thread/realtime/transcript/done", {
+      threadId: emittedThread, role: "assistant", text: "Hello!",
+    });
+    notify("thread/realtime/closed", {
+      threadId: emittedThread, reason: "synthetic-complete",
+    });
+    return;
+  }
   if (mode === "realtime-task18-three-route") {
     if (realtimePrompt !== task18ToolMarker) process.exit(59);
     const result = await task18RouteResult(realtimePrompt);

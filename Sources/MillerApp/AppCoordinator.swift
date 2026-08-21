@@ -4414,6 +4414,17 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
         activationService = GlobalActivationService()
         shortcutPreferences = GlobalShortcutPreferences()
         super.init()
+        avatarSettings.onStateChange = { [weak self, weak avatarSettings, weak avatarIntegration] in
+            guard let self, let avatarSettings else { return }
+            avatarIntegration?.update(
+                enabled: avatarSettings.isEnabled,
+                selectedProfileID: avatarSettings.selectedProfileID,
+                reduceMotion: avatarSettings.effectiveReducedMotion
+            )
+            self.overlayController.setAvatarPaneWidth(
+                CGFloat(avatarSettings.selectedPaneWidth)
+            )
+        }
         systemReducedMotionSource.start()
         Self.wireWakeIntegrationOpener(wakeIntegration) { [weak self] in
             self?.overlayController.show()

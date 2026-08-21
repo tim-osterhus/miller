@@ -4,11 +4,25 @@ import MillerAvatarHost
 import MillerStorage
 import SwiftUI
 
+enum AvatarPaneWidth {
+    static let minimum: Double = 160
+    static let maximum: Double = 400
+    static let defaultValue: Double = 200
+
+    static func normalized(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, minimum), maximum)
+    }
+}
+
 struct AvatarSettingsDependencies: Sendable {
     let loadPreferences: @Sendable () async throws -> AvatarPreferences
     let setEnabled: @Sendable (Bool) async throws -> Void
     let setSelectedProfile: @Sendable (UUID?) async throws -> Void
     let setReduceMotion: @Sendable (Bool) async throws -> Void
+    let loadPaneWidths: @Sendable () async throws -> [UUID: Double]
+    let setPaneWidth: @Sendable (UUID, Double) async throws -> Void
+    let replacePaneWidths: @Sendable ([UUID: Double]) async throws -> Void
     let clearAvatarPreferences: @Sendable () async throws -> Void
     let listProfiles: @Sendable () async throws -> [AvatarProfileSummary]
     let importModel: @Sendable (URL, String) async throws -> AvatarCommittedProfileChange
@@ -29,6 +43,9 @@ struct AvatarSettingsDependencies: Sendable {
         setEnabled: { _ in },
         setSelectedProfile: { _ in },
         setReduceMotion: { _ in },
+        loadPaneWidths: { [:] },
+        setPaneWidth: { _, _ in },
+        replacePaneWidths: { _ in },
         clearAvatarPreferences: { throw AvatarSettingsError.unavailable },
         listProfiles: { [] },
         importModel: { _, _ in throw AvatarSettingsError.unavailable },
@@ -48,6 +65,9 @@ struct AvatarSettingsDependencies: Sendable {
         setEnabled: @escaping @Sendable (Bool) async throws -> Void,
         setSelectedProfile: @escaping @Sendable (UUID?) async throws -> Void,
         setReduceMotion: @escaping @Sendable (Bool) async throws -> Void,
+        loadPaneWidths: @escaping @Sendable () async throws -> [UUID: Double],
+        setPaneWidth: @escaping @Sendable (UUID, Double) async throws -> Void,
+        replacePaneWidths: @escaping @Sendable ([UUID: Double]) async throws -> Void,
         clearAvatarPreferences: @escaping @Sendable () async throws -> Void,
         listProfiles: @escaping @Sendable () async throws -> [AvatarProfileSummary],
         importModel: @escaping @Sendable (URL, String) async throws -> AvatarCommittedProfileChange,
@@ -65,6 +85,9 @@ struct AvatarSettingsDependencies: Sendable {
         self.setEnabled = setEnabled
         self.setSelectedProfile = setSelectedProfile
         self.setReduceMotion = setReduceMotion
+        self.loadPaneWidths = loadPaneWidths
+        self.setPaneWidth = setPaneWidth
+        self.replacePaneWidths = replacePaneWidths
         self.clearAvatarPreferences = clearAvatarPreferences
         self.listProfiles = listProfiles
         self.importModel = importModel
@@ -94,10 +117,18 @@ struct AvatarSettingsDependencies: Sendable {
             setReduceMotion: { value in
                 try await preferences.set(value, for: .reduceAvatarMotion)
             },
+            loadPaneWidths: { try await preferences.avatarPaneWidths() },
+            setPaneWidth: { profileID, width in
+                try await preferences.setAvatarPaneWidth(width, for: profileID)
+            },
+            replacePaneWidths: { values in
+                try await preferences.replaceAvatarPaneWidths(values)
+            },
             clearAvatarPreferences: {
                 try await preferences.delete(.avatarEnabled)
                 try await preferences.delete(.selectedAvatarProfileID)
                 try await preferences.delete(.reduceAvatarMotion)
+                try await preferences.delete(.avatarPaneWidths)
             },
             listProfiles: { try await adapter.list() },
             importModel: { url, displayName in
@@ -156,6 +187,7 @@ final class AvatarSettingsModel: ObservableObject {
     @Published private(set) var isEnabled = false
     @Published private(set) var selectedProfileID: UUID?
     @Published private(set) var reduceMotion = false
+    @Published private(set) var paneWidths: [UUID: Double] = [:]
     @Published private(set) var profiles: [AvatarProfileSummary] = []
     @Published private(set) var status = ""
     @Published private(set) var runtimeStatus = "Avatar disabled"
@@ -210,6 +242,15 @@ final class AvatarSettingsModel: ObservableObject {
         return profiles.first { $0.id == selectedProfileID }
     }
 
+    var selectedPaneWidth: Double {
+        guard let selectedProfileID else { return AvatarPaneWidth.defaultValue }
+        return paneWidth(for: selectedProfileID)
+    }
+
+    func paneWidth(for profileID: UUID) -> Double {
+        AvatarPaneWidth.normalized(paneWidths[profileID] ?? AvatarPaneWidth.defaultValue)
+    }
+
     static func effectiveReducedMotion(
         userReduceMotion: Bool,
         systemReduceMotion: Bool
@@ -254,6 +295,7 @@ final class AvatarSettingsModel: ObservableObject {
             isBusy = false
             endOperation()
         }
+        var authoritativeProfiles: [AvatarProfileSummary]?
 
         do {
             let preferences = try await dependencies.loadPreferences()
@@ -270,9 +312,27 @@ final class AvatarSettingsModel: ObservableObject {
             let profiles = try await dependencies.listProfiles()
             guard isCurrentOperation(token) else { return }
             self.profiles = profiles
+            authoritativeProfiles = profiles
         } catch {
             guard isCurrentOperation(token) else { return }
             status = Self.message(for: error, fallback: "Avatar profiles unavailable")
+        }
+
+        do {
+            let paneWidths = try await dependencies.loadPaneWidths()
+            guard isCurrentOperation(token) else { return }
+            if let authoritativeProfiles {
+                self.paneWidths = await self.prunedPaneWidths(
+                    paneWidths,
+                    profiles: authoritativeProfiles
+                )
+            } else {
+                self.paneWidths = Self.normalizedPaneWidths(paneWidths)
+            }
+            onStateChange?()
+        } catch {
+            guard isCurrentOperation(token) else { return }
+            self.paneWidths = [:]
         }
     }
 
@@ -283,6 +343,7 @@ final class AvatarSettingsModel: ObservableObject {
             let profiles = try await dependencies.listProfiles()
             guard isCurrentOperation(token) else { return }
             self.profiles = profiles
+            await prunePaneWidths(for: profiles)
         } catch {
             guard isCurrentOperation(token) else { return }
             status = Self.message(for: error, fallback: "Avatar profiles unavailable")
@@ -321,6 +382,17 @@ final class AvatarSettingsModel: ObservableObject {
             .reduceMotion,
             operation: { try await save(value) },
             apply: { self.reduceMotion = value }
+        )
+    }
+
+    @discardableResult
+    func setPaneWidth(_ value: Double, for profileID: UUID) async -> Bool {
+        let normalized = AvatarPaneWidth.normalized(value)
+        let save = dependencies.setPaneWidth
+        return await persistPreference(
+            .paneWidth(profileID),
+            operation: { try await save(profileID, normalized) },
+            apply: { self.paneWidths[profileID] = normalized }
         )
     }
 
@@ -464,6 +536,7 @@ final class AvatarSettingsModel: ObservableObject {
             isEnabled = false
             selectedProfileID = nil
             reduceMotion = false
+            paneWidths = [:]
             preferenceGeneration &+= 1
             status = ""
             onStateChange?()
@@ -531,6 +604,7 @@ final class AvatarSettingsModel: ObservableObject {
                isCurrentOperation(token)
             {
                 self.profiles = profiles
+                await prunePaneWidths(for: profiles)
             }
             if notifyBeforeAfterSuccess {
                 onCommittedProfileChange?(change)
@@ -553,6 +627,34 @@ final class AvatarSettingsModel: ObservableObject {
         selectedProfileID = preferences.selectedProfileID
         reduceMotion = preferences.reduceMotion
         onStateChange?()
+    }
+
+    private static func normalizedPaneWidths(
+        _ values: [UUID: Double]
+    ) -> [UUID: Double] {
+        values.reduce(into: [:]) { result, entry in
+            result[entry.key] = AvatarPaneWidth.normalized(entry.value)
+        }
+    }
+
+    private func prunedPaneWidths(
+        _ values: [UUID: Double],
+        profiles: [AvatarProfileSummary]
+    ) async -> [UUID: Double] {
+        let normalized = Self.normalizedPaneWidths(values)
+        let profileIDs = Set(profiles.map(\.id))
+        let pruned = normalized.filter { profileIDs.contains($0.key) }
+        guard pruned != values else { return pruned }
+        try? await dependencies.replacePaneWidths(pruned)
+        return pruned
+    }
+
+    private func prunePaneWidths(for profiles: [AvatarProfileSummary]) async {
+        let profileIDs = Set(profiles.map(\.id))
+        let pruned = paneWidths.filter { profileIDs.contains($0.key) }
+        guard pruned != paneWidths else { return }
+        guard (try? await dependencies.replacePaneWidths(pruned)) != nil else { return }
+        paneWidths = pruned
     }
 
     private func reloadPreferencesAuthoritatively() async {
@@ -608,6 +710,7 @@ private enum AvatarPreferenceField: Hashable {
     case enabled
     case selectedProfile
     case reduceMotion
+    case paneWidth(UUID)
 }
 
 private actor AvatarPreferenceWriteQueue {

@@ -95,6 +95,12 @@ public extension MillerPreferenceKey where Value == UUID? {
 
 }
 
+public extension MillerPreferenceKey where Value == [String: Double] {
+    static var avatarPaneWidths: Self {
+        Self(rawValue: "avatar_pane_widths", defaultValue: [:])
+    }
+}
+
 public extension MillerPreferenceKey where Value == Double {
     static var wakeDetectionThreshold: Self {
         Self(rawValue: "wake_detection_threshold", defaultValue: 0.05)
@@ -205,6 +211,26 @@ public actor SQLitePreferenceRepository {
             selectedProfileID: try avatarValue(for: .selectedAvatarProfileID),
             reduceMotion: try avatarValue(for: .reduceAvatarMotion)
         )
+    }
+
+    public func avatarPaneWidths() throws -> [UUID: Double] {
+        try avatarValue(for: .avatarPaneWidths).reduce(into: [:]) { result, entry in
+            guard let profileID = UUID(uuidString: entry.key) else { return }
+            result[profileID] = entry.value
+        }
+    }
+
+    public func setAvatarPaneWidth(_ width: Double, for profileID: UUID) throws {
+        var values = try avatarValue(for: .avatarPaneWidths)
+        values[profileID.uuidString.lowercased()] = width
+        try set(values, for: .avatarPaneWidths)
+    }
+
+    public func replaceAvatarPaneWidths(_ values: [UUID: Double]) throws {
+        let encoded = values.reduce(into: [String: Double]()) { result, entry in
+            result[entry.key.uuidString.lowercased()] = entry.value
+        }
+        try set(encoded, for: .avatarPaneWidths)
     }
 
     public func delete<Value>(

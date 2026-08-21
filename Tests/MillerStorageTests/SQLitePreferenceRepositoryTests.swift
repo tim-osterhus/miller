@@ -191,6 +191,42 @@ struct SQLitePreferenceRepositoryTests {
     }
 
     @Test
+    func avatarPaneWidthsRoundTripByProfileAndResetWithAvatarPreferences() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+        let first = UUID()
+        let second = UUID()
+
+        #expect(try await repository.avatarPaneWidths().isEmpty)
+        try await repository.setAvatarPaneWidth(240, for: first)
+        try await repository.setAvatarPaneWidth(320, for: second)
+        #expect(try await repository.avatarPaneWidths() == [
+            first: 240,
+            second: 320,
+        ])
+
+        try await repository.delete(.avatarPaneWidths)
+        #expect(try await repository.avatarPaneWidths().isEmpty)
+    }
+
+    @Test
+    func malformedAvatarPaneWidthsFailClosedToEmpty() async throws {
+        let fixture = try TestDatabase(named: #function)
+        let repository = try SQLitePreferenceRepository(path: fixture.path)
+        try await repository.setAvatarPaneWidth(240, for: UUID())
+        let database = try SQLiteDatabase(path: fixture.path)
+        try database.execute("PRAGMA ignore_check_constraints = ON")
+        try database.execute(
+            """
+            UPDATE miller_preferences
+            SET value_json = 'not-json'
+            WHERE key = 'avatar_pane_widths'
+            """
+        )
+        #expect(try await repository.avatarPaneWidths().isEmpty)
+    }
+
+    @Test
     func distinctAvatarPreferenceWritesSurviveConcurrentChanges() async throws {
         let fixture = try TestDatabase(named: #function)
         let first = try SQLitePreferenceRepository(path: fixture.path)

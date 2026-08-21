@@ -492,6 +492,42 @@ enum SQLiteMigrations {
             DROP TABLE miller_preferences_v5;
             """
         ),
+        SQLiteMigration(
+            version: 7,
+            sql: """
+            ALTER TABLE miller_preferences RENAME TO miller_preferences_v6;
+
+            CREATE TABLE miller_preferences (
+                key TEXT PRIMARY KEY CHECK (key IN (
+                    'voice_transcript_saving_enabled',
+                    'next_voice_session_saving_enabled',
+                    'wakeword_enabled',
+                    'remote_live_enabled',
+                    'wake_phrase',
+                    'wake_microphone_id',
+                    'wake_detection_threshold',
+                    'wake_keyword_score',
+                    'selected_settings_tab',
+                    'menu_bar_enabled',
+                    'launch_at_login',
+                    'avatar_enabled',
+                    'avatar_selected_profile_id',
+                    'avatar_reduce_motion',
+                    'avatar_pane_widths'
+                )),
+                value_json TEXT NOT NULL CHECK (
+                    json_valid(value_json)
+                    AND length(CAST(value_json AS BLOB)) <= 65536
+                ),
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO miller_preferences(key, value_json, updated_at)
+            SELECT key, value_json, updated_at FROM miller_preferences_v6;
+
+            DROP TABLE miller_preferences_v6;
+            """
+        ),
     ]
 
     static let latestVersion = all.last?.version ?? 0
