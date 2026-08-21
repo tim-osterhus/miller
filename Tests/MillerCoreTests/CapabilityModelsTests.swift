@@ -67,6 +67,7 @@ struct CapabilityModelsTests {
         #expect(CapabilitySource.codexAccount.rawValue == "codex_account")
         #expect(CapabilitySource.millerMCP.rawValue == "miller_mcp")
         #expect(CapabilitySource.providerNative.rawValue == "provider_native")
+        #expect(CapabilitySource.millerSystem.rawValue == "miller_system")
 
         let enabledProvider = UUID()
         let otherProvider = UUID()
@@ -82,6 +83,37 @@ struct CapabilityModelsTests {
         #expect(available.isAvailable(to: enabledProvider))
         #expect(!available.isAvailable(to: otherProvider))
         #expect(!unavailable.isAvailable(to: enabledProvider))
+    }
+
+    @Test
+    func uncertainTerminalOutcomePreservesExistingOutcomeEncodings() throws {
+        let outcomes: [CapabilityTerminalOutcome] = [
+            .succeeded,
+            .failed,
+            .declined,
+            .cancelled,
+            .timedOut,
+            .uncertain,
+        ]
+        #expect(
+            outcomes.map(\.rawValue) == [
+                "succeeded",
+                "failed",
+                "declined",
+                "cancelled",
+                "timed_out",
+                "uncertain",
+            ]
+        )
+        for outcome in outcomes {
+            let encoded = try JSONEncoder().encode(outcome)
+            #expect(
+                try JSONDecoder().decode(
+                    CapabilityTerminalOutcome.self,
+                    from: encoded
+                ) == outcome
+            )
+        }
     }
 
     @Test

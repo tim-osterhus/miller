@@ -12,6 +12,21 @@ public enum CapabilityContractError: Error, Equatable, Sendable {
     case approvalNotRequired
     case invalidPortableSkill
     case portableSkillAttachmentTooLarge
+    case invalidTargetIdentity
+    case bundleIdentifierTooLarge
+    case invalidObservationIntent
+    case observationIntentTooLarge
+    case invalidDerivedObservationDescription
+    case derivedObservationDescriptionTooLarge
+    case invalidComputerText
+    case computerTextTooLarge
+    case invalidSemanticElementIdentifier
+    case semanticElementIdentifierTooLarge
+    case invalidKeyChord
+    case keyChordTooLarge
+    case invalidScrollDelta
+    case invalidClickPoint
+    case invalidComputerAction
 }
 
 public struct PortableSkillSnapshot: Codable, Equatable, Sendable {
@@ -138,6 +153,19 @@ public struct CapabilityID:
         serverID: String,
         toolName: String
     ) throws {
+        if source == .millerSystem {
+            let normalizedServerID = try Self.normalizeComponent(serverID)
+            let normalizedToolName = try Self.normalizeComponent(toolName)
+            guard normalizedServerID == "system",
+                  let capability = MillerSystemCapability(
+                      rawValue: "miller.system.\(normalizedToolName)"
+                  )
+            else {
+                throw CapabilityContractError.invalidCapabilityID
+            }
+            try self.init(rawValue: capability.rawValue)
+            return
+        }
         try self.init(
             rawValue: [source.rawValue, serverID, toolName]
                 .joined(separator: "/")
@@ -145,6 +173,16 @@ public struct CapabilityID:
     }
 
     public init(rawValue: String) throws {
+        let normalizedRawValue = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let capability = MillerSystemCapability(rawValue: normalizedRawValue) {
+            self.rawValue = capability.rawValue
+            return
+        }
+        if normalizedRawValue.hasPrefix("miller.system.") {
+            throw CapabilityContractError.invalidCapabilityID
+        }
         let identity = try Self.parse(rawValue)
         let normalized = [
             identity.source.rawValue,
@@ -171,6 +209,10 @@ public struct CapabilityID:
         try? Self.parse(rawValue)
     }
 
+    public init(millerSystem capability: MillerSystemCapability) {
+        self.rawValue = capability.rawValue
+    }
+
     fileprivate static func normalizeComponent(
         _ value: String
     ) throws -> String {
@@ -186,6 +228,19 @@ public struct CapabilityID:
     }
 
     private static func parse(_ rawValue: String) throws -> Identity {
+        let normalizedRawValue = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let capability = MillerSystemCapability(rawValue: normalizedRawValue) {
+            return Identity(
+                source: .millerSystem,
+                serverID: "system",
+                toolName: capability.shortName
+            )
+        }
+        if normalizedRawValue.hasPrefix("miller.system.") {
+            throw CapabilityContractError.invalidCapabilityID
+        }
         let components = rawValue.split(
             separator: "/",
             omittingEmptySubsequences: false
@@ -195,6 +250,9 @@ public struct CapabilityID:
         }
         let sourceValue = try normalizeComponent(String(components[0]))
         guard let source = CapabilitySource(rawValue: sourceValue) else {
+            throw CapabilityContractError.invalidCapabilityID
+        }
+        guard source != .millerSystem else {
             throw CapabilityContractError.invalidCapabilityID
         }
         return Identity(
@@ -215,6 +273,7 @@ public enum CapabilitySource: String, Codable, Sendable {
     case codexAccount = "codex_account"
     case millerMCP = "miller_mcp"
     case providerNative = "provider_native"
+    case millerSystem = "miller_system"
 }
 
 public enum CapabilityVisibility: String, Codable, Sendable {
@@ -234,6 +293,7 @@ public enum CapabilityTerminalOutcome: String, Codable, Sendable {
     case declined
     case cancelled
     case timedOut = "timed_out"
+    case uncertain
 }
 
 public struct CapabilityCallID: Hashable, Codable, Sendable {

@@ -6,6 +6,143 @@ struct CapabilityPolicyResolverTests {
     private let resolver = CapabilityPolicyResolver()
 
     @Test
+    func firstPartyAdmissionUsesTheRequiredDeclinePrecedence() throws {
+        let resolution = resolver.resolveFirstParty(
+            firstPartyRequest(
+                featureEnabled: false,
+                context: .remote(
+                    RemoteFirstPartyAdmission(
+                        settingEnabled: false,
+                        ownerAdmitted: false,
+                        sessionAdmitted: false
+                    )
+                ),
+                macOSPermissionGranted: false,
+                imageInputAuthorityAvailable: false,
+                targetGenerationCurrent: false,
+                observationGenerationCurrent: false,
+                executableBackendAvailable: false
+            )
+        )
+
+        #expect(resolution.decision == .decline(.featureDisabled))
+        #expect(resolution.declineReason == .featureDisabled)
+    }
+
+    @Test
+    func firstPartyAdmissionKeepsRemoteRequirementsOutOfLocalSessions() throws {
+        let local = resolver.resolveFirstParty(
+            firstPartyRequest(context: .local)
+        )
+        #expect(local.declineReason == nil)
+
+        let remote = resolver.resolveFirstParty(
+            firstPartyRequest(
+                context: .remote(
+                    RemoteFirstPartyAdmission(
+                        settingEnabled: false,
+                        ownerAdmitted: true,
+                        sessionAdmitted: true
+                    )
+                )
+            )
+        )
+        #expect(remote.declineReason == .remoteAdmissionMissing)
+    }
+
+    @Test(arguments: [
+        ("permission", FirstPartyCapabilityDeclineReason.macOSPermissionMissing),
+        ("image", FirstPartyCapabilityDeclineReason.imageInputAuthorityMissing),
+        ("generation", FirstPartyCapabilityDeclineReason.staleGeneration),
+        ("backend", FirstPartyCapabilityDeclineReason.noExecutableBackend),
+    ])
+    func firstPartyAdmissionExposesTypedReasonsInOrder(
+        _ scenario: (String, FirstPartyCapabilityDeclineReason)
+    ) throws {
+        let request: FirstPartyCapabilityAdmissionRequest
+        switch scenario.0 {
+        case "permission":
+            request = firstPartyRequest(macOSPermissionGranted: false)
+        case "image":
+            request = firstPartyRequest(imageInputAuthorityAvailable: false)
+        case "generation":
+            request = firstPartyRequest(targetGenerationCurrent: false)
+        case "backend":
+            request = firstPartyRequest(executableBackendAvailable: false)
+        default:
+            Issue.record("unknown test scenario")
+            return
+        }
+
+        let resolution = resolver.resolveFirstParty(request)
+        #expect(resolution.declineReason == scenario.1)
+        #expect(resolution.decision == .decline(scenario.1))
+    }
+
+    @Test
+    func firstPartySensitiveAndUnclassifiedActionsAlwaysRequireAllowOnce() throws {
+        let sensitive = resolver.resolveFirstParty(
+            firstPartyRequest(
+                ownerPolicy: .fullyTrusted,
+                actionClass: .sensitive
+            )
+        )
+        #expect(sensitive.decision == .requestAllowOnce)
+        #expect(sensitive.requiresAllowOnce)
+        #expect(
+            sensitive.policyResolution?.effectivePolicy.reason
+                == "provider_approval_required"
+        )
+
+        let unclassified = resolver.resolveFirstParty(
+            firstPartyRequest(ownerPolicy: .fullyTrusted, actionClass: nil)
+        )
+        #expect(unclassified.decision == .requestAllowOnce)
+        #expect(unclassified.requiresAllowOnce)
+
+        let explicitlyUnclassified = resolver.resolveFirstParty(
+            firstPartyRequest(
+                ownerPolicy: .fullyTrusted,
+                actionClass: .unclassified
+            )
+        )
+        #expect(explicitlyUnclassified.decision == .requestAllowOnce)
+        #expect(explicitlyUnclassified.requiresAllowOnce)
+    }
+
+    @Test
+    func firstPartySafeActionsUseTheExistingOwnerPolicy() throws {
+        let automatic = resolver.resolveFirstParty(
+            firstPartyRequest(
+                ownerPolicy: .fullyTrusted,
+                actionClass: .safeNavigation
+            )
+        )
+        #expect(automatic.decision == .executeAutomatically)
+        #expect(!automatic.requiresAllowOnce)
+        #expect(
+            automatic.policyResolution?.effectivePolicy.reason == "fully_trusted"
+        )
+
+        let approval = resolver.resolveFirstParty(
+            firstPartyRequest(
+                ownerPolicy: .askBeforeChanges,
+                actionClass: .reversibleEdit
+            )
+        )
+        #expect(approval.decision == .requestOwnerApproval)
+        #expect(!approval.requiresAllowOnce)
+
+        let disabled = resolver.resolveFirstParty(
+            firstPartyRequest(
+                ownerPolicy: .readOnlyAutomatic,
+                actionClass: .safeNavigation
+            )
+        )
+        #expect(disabled.decision == .decline(.ownerPolicyDisabled))
+    }
+
+    @Test
     func serverPolicyIsInheritedWithoutAToolOverride() {
         let resolution = resolver.resolve(
             serverPolicy: .askBeforeChanges,
@@ -118,4 +255,44 @@ struct CapabilityPolicyResolverTests {
         #expect(!resolution.effectivePolicy.requiresApproval)
         #expect(resolution.effectivePolicy.reason == "policy_disabled")
     }
+}
+
+private func firstPartyRequest(
+    featureEnabled: Bool = true,
+    localComputerControlEnabled: Bool = true,
+    context: FirstPartyCapabilityContext = .local,
+    macOSPermissionGranted: Bool = true,
+    imageInputAuthorityAvailable: Bool = true,
+    targetGenerationCurrent: Bool = true,
+    observationGenerationCurrent: Bool = true,
+    executableBackendAvailable: Bool = true,
+    ownerPolicy: CapabilityPolicy = .askBeforeChanges,
+    actionClass: ComputerActionClass? = .safeNavigation
+) -> FirstPartyCapabilityAdmissionRequest {
+    let target = try! TargetIdentity(
+        processID: 1,
+        windowID: 1,
+        bundleIdentifier: "com.example.App"
+    )
+    let action = ComputerAction.focusWindow(FocusWindowAction(target: target))
+    let admittedAction = actionClass.map {
+        MillerAdmittedComputerAction(
+            action: action,
+            actionClass: $0,
+            verificationPredicate: .targetActivated
+        )
+    }
+    return FirstPartyCapabilityAdmissionRequest(
+        capability: .computerAct,
+        context: context,
+        featureEnabled: featureEnabled,
+        localComputerControlEnabled: localComputerControlEnabled,
+        macOSPermissionGranted: macOSPermissionGranted,
+        imageInputAuthorityAvailable: imageInputAuthorityAvailable,
+        targetGenerationCurrent: targetGenerationCurrent,
+        observationGenerationCurrent: observationGenerationCurrent,
+        executableBackendAvailable: executableBackendAvailable,
+        ownerPolicy: ownerPolicy,
+        admittedAction: admittedAction
+    )
 }
