@@ -13,12 +13,12 @@ Miller capability bridge; no SDK source tree is bundled. The exact reviewed
 license text is packaged at
 `Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
-## Miller Avatar v0.1.0-alpha.7 — Apache License 2.0
+## Miller Avatar v0.1.0-alpha.8 — Apache License 2.0
 
 Miller links `MillerAvatarCore` and `MillerAvatarHost` from
 `https://github.com/tim-osterhus/miller-avatar.git` at immutable commit
-`34f9e58315e3f41c3202bf593276a5dd9d89cc26`, published as version
-`v0.1.0-alpha.7`. The package is
+`903bb8ae0c06d3c582c9a0ad3880da976d3b1439`, published as version
+`v0.1.0-alpha.8`. The package is
 licensed under Apache-2.0. `MillerAvatarApp` is a diagnostic product and is
 not linked or packaged by Miller.
 

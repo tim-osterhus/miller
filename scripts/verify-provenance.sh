@@ -57,10 +57,10 @@ grep -Fq '## Node.js 22.22.0 bundled runtime' \
 grep -Fq '## Node.js 22.22.0' "$repo_root/THIRD_PARTY_NOTICES.md"
 grep -Fq '## Model Context Protocol Swift SDK 0.12.1' \
   "$repo_root/THIRD_PARTY_NOTICES.md"
-grep -Fq '34f9e58315e3f41c3202bf593276a5dd9d89cc26' \
+grep -Fq '903bb8ae0c06d3c582c9a0ad3880da976d3b1439' \
   "$repo_root/Package.resolved"
-grep -Fq '## Miller Avatar v0.1.0-alpha.7' "$repo_root/PROVENANCE.md"
-grep -Fq '## Miller Avatar v0.1.0-alpha.7' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '## Miller Avatar v0.1.0-alpha.8' "$repo_root/PROVENANCE.md"
+grep -Fq '## Miller Avatar v0.1.0-alpha.8' "$repo_root/THIRD_PARTY_NOTICES.md"
 grep -Fq 'MillerAvatar_MillerAvatarHost.bundle' "$repo_root/PROVENANCE.md"
 grep -Fq 'Web/bundle-manifest.json' "$repo_root/PROVENANCE.md"
 grep -Fq 'Web/bundle-metafile.json' "$repo_root/PROVENANCE.md"
@@ -73,7 +73,7 @@ for required in \
   "miller-avatar-NOTICE.txt" \
   "THIRD_PARTY_NOTICES.md" \
   "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b" \
-  "a596a71e4c8f613c6982631187677eef2938b7249972d07c4c9e47835d666be4" \
+  "60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173" \
   "Mapbox Earcut 3.0.1" \
   "Copyright © 2016 Mapbox" \
   "Permission to use, copy, modify"
@@ -121,8 +121,8 @@ const expectedBundleRoots = [
   "partial-json",
 ];
 const avatarPackageURL = "https://github.com/tim-osterhus/miller-avatar.git";
-const avatarPackageVersion = "0.1.0-alpha.7";
-const avatarPackageRevision = "34f9e58315e3f41c3202bf593276a5dd9d89cc26";
+const avatarPackageVersion = "0.1.0-alpha.8";
+const avatarPackageRevision = "903bb8ae0c06d3c582c9a0ad3880da976d3b1439";
 const avatarWebFiles = [
   "Web/app.js",
   "Web/bundle-manifest.json",
@@ -131,9 +131,9 @@ const avatarWebFiles = [
   "Web/styles.css",
 ];
 const avatarWebHashes = {
-  "Web/app.js": "468b0fbd431c13783395d90c4070e3c13718a60edca991f8c0570b62a0e96201",
-  "Web/bundle-manifest.json": "4d6e8db2ea00464401a6d6d06af8721cb65a58aad0946219e8ff470bba099590",
-  "Web/bundle-metafile.json": "280ca33a8a0be5d2c2a27e62f92eb34527bf0faadc21ae725ea44a90f2d338bb",
+  "Web/app.js": "008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5",
+  "Web/bundle-manifest.json": "f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e",
+  "Web/bundle-metafile.json": "a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62",
   "Web/index.html": "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
   "Web/styles.css": "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
 };
@@ -142,7 +142,7 @@ const avatarLegalHashes = {
   "THIRD_PARTY_NOTICES.md": "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
 };
 const avatarAggregateNoticeSHA256 =
-  "a596a71e4c8f613c6982631187677eef2938b7249972d07c4c9e47835d666be4";
+  "60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -367,7 +367,7 @@ assert.equal(
   "tracked aggregate Avatar notice changed",
 );
 for (const required of [
-  "Miller Avatar v0.1.0-alpha.7",
+  "Miller Avatar v0.1.0-alpha.8",
   avatarPackageRevision,
   "Apache-2.0",
   "MillerAvatar_MillerAvatarHost.bundle",

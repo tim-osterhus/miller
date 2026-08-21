@@ -17,14 +17,15 @@ real Live audio, signing, notarization, publication, or M1 performance.
   `9731ffc1daad2b9d647dd994d48d0fd632133fdd`.
 - Published Miller v0.1.2 commit
   `6280a38c3b0c0afa936f3af6550645306221ded4` is an ancestor of that head.
-- Miller resolves Miller Avatar `v0.1.0-alpha.7` at the exact reviewed commit
-  `34f9e58315e3f41c3202bf593276a5dd9d89cc26`.
-- Alpha.7 retains the renderer-persistence and authored-root-motion repairs,
+- Miller resolves Miller Avatar `v0.1.0-alpha.8` at the exact reviewed commit
+  `903bb8ae0c06d3c582c9a0ad3880da976d3b1439`.
+- Alpha.8 retains the renderer-persistence and authored-root-motion repairs,
   frames only the active motion rather than the union of every bound motion,
   excludes non-rendered helper geometry from camera evidence, and fully
   settles the normalized static pose before Reduced Motion suspends updates.
   It also uses a conservative near plane, safely bottom-biased framing, and
-  resize-driven camera refits.
+  resize-driven camera refits. Steady loop roles now remove authored planar
+  root drift while terminal one-shot roles retain authored root motion.
 - Avatar is off by default. Ordinary Avatar-off startup does not construct a
   renderer, capture a model, request microphone access, or add a network
   request.
@@ -41,7 +42,7 @@ real Live audio, signing, notarization, publication, or M1 performance.
 | Quarantine and retry | `PASS` | Three model or per-motion failures enter the corresponding quarantine. Explicit retry, reselection, and successful load reset only the intended failure state, including the renderer-persistence repair in the reviewed alpha.3 checkpoint. |
 | Renderer containment | `PASS` | Startup, bridge, first-frame, context-loss, invalid observation, timeout, retry, disposal, and late-callback paths are session fenced and idempotent. |
 | Repeated replacement | `PASS` | Same-revision cross-profile replacement, active binding edits, hidden/resumed replacement, retry, disable, close, and reentrant callbacks preserve the current generation and release superseded bytes. |
-| Presentation policy | `PASS_HEADLESS` | Avatar Off, no-profile, static fallback, hidden, occluded, and Reduced Motion states revoke mouth cues and do not restore stale playback. Alpha.7 isolates camera bounds to the active motion, settles the normalized static pose before animation suspension, protects forward-moving geometry with a conservative near plane, and safely biases portrait framing downward. Compact-surface scale and deformation remain owner-visible checks. |
+| Presentation policy | `PASS_HEADLESS` | Avatar Off, no-profile, static fallback, hidden, occluded, and Reduced Motion states revoke mouth cues and do not restore stale playback. Alpha.8 isolates camera bounds to the active motion, settles the normalized static pose before animation suspension, protects forward-moving geometry with a conservative near plane, safely biases portrait framing downward, and stabilizes planar root translation for steady loops. Compact-surface scale, deformation, and loop stability remain owner-visible checks. |
 | Noninteraction and accessibility contract | `PASS_HEADLESS` | The configurable Avatar region and installed WebKit view cannot accept first responder, do not join key-view traversal, ignore hit testing, and expose no accessibility children. Miller's content region remains fixed at 520 points. Physical focus preservation, Tab/Shift-Tab, and VoiceOver remain human checks. |
 | Typed lifecycle | `PASS` | Accepted typed turns own their generation and project only bounded semantic states; stale, failed, stopped, and replaced turns cannot mutate a newer projection. Per-profile Avatar widths are bounded, durable, and pruned only after an authoritative profile refresh. |
 | Live lifecycle and mouth cues | `PASS_HEADLESS` | Only measured audible remote output creates `speaking` and ordered mouth cues. User transcript deltas remain in `listening` instead of repeatedly projecting `responding`. WebRTC output-buffer start/stop events keep one playback identity across sentence silence; the acoustic 400 ms release remains a fallback for peers without that signal. Final silence, failure, renderer loss, hide, occlusion, Reduced Motion, and close return neutral and fence late samples. Real continuity remains an owner-visible check. |
@@ -53,8 +54,8 @@ real Live audio, signing, notarization, publication, or M1 performance.
 
 | Repository | Command | Result |
 | --- | --- | --- |
-| Miller Avatar | `./scripts/test.sh` | `PASS`: 84 Web tests, TypeScript check, 311 Swift tests, shell contracts, deterministic independent builds, rollback, cache containment, and cleanup. |
-| Miller | focused alpha.7 regression suites | `PASS`: listening continuity 1/1, Avatar settings 15/15, live width/layout 1/1, and pane-width persistence 1/1 passed against the exact alpha.7 lock. |
+| Miller Avatar | `./scripts/test.sh` | `PASS`: 89 Web tests, TypeScript check, 311 Swift tests, shell contracts, deterministic independent builds, rollback, cache containment, and cleanup. |
+| Miller | focused alpha.8 regression suites | `PASS`: provenance verification passed; release-packaging policy passed 29/29; focused Avatar integration passed 96/96; and MillerApp built without launching against the exact alpha.8 lock. |
 | Miller | `./scripts/test.sh` plus two isolated timing reruns | `PASS_WITH_FOCUSED_TIMING_RERUN`: all 49 Gateway tests passed. The loaded full Swift run passed 1,195 of 1,197 tests; a pre-existing 500 ms transport assertion completed in 1.799 seconds and a pre-existing refresh-order race missed its expected ordering. Immediate isolated reruns passed in 13 ms and 12 ms. None of these commands launches Miller. |
 | Miller | `./scripts/run-task18-three-route-e2e.sh all` | `PASS`: the three synthetic tool routes passed against the exact resolved dependency lock after the pre-existing generated wake root was temporarily isolated and restored. This harness does not launch Miller. |
 | Miller | `swift build --product MillerApp` | `PASS`: the integrated source builds without launching the app. |
@@ -86,8 +87,11 @@ reanchoring step combined with rest-pose-only camera framing. Alpha.5 preserves
 Pixiv's target-relative conversion and computes one fixed root-motion envelope.
 Alpha.6 narrowed that envelope to the active motion, removed invisible helper
 geometry from bounds, and settled the static pose before suspension. Alpha.7
-adds conservative depth clipping, safe bottom-biased framing, and live viewport
-refits. Miller separately consumes the WebRTC output-buffer boundary so short
+added conservative depth clipping, safe bottom-biased framing, and live
+viewport refits. Alpha.8 derives in-place clips for steady roles by anchoring
+hips X/Z to the normalized rest target while preserving authored Y movement;
+terminal success and failure motions retain their authored root motion. Miller
+separately consumes the WebRTC output-buffer boundary so short
 acoustic gaps inside one remote response do not terminate and recreate the
 speaking action, and now keeps user transcript deltas in the listening state.
 
@@ -105,7 +109,8 @@ and repeated lifecycle checks. The owner has verified keyboard traversal and
 repeated profile/retry cycles. Alpha.5 owner testing exposed excessive
 deadspace and an unsettled Reduced Motion pose. A later owner pass confirmed
 speaking continuity but exposed listening restarts on every transcript delta.
-Those visual and continuity issues, plus the new per-profile width control,
-require retesting in the alpha.7-integrated candidate.
+Those visual and continuity issues, the new per-profile width control, and
+steady-loop distance stability require retesting in the alpha.8-integrated
+candidate.
 Retained evidence may contain no model, motion, image, transcript, audio,
 source path, or identifying asset metadata.

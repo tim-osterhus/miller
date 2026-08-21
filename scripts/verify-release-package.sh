@@ -12,14 +12,14 @@ legal="$bundle_root/Contents/Resources/Legal"
 inventory="$(dirname "$bundle_root")/inventory.json"
 avatar_bundle="$bundle_root/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle"
 typeset -A avatar_web_hashes=(
-  app.js 468b0fbd431c13783395d90c4070e3c13718a60edca991f8c0570b62a0e96201
-  bundle-manifest.json 4d6e8db2ea00464401a6d6d06af8721cb65a58aad0946219e8ff470bba099590
-  bundle-metafile.json 280ca33a8a0be5d2c2a27e62f92eb34527bf0faadc21ae725ea44a90f2d338bb
+  app.js 008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5
+  bundle-manifest.json f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e
+  bundle-metafile.json a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62
   index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
 avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
-avatar_aggregate_third_party_notices_sha256="a596a71e4c8f613c6982631187677eef2938b7249972d07c4c9e47835d666be4"
+avatar_aggregate_third_party_notices_sha256="60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173"
 
 test -d "$bundle_root"
 test ! -L "$bundle_root"
@@ -138,8 +138,8 @@ do
   grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.7' \
-  '34f9e58315e3f41c3202bf593276a5dd9d89cc26' \
+  'Miller Avatar v0.1.0-alpha.8' \
+  '903bb8ae0c06d3c582c9a0ad3880da976d3b1439' \
   'Web/bundle-manifest.json' \
   'Web/bundle-metafile.json' \
   'no VRM or VRMA character or motion assets'
@@ -147,7 +147,7 @@ do
   grep -Fq "$required" "$legal/PROVENANCE.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.7' \
+  'Miller Avatar v0.1.0-alpha.8' \
   'MillerAvatarApp` is a diagnostic product' \
   '## Three.js 0.180.0 — MIT License' \
   '## @pixiv/three-vrm core family 3.5.5 — MIT License' \
@@ -252,7 +252,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.7",
+    "Miller Avatar@0.1.0-alpha.8",
     `Miller@${releaseVersion}`,
     `MillerCapabilityBridge@${releaseVersion}`,
     `MillerCapabilities@${releaseVersion}`,
@@ -301,7 +301,7 @@ assert.match(mcpLicense, /Apache License/i);
 assert.match(mcpLicense, /MIT License/i);
 const avatar = sbom.packages.find((entry) => entry.name === "Miller Avatar");
 assert.ok(avatar);
-assert.equal(avatar.versionInfo, "0.1.0-alpha.7");
+assert.equal(avatar.versionInfo, "0.1.0-alpha.8");
 assert.equal(avatar.licenseConcluded, "Apache-2.0");
 assert.equal(avatar.licenseDeclared, "Apache-2.0");
 assert.equal(avatar.downloadLocation, "https://github.com/tim-osterhus/miller-avatar.git");
@@ -388,7 +388,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.7",
+    "Miller Avatar@0.1.0-alpha.8",
     `MillerCapabilityBridge@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime wake runtime@1.24.4",
