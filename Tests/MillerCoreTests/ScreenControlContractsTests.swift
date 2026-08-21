@@ -340,17 +340,23 @@ struct ScreenControlContractsTests {
         #expect(admitted.actionClass == .sensitive)
         #expect(admitted.verificationPredicate == .targetActivated)
 
-        var object = try #require(
+        let object = try #require(
             JSONSerialization.jsonObject(
                 with: JSONEncoder().encode(action)
             ) as? [String: Any]
         )
-        object["actionClass"] = "sensitive"
-        #expect(throws: CapabilityContractError.invalidComputerAction) {
-            try JSONDecoder().decode(
-                ComputerAction.self,
-                from: JSONSerialization.data(withJSONObject: object)
-            )
+        for (unknownKey, value) in [
+            "actionClass": "sensitive",
+            "unexpected": "value",
+        ] {
+            var object = object
+            object[unknownKey] = value
+            #expect(throws: CapabilityContractError.invalidComputerAction) {
+                try JSONDecoder().decode(
+                    ComputerAction.self,
+                    from: JSONSerialization.data(withJSONObject: object)
+                )
+            }
         }
     }
 

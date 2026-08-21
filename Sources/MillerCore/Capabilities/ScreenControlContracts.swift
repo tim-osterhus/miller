@@ -442,6 +442,21 @@ public enum ComputerAction: Codable, Equatable, Sendable {
         case payload
     }
 
+    private struct DynamicCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int?
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+            self.intValue = nil
+        }
+
+        init?(intValue: Int) {
+            self.stringValue = String(intValue)
+            self.intValue = intValue
+        }
+    }
+
     private enum Kind: String, Codable {
         case activateApplication = "activate_application"
         case focusWindow = "focus_window"
@@ -455,10 +470,11 @@ public enum ComputerAction: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        guard Set(container.allKeys) == Set([.kind, .payload]) else {
+        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamicContainer.allKeys.map(\.stringValue)) == Set(["kind", "payload"]) else {
             throw CapabilityContractError.invalidComputerAction
         }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(Kind.self, forKey: .kind) {
         case .activateApplication:
             self = .activateApplication(
