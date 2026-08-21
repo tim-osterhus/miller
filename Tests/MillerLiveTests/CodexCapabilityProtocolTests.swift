@@ -84,6 +84,8 @@ struct CodexCapabilityProtocolTests {
         #expect(records.count == 1)
         let record = try #require(records.first)
         #expect(Set(record.keys) == ["fixture", "release", "record", "observed", "result"])
+        #expect(record["fixture"] as? String == "v013-codex-screen-control")
+        #expect(record["release"] as? String == "0.146.0")
         #expect(record["record"] as? String == "bounded-invocation")
         #expect(record["observed"] as? Bool == false)
         #expect(record["phase"] == nil)

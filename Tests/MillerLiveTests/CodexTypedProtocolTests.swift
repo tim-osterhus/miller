@@ -148,6 +148,10 @@ struct CodexTypedProtocolTests {
     func validatesPinnedLocalImageFixtureAgainstTurnStartSchemaWithoutStartingTurn() throws {
         let records = try typedFixtureObjects(named: "v013-image-input")
         #expect(records.count == 2)
+        for record in records {
+            #expect(record["fixture"] as? String == "v013-codex-screen-control")
+            #expect(record["release"] as? String == "0.146.0")
+        }
 
         let inputRecord = try #require(records.first {
             $0["record"] as? String == "local-image-input"
