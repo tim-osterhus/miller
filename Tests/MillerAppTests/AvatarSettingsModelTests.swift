@@ -60,13 +60,180 @@ struct AvatarSettingsModelTests {
         #expect(!model.mouthCuesEnabled)
         #expect(model.importQualityMode == .highQuality)
         #expect(await model.setMouthCuesEnabled(true))
-        #expect(await model.setImportQualityMode(.lightweight))
+        #expect(await model.setImportQualityMode(.lightweight).value)
         #expect(model.mouthCuesEnabled)
         #expect(model.importQualityMode == .lightweight)
         #expect(await writes.values == [
             .mouth(true),
             .quality(.lightweight),
         ])
+    }
+
+    @Test
+    @MainActor
+    func selectingImportQualityUpdatesIntentBeforePersistenceCompletes() async {
+        let gate = AvatarSettingsGate()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: nil,
+                reduceMotion: false
+            ),
+            profiles: [],
+            setImportQualityMode: { _ in await gate.waitUntilReleased() },
+            importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
+        ))
+        await model.load()
+
+        let pendingWrite = model.setImportQualityMode(.highQuality)
+
+        #expect(model.importQualityMode == .highQuality)
+        #expect(model.isImportQualityPersistencePending)
+        await gate.waitUntilEntered()
+        await gate.release()
+        #expect(await pendingWrite.value)
+        #expect(!model.isImportQualityPersistencePending)
+    }
+
+    @Test
+    @MainActor
+    func failedLatestImportQualityWriteRestoresAuthoritativeMode() async {
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: nil,
+                reduceMotion: false
+            ),
+            profiles: [],
+            setImportQualityMode: { _ in throw AvatarSettingsError.unavailable },
+            importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
+        ))
+        await model.load()
+
+        let pendingWrite = model.setImportQualityMode(.highQuality)
+
+        #expect(model.importQualityMode == .highQuality)
+        #expect(await pendingWrite.value == false)
+        #expect(model.importQualityMode == .lightweight)
+        #expect(!model.isImportQualityPersistencePending)
+        #expect(model.status == "Avatar preference could not be saved")
+    }
+
+    @Test
+    @MainActor
+    func staleImportQualityFailureCannotRollBackNewerIntent() async {
+        let firstGate = AvatarSettingsGate()
+        let secondGate = AvatarSettingsGate()
+        let writes = AvatarQualityWriteSequence(
+            steps: [
+                .init(gate: firstGate, shouldFail: true),
+                .init(gate: secondGate, shouldFail: false),
+            ]
+        )
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: nil,
+                reduceMotion: false
+            ),
+            profiles: [],
+            setImportQualityMode: { value in try await writes.write(value) },
+            importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
+        ))
+        await model.load()
+
+        let staleWrite = model.setImportQualityMode(.highQuality)
+        let latestWrite = model.setImportQualityMode(.lightweight)
+        #expect(model.importQualityMode == .lightweight)
+        #expect(model.isImportQualityPersistencePending)
+
+        await firstGate.waitUntilEntered()
+        await firstGate.release()
+        #expect(await staleWrite.value == false)
+        #expect(model.importQualityMode == .lightweight)
+        #expect(model.isImportQualityPersistencePending)
+        #expect(model.status.isEmpty)
+
+        await secondGate.waitUntilEntered()
+        await secondGate.release()
+        #expect(await latestWrite.value)
+        #expect(model.importQualityMode == .lightweight)
+        #expect(!model.isImportQualityPersistencePending)
+        #expect(await writes.values == [.highQuality, .lightweight])
+    }
+
+    @Test
+    @MainActor
+    func failedLatestImportQualityWriteRestoresLastSuccessfulQueuedValue() async {
+        let writes = AvatarQualityWriteSequence(
+            steps: [
+                .init(shouldFail: false),
+                .init(shouldFail: true),
+            ]
+        )
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: nil,
+                reduceMotion: false
+            ),
+            profiles: [],
+            setImportQualityMode: { value in try await writes.write(value) },
+            importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
+        ))
+        await model.load()
+
+        let staleWrite = model.setImportQualityMode(.highQuality)
+        let latestWrite = model.setImportQualityMode(.lightweight)
+
+        #expect(await staleWrite.value == false)
+        #expect(await latestWrite.value == false)
+        #expect(model.importQualityMode == .highQuality)
+        #expect(!model.isImportQualityPersistencePending)
+        #expect(await writes.values == [.highQuality, .lightweight])
+    }
+
+    @Test
+    @MainActor
+    func concurrentLoadWaitsForPendingImportQualityPersistence() async {
+        let writeGate = AvatarSettingsGate()
+        let secondLoadGate = AvatarSettingsGate()
+        let preferences = AvatarQualityPreferenceStore(
+            qualityMode: .lightweight,
+            writeGate: writeGate,
+            secondLoadGate: secondLoadGate
+        )
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: nil,
+                reduceMotion: false
+            ),
+            profiles: [],
+            loadPreferences: { await preferences.load() },
+            setImportQualityMode: { value in await preferences.set(value) },
+            importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
+        ))
+        await model.load()
+
+        let pendingWrite = model.setImportQualityMode(.highQuality)
+        await writeGate.waitUntilEntered()
+        let pendingLoad = Task { await model.load() }
+        while !model.isBusy { await Task.yield() }
+        await Task.yield()
+
+        #expect(await preferences.loadCount == 1)
+        #expect(model.importQualityMode == .highQuality)
+        #expect(model.isImportQualityPersistencePending)
+
+        await writeGate.release()
+        await secondLoadGate.release()
+        #expect(await pendingWrite.value)
+        await pendingLoad.value
+
+        #expect(await preferences.qualityMode == .highQuality)
+        #expect(model.importQualityMode == .highQuality)
+        #expect(!model.isImportQualityPersistencePending)
     }
 
     @Test
@@ -146,7 +313,7 @@ struct AvatarSettingsModelTests {
             )
         }
         await gate.waitUntilEntered()
-        #expect(await model.setImportQualityMode(.lightweight))
+        #expect(await model.setImportQualityMode(.lightweight).value)
         await gate.release()
 
         #expect(await pendingImport.value == imported)
@@ -784,6 +951,72 @@ private actor AvatarQualityRecorder {
 
     func record(_ value: AvatarAssetQualityMode) {
         values.append(value)
+    }
+}
+
+private struct AvatarQualityWriteStep: Sendable {
+    let gate: AvatarSettingsGate?
+    let shouldFail: Bool
+
+    init(gate: AvatarSettingsGate? = nil, shouldFail: Bool) {
+        self.gate = gate
+        self.shouldFail = shouldFail
+    }
+}
+
+private actor AvatarQualityWriteSequence {
+    private var steps: [AvatarQualityWriteStep]
+    private(set) var values: [AvatarAssetQualityMode] = []
+
+    init(steps: [AvatarQualityWriteStep]) {
+        self.steps = steps
+    }
+
+    func write(_ value: AvatarAssetQualityMode) async throws {
+        values.append(value)
+        let step = steps.removeFirst()
+        if let gate = step.gate {
+            await gate.waitUntilReleased()
+        }
+        if step.shouldFail {
+            throw AvatarSettingsError.unavailable
+        }
+    }
+}
+
+private actor AvatarQualityPreferenceStore {
+    private(set) var qualityMode: AvatarAssetQualityMode
+    private(set) var loadCount = 0
+    private let writeGate: AvatarSettingsGate
+    private let secondLoadGate: AvatarSettingsGate
+
+    init(
+        qualityMode: AvatarAssetQualityMode,
+        writeGate: AvatarSettingsGate,
+        secondLoadGate: AvatarSettingsGate
+    ) {
+        self.qualityMode = qualityMode
+        self.writeGate = writeGate
+        self.secondLoadGate = secondLoadGate
+    }
+
+    func load() async -> AvatarPreferences {
+        loadCount += 1
+        let snapshot = qualityMode
+        if loadCount == 2 {
+            await secondLoadGate.waitUntilReleased()
+        }
+        return .init(
+            enabled: true,
+            selectedProfileID: nil,
+            reduceMotion: false,
+            importQualityMode: snapshot.rawValue
+        )
+    }
+
+    func set(_ value: AvatarAssetQualityMode) async {
+        await writeGate.waitUntilReleased()
+        qualityMode = value
     }
 }
 

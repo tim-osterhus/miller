@@ -209,6 +209,7 @@ final class AvatarSettingsModel: ObservableObject {
     @Published private(set) var reduceMotion = false
     @Published private(set) var mouthCuesEnabled = true
     @Published private(set) var importQualityMode: AvatarAssetQualityMode = .lightweight
+    @Published private(set) var isImportQualityPersistencePending = false
     @Published private(set) var paneWidths: [UUID: Double] = [:]
     @Published private(set) var profiles: [AvatarProfileSummary] = []
     @Published private(set) var status = ""
@@ -226,6 +227,8 @@ final class AvatarSettingsModel: ObservableObject {
     private var resetWaiters: [CheckedContinuation<Void, Never>] = []
     private var preferenceGeneration: UInt64 = 0
     private var latestPreferenceOperation: [AvatarPreferenceField: UInt64] = [:]
+    private var persistedImportQualityMode: AvatarAssetQualityMode = .lightweight
+    private var importQualityPersistenceTail: Task<Bool, Never>?
     private var pendingSystemReduceMotion: Bool?
     var onCommittedProfileChange: ((AvatarCommittedProfileChange) -> Void)?
     var onStateChange: (() -> Void)?
@@ -313,11 +316,17 @@ final class AvatarSettingsModel: ObservableObject {
         isBusy = true
         status = ""
         let loadedPreferenceGeneration = preferenceGeneration
+        let pendingImportQualityPersistence = importQualityPersistenceTail
         defer {
             isBusy = false
             endOperation()
         }
         var authoritativeProfiles: [AvatarProfileSummary]?
+
+        _ = await pendingImportQualityPersistence?.value
+        guard isCurrentOperation(token),
+              loadedPreferenceGeneration == preferenceGeneration
+        else { return }
 
         do {
             let preferences = try await dependencies.loadPreferences()
@@ -418,13 +427,30 @@ final class AvatarSettingsModel: ObservableObject {
     }
 
     @discardableResult
-    func setImportQualityMode(_ value: AvatarAssetQualityMode) async -> Bool {
-        let save = dependencies.setImportQualityMode
-        return await persistPreference(
-            .importQualityMode,
-            operation: { try await save(value) },
-            apply: { self.importQualityMode = value }
-        )
+    func setImportQualityMode(
+        _ value: AvatarAssetQualityMode
+    ) -> Task<Bool, Never> {
+        guard let token = beginOperation() else {
+            return Task { false }
+        }
+        preferenceGeneration &+= 1
+        let generation = preferenceGeneration
+        latestPreferenceOperation[.importQualityMode] = generation
+        importQualityMode = value
+        isImportQualityPersistencePending = true
+
+        let predecessor = importQualityPersistenceTail
+        let task = Task { [weak self] in
+            _ = await predecessor?.value
+            guard let self else { return false }
+            return await self.persistSelectedImportQualityMode(
+                value,
+                token: token,
+                generation: generation
+            )
+        }
+        importQualityPersistenceTail = task
+        return task
     }
 
     @discardableResult
@@ -585,6 +611,8 @@ final class AvatarSettingsModel: ObservableObject {
             reduceMotion = false
             mouthCuesEnabled = true
             importQualityMode = .lightweight
+            persistedImportQualityMode = .lightweight
+            isImportQualityPersistencePending = false
             paneWidths = [:]
             preferenceGeneration &+= 1
             status = ""
@@ -604,6 +632,60 @@ final class AvatarSettingsModel: ObservableObject {
             operation: { try await save(id) },
             apply: { self.selectedProfileID = id }
         )
+    }
+
+    private func persistSelectedImportQualityMode(
+        _ value: AvatarAssetQualityMode,
+        token: UInt64,
+        generation: UInt64
+    ) async -> Bool {
+        defer { endOperation() }
+        let save = dependencies.setImportQualityMode
+        do {
+            try await preferenceWriteQueue.enqueue {
+                try await save(value)
+            }
+            persistedImportQualityMode = value
+            guard isCurrentOperation(token),
+                  latestPreferenceOperation[.importQualityMode] == generation
+            else {
+                settleInvalidatedImportQualityWrite(
+                    token: token,
+                    generation: generation
+                )
+                return false
+            }
+            isImportQualityPersistencePending = false
+            status = ""
+            onStateChange?()
+            return true
+        } catch {
+            guard isCurrentOperation(token),
+                  latestPreferenceOperation[.importQualityMode] == generation
+            else {
+                settleInvalidatedImportQualityWrite(
+                    token: token,
+                    generation: generation
+                )
+                return false
+            }
+            importQualityMode = persistedImportQualityMode
+            isImportQualityPersistencePending = false
+            status = "Avatar preference could not be saved"
+            onStateChange?()
+            return false
+        }
+    }
+
+    private func settleInvalidatedImportQualityWrite(
+        token: UInt64,
+        generation: UInt64
+    ) {
+        guard !isCurrentOperation(token),
+              latestPreferenceOperation[.importQualityMode] == generation
+        else { return }
+        importQualityMode = persistedImportQualityMode
+        isImportQualityPersistencePending = false
     }
 
     private func persistPreference(
@@ -676,9 +758,12 @@ final class AvatarSettingsModel: ObservableObject {
         selectedProfileID = preferences.selectedProfileID
         reduceMotion = preferences.reduceMotion
         mouthCuesEnabled = preferences.mouthCuesEnabled
-        importQualityMode = AvatarAssetQualityMode(
+        let qualityMode = AvatarAssetQualityMode(
             rawValue: preferences.importQualityMode
         ) ?? .lightweight
+        importQualityMode = qualityMode
+        persistedImportQualityMode = qualityMode
+        isImportQualityPersistencePending = false
         onStateChange?()
     }
 

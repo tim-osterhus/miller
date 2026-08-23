@@ -111,7 +111,7 @@ struct AvatarSettingsTab: View {
                     selection: Binding(
                         get: { model.importQualityMode },
                         set: { value in
-                            Task { _ = await model.setImportQualityMode(value) }
+                            model.setImportQualityMode(value)
                         }
                     )
                 ) {
@@ -132,7 +132,11 @@ struct AvatarSettingsTab: View {
                 }
 
                 Button("Choose VRM 1.0 Model…") { chooseModel() }
-                    .disabled(!model.isEnabled || model.isBusy)
+                    .disabled(
+                        !model.isEnabled
+                            || model.isBusy
+                            || model.isImportQualityPersistencePending
+                    )
 
                 ForEach(model.profiles, id: \.id) { profile in
                     VStack(alignment: .leading, spacing: 6) {
