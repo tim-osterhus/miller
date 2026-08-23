@@ -93,6 +93,12 @@
       "bytes": 12227
     },
     {
+      "path": "LICENSES/vrm-studio-2-LICENSE.txt",
+      "role": "license",
+      "sha256": "5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5",
+      "bytes": 1064
+    },
+    {
       "path": "NOTICE",
       "role": "notice",
       "sha256": "7940591ec58349cb6a7bb16782b2b15ec75dc12e609a29d1db7354ff7a648ace",

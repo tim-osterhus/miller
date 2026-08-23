@@ -259,6 +259,31 @@ conversation; audio and provider/session payloads remain transient. Typed and
 live operations are mutually exclusive. Typed interaction resumes after live
 termination.
 
+## Avatar lip sync and admission quality
+
+Miller's Avatar integration keeps the Avatar package as the renderer and
+profile owner; Miller remains the owner of Live Voice lifecycle and projection
+ordering. Lip sync is a bounded optional projection within Live Voice only.
+The WebKit peer observes played remote output, derives a scalar and optional
+complete `aa`, `ih`, `ou`, `ee`, `oh` weights, and forwards those values through
+the existing generation/playback/cue ordering contract. Raw audio, spectral
+buffers, microphone data, and transcript text never cross the Avatar bridge.
+Scalar-only or partial/unusable model support falls back to the scalar cue,
+and the approximation is not phoneme-accurate. The setting defaults On and
+can be disabled without restarting the renderer; lifecycle, Reduced Motion,
+visibility, failure, replacement, and disposal clear mouth presentation.
+
+Avatar model admission has two finite modes. Lightweight is the default and
+preserves the original safety envelope. High Quality is selected for the next
+import and persisted per profile; it raises the captured-file, buffer, and
+accessor-referenced ceilings to exactly 2.5 GiB, expands aggregate byte/count/
+geometry ceilings by 20x and image dimensions by 4x, and keeps JSON nesting,
+supported skin layouts, integrity, cancellation, and checked arithmetic
+guards. High Quality is not unlimited and does not guarantee that the host
+hardware or renderer can allocate an admitted model; such runtime failures
+remain explicit load failures. Neither mode permits Miller to ship a model,
+motion, or private fixture.
+
 ## Remaining Gate 4B exclusions
 
 The deterministic GPT-Live harness does not establish owner-visible voice

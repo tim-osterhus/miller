@@ -90,12 +90,12 @@ Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
 the v0.1.2 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
 
-## Miller Avatar v0.1.0-alpha.8
+## Miller Avatar v0.1.1
 
 Miller links the public Miller Avatar package from
 `https://github.com/tim-osterhus/miller-avatar.git` at the immutable reviewed
-commit `903bb8ae0c06d3c582c9a0ad3880da976d3b1439`, published as version
-`v0.1.0-alpha.8`. The package is distributed under
+commit `10ea95f3871289369130eeec77bba4b1efdee135`, published as version
+`v0.1.1`. The package is distributed under
 Apache-2.0. MillerApp links only `MillerAvatarCore` and `MillerAvatarHost`;
 the diagnostic `MillerAvatarApp` product is neither linked nor packaged.
 
@@ -111,9 +111,45 @@ inventory is exactly:
 
 The resource closure is checked at the source checkout, build output, release
 inventory, and release verifier boundaries. It contains no VRM or VRMA character or motion assets, model bytes, motion bytes, user profile, or
-private fixture. Linking this package does not construct a profile store,
-load a model, or activate a renderer while Avatar is disabled; those runtime
-surfaces are outside this C2 package-only change.
+private fixture. Miller Avatar v0.1.1 additionally provides the additive
+five-vowel mouth-cue contract and finite Lightweight/High Quality admission
+policies. Lightweight remains the default; High Quality is an explicit
+per-import, per-profile opt-in with captured-file, buffer, and accessor
+ceilings of exactly 2.5 GiB (2,684,354,560 bytes), 20x aggregate byte/count/
+geometry ceilings, and 4x image dimensions. JSON nesting, supported skin
+layouts, checked arithmetic, cancellation, integrity checks, and the
+Lightweight VRMA budget remain enforced. A runtime allocation failure below
+the policy ceiling is still reported as a real load failure.
+
+The Avatar package does not contain a model, motion, texture, audio, user
+profile, or private fixture. Linking this package does not construct a profile
+store, load a model, or activate a renderer while Avatar is disabled.
+
+### Miller lip-sync adaptation provenance
+
+Miller's optional lip-sync classifier is an independent adaptation of reviewed
+behavior from the owner-controlled local VRM Studio donor, inspected at
+immutable commit `dc077143a2bc279f384cc4e2acaa86c459efb489`. Reviewed donor files were
+`src/js/lip_sync_analysis.js`, `tests/lip_sync_analysis.test.js`, and the
+smoothing behavior in `src/js/vrm_audio.js`. The donor root license is MIT,
+copyright `(c) 2026 ZaberKo`; its `package.json` declares ISC, which is a
+metadata discrepancy and is not treated as the source-code license.
+
+Miller adapted only the pure five-vowel analysis behavior and smoothing
+concepts. It did not copy microphone acquisition, audio ownership, UI,
+provider, model, motion, or media code. The adapted classifier is retained at
+the SwiftPM runtime resource root
+`Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js` for
+`Bundle.module` lookup and copied byte-for-byte to
+`Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js`
+for deployment/inventory purposes. Both files are required to have SHA-256
+`1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806`.
+
+Lip sync is Live Voice only, default On, and derives bounded five-vowel
+weights from played remote output. No microphone-derived lip sync, raw audio,
+spectral data, transcript-derived cue, or phoneme-accuracy guarantee crosses
+the Avatar bridge. Scalar-only and partial/unusable model paths fall back to
+the existing scalar mouth cue.
 
 The real packaged-app Avatar-Off launch test is deferred for this remediation
 because the protected retained release boundary is occupied by the owner-

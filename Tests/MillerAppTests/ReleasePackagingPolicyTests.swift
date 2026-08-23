@@ -128,18 +128,25 @@ struct ReleasePackagingPolicyTests {
         let contracts = [packageScript, inventoryScript, verifier, provenanceVerifier]
         for required in [
             "miller-avatar-NOTICE.txt",
+            "vrm-studio-2-LICENSE.txt",
+            "Miller_MillerApp.bundle/lip-sync-analysis.js",
+            "LiveVoice/lip-sync-analysis.js",
+            "cmp -s",
             "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
-            "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
-            "37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f",
-            "60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173",
-            "008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5",
-            "f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e",
-            "a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62",
+            "3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb",
+            "4b551043c8e5076293ab51208646192bc2479ca632bc2d3c8c2200ed74508b01",
+            "b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531",
+            "7fb0012536d51ad8aa3291c227f16971fa4dc4894b705d235cc33ad735a3a08c",
+            "c1f01bcefd91a0736debff35e8667e176aafe9480c55cda490546e884d27eabf",
+            "7668c64aef579bd29a0fedc3670b653e71aad1402100b789b5208ed64610c9af",
             "5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478",
             "3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff",
             "Mapbox Earcut 3.0.1",
             "Copyright © 2016 Mapbox",
             "Permission to use, copy, modify",
+            "dc077143a2bc279f384cc4e2acaa86c459efb489",
+            "Copyright (c) 2026 ZaberKo",
+            "2.5 GiB",
         ] {
             #expect(
                 contracts.contains { $0.contains(required) },
@@ -254,6 +261,54 @@ struct ReleasePackagingPolicyTests {
                 && relationship["relatedSpdxElement"] as? String
                     == "SPDXRef-Package-MapboxEarcut"
         })
+    }
+
+    @Test
+    func sbomDeclaresThePlayedOutputLipSyncAdaptationAndLegalText() throws {
+        let data = try Data(contentsOf: repositoryRoot.appending(
+            path: "Packaging/Miller.spdx.json"
+        ))
+        let document = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let packages = try #require(document["packages"] as? [[String: Any]])
+        let classifier = try #require(packages.first { package in
+            package["name"] as? String == "VRM Studio lip-sync classifier adaptation"
+        })
+        #expect(classifier["versionInfo"] as? String
+            == "dc077143a2bc279f384cc4e2acaa86c459efb489")
+        #expect(classifier["licenseConcluded"] as? String == "MIT")
+        #expect(classifier["licenseDeclared"] as? String == "MIT")
+        #expect(classifier["copyrightText"] as? String == "Copyright (c) 2026 ZaberKo")
+        #expect(classifier["filesAnalyzed"] as? Bool == true)
+        #expect(classifier["hasFiles"] as? [String] == [
+            "SPDXRef-File-VRMStudioLipSyncBundleRoot",
+            "SPDXRef-File-VRMStudioLipSyncLiveVoice",
+        ])
+        #expect(classifier["packageFileName"] as? String
+            == "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js")
+        let files = try #require(document["files"] as? [[String: Any]])
+        for (identifier, path) in [
+            ("SPDXRef-File-VRMStudioLipSyncBundleRoot",
+             "Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js"),
+            ("SPDXRef-File-VRMStudioLipSyncLiveVoice",
+             "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"),
+        ] {
+            let file = try #require(files.first { $0["SPDXID"] as? String == identifier })
+            #expect(file["fileName"] as? String == path)
+            #expect(file["checksums"] as? [[String: String]] == [[
+                "algorithm": "SHA256",
+                "checksumValue": "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806",
+            ]])
+        }
+        let license = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Gateway/vendor/LICENSES/vrm-studio-2-LICENSE.txt"
+            ),
+            encoding: .utf8
+        )
+        #expect(license.contains("MIT License"))
+        #expect(license.contains("Copyright (c) 2026 ZaberKo"))
     }
 
     @Test
@@ -577,7 +632,8 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
-            "Miller Avatar@0.1.0-alpha.8",
+            "Miller Avatar@0.1.1",
+            "VRM Studio lip-sync classifier adaptation@dc077143a2bc279f384cc4e2acaa86c459efb489",
             "Miller@0.1.2",
             "MillerCapabilityBridge@0.1.2",
             "MillerCapabilities@0.1.2",
@@ -717,7 +773,7 @@ struct ReleasePackagingPolicyTests {
                 {
                   "sourceControl": [{
                     "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialAvatarURL)"}]},
-                    "requirement": {"exact": ["0.1.0-alpha.8"]}
+                    "requirement": {"exact": ["0.1.1"]}
                   }]
                 }
               ],
@@ -774,8 +830,8 @@ private enum ReleasePackagingPolicy {
     static let approvedSDKVersion = "0.12.1"
     static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
     static let officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git"
-    static let approvedAvatarVersion = "0.1.0-alpha.8"
-    static let approvedAvatarRevision = "903bb8ae0c06d3c582c9a0ad3880da976d3b1439"
+    static let approvedAvatarVersion = "0.1.1"
+    static let approvedAvatarRevision = "10ea95f3871289369130eeec77bba4b1efdee135"
 
     private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
     private static let packageInventories = [

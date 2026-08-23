@@ -20,6 +20,17 @@ runtime model/token files are verified against the pinned hashes recorded in
 PROVENANCE.md. Bootstrap archives, headers, compiler inputs, and generated
 keyword files are not distributed.
 
+Optional Miller Avatar lip sync
+--------------------------------
+Miller adapts the pure played-output five-vowel analysis behavior from the
+owner-controlled VRM Studio donor reviewed at commit
+dc077143a2bc279f384cc4e2acaa86c459efb489. The donor source is MIT, copyright
+(c) 2026 ZaberKo. The exact license text is retained at
+Contents/Resources/Legal/vrm-studio-2-LICENSE.txt and the full provenance,
+adaptations, exclusions, and package metadata discrepancy are recorded in
+PROVENANCE.md and THIRD_PARTY_NOTICES.md. Miller does not ship donor models,
+motions, audio, or media and does not use microphone-derived lip sync.
+
 OpenClaw GPT-Live wire adaptation
 ---------------------------------
 Miller contains a modified adaptation of bounded GPT-Live behavior from

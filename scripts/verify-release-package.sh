@@ -12,14 +12,17 @@ legal="$bundle_root/Contents/Resources/Legal"
 inventory="$(dirname "$bundle_root")/inventory.json"
 avatar_bundle="$bundle_root/Contents/Resources/MillerAvatar_MillerAvatarHost.bundle"
 typeset -A avatar_web_hashes=(
-  app.js 008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5
-  bundle-manifest.json f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e
-  bundle-metafile.json a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62
+  app.js 7fb0012536d51ad8aa3291c227f16971fa4dc4894b705d235cc33ad735a3a08c
+  bundle-manifest.json c1f01bcefd91a0736debff35e8667e176aafe9480c55cda490546e884d27eabf
+  bundle-metafile.json 7668c64aef579bd29a0fedc3670b653e71aad1402100b789b5208ed64610c9af
   index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
-avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
-avatar_aggregate_third_party_notices_sha256="60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173"
+avatar_notice_sha256="3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb"
+avatar_aggregate_third_party_notices_sha256="b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531"
+vrm_studio_license_sha256="5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5"
+lip_sync_bundle_root_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
+lip_sync_live_voice_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
 
 test -d "$bundle_root"
 test ! -L "$bundle_root"
@@ -66,7 +69,16 @@ Web/index.html
 Web/styles.css"
 test -z "$(find -P "$avatar_bundle" \( \
   -iname '*.vrm' -o -iname '*.vrma' -o -iname '*MillerAvatarApp*' \
-\) -print -quit)"
+  \) -print -quit)"
+test -f "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js"
+test ! -L "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js"
+test -f "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
+test ! -L "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
+test "$(shasum -a 256 "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js" | awk '{print $1}')" = "$lip_sync_bundle_root_sha256"
+test "$(shasum -a 256 "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js" | awk '{print $1}')" = "$lip_sync_live_voice_sha256"
+cmp -s \
+  "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js" \
+  "$bundle_root/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
 for web_file expected in ${(kv)avatar_web_hashes}; do
   test -f "$avatar_bundle/Web/$web_file"
   test ! -L "$avatar_bundle/Web/$web_file"
@@ -113,6 +125,11 @@ do
   test -f "$legal/$document"
   test ! -L "$legal/$document"
 done
+test -f "$legal/vrm-studio-2-LICENSE.txt"
+test ! -L "$legal/vrm-studio-2-LICENSE.txt"
+test "$(shasum -a 256 "$legal/vrm-studio-2-LICENSE.txt" | awk '{print $1}')" = "$vrm_studio_license_sha256"
+grep -Fq 'Copyright (c) 2026 ZaberKo' "$legal/vrm-studio-2-LICENSE.txt"
+grep -Fq 'dc077143a2bc279f384cc4e2acaa86c459efb489' "$legal/PROVENANCE.md"
 test "$(shasum -a 256 "$legal/miller-avatar-NOTICE.txt" | awk '{print $1}')" = \
   "$avatar_notice_sha256"
 test "$(shasum -a 256 "$legal/THIRD_PARTY_NOTICES.md" \
@@ -138,8 +155,8 @@ do
   grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.8' \
-  '903bb8ae0c06d3c582c9a0ad3880da976d3b1439' \
+  'Miller Avatar v0.1.1' \
+  '10ea95f3871289369130eeec77bba4b1efdee135' \
   'Web/bundle-manifest.json' \
   'Web/bundle-metafile.json' \
   'no VRM or VRMA character or motion assets'
@@ -147,7 +164,7 @@ do
   grep -Fq "$required" "$legal/PROVENANCE.md"
 done
 for required in \
-  'Miller Avatar v0.1.0-alpha.8' \
+  'Miller Avatar v0.1.1' \
   'MillerAvatarApp` is a diagnostic product' \
   '## Three.js 0.180.0 — MIT License' \
   '## @pixiv/three-vrm core family 3.5.5 — MIT License' \
@@ -252,7 +269,8 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.8",
+    "Miller Avatar@0.1.1",
+    "VRM Studio lip-sync classifier adaptation@dc077143a2bc279f384cc4e2acaa86c459efb489",
     `Miller@${releaseVersion}`,
     `MillerCapabilityBridge@${releaseVersion}`,
     `MillerCapabilities@${releaseVersion}`,
@@ -301,7 +319,7 @@ assert.match(mcpLicense, /Apache License/i);
 assert.match(mcpLicense, /MIT License/i);
 const avatar = sbom.packages.find((entry) => entry.name === "Miller Avatar");
 assert.ok(avatar);
-assert.equal(avatar.versionInfo, "0.1.0-alpha.8");
+assert.equal(avatar.versionInfo, "0.1.1");
 assert.equal(avatar.licenseConcluded, "Apache-2.0");
 assert.equal(avatar.licenseDeclared, "Apache-2.0");
 assert.equal(avatar.downloadLocation, "https://github.com/tim-osterhus/miller-avatar.git");
@@ -309,6 +327,36 @@ assert.equal(
   avatar.packageFileName,
   "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
 );
+const lipSync = sbom.packages.find(
+  (entry) => entry.name === "VRM Studio lip-sync classifier adaptation",
+);
+assert.ok(lipSync);
+assert.equal(lipSync.versionInfo, "dc077143a2bc279f384cc4e2acaa86c459efb489");
+assert.equal(lipSync.licenseConcluded, "MIT");
+assert.equal(
+  lipSync.packageFileName,
+  "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js",
+);
+assert.equal(lipSync.filesAnalyzed, true);
+assert.deepEqual(lipSync.hasFiles, [
+  "SPDXRef-File-VRMStudioLipSyncBundleRoot",
+  "SPDXRef-File-VRMStudioLipSyncLiveVoice",
+]);
+const lipSyncFiles = new Map(
+  (sbom.files ?? []).map((entry) => [entry.SPDXID, entry]),
+);
+for (const [id, path] of [
+  ["SPDXRef-File-VRMStudioLipSyncBundleRoot", "Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js"],
+  ["SPDXRef-File-VRMStudioLipSyncLiveVoice", "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"],
+]) {
+  const file = lipSyncFiles.get(id);
+  assert.ok(file, `SBOM missing lip-sync file: ${path}`);
+  assert.equal(file.fileName, path);
+  assert.deepEqual(file.checksums, [{
+    algorithm: "SHA256",
+    checksumValue: "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806",
+  }]);
+}
 for (const [name, version, location] of [
   ["Three.js", "0.180.0", "https://github.com/mrdoob/three.js"],
   ["@pixiv/three-vrm", "3.5.5", "https://github.com/pixiv/three-vrm"],
@@ -388,7 +436,9 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.0-alpha.8",
+    "Miller Avatar@0.1.1",
+    "VRM Studio lip-sync classifier adaptation (LiveVoice copy)@dc077143a2bc279f384cc4e2acaa86c459efb489",
+    "VRM Studio lip-sync classifier adaptation (bundle root)@dc077143a2bc279f384cc4e2acaa86c459efb489",
     `MillerCapabilityBridge@${releaseVersion}`,
     "Node.js@22.22.0",
     "ONNX Runtime wake runtime@1.24.4",

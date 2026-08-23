@@ -92,6 +92,32 @@ implies saved audio.
 If Live Voice is unavailable, typed conversations and local history remain
 available.
 
+## Optional Miller Avatar
+
+Miller Avatar is disabled until you enable it and select a local VRM 1.0
+profile. Miller does not bundle a character, animation, texture, audio, or
+VRMA asset; those remain user-selected runtime inputs. The pinned package is
+Miller Avatar `v0.1.1` at its immutable reviewed commit, and its default
+Lightweight admission policy remains the normal path.
+
+Avatar lip sync is optional and enabled by default when supported. It applies
+only during Live Voice, analyzes played remote output, and emits bounded
+five-vowel approximation weights. Scalar-only or partial/unusable model
+support falls back to the existing scalar mouth cue. No microphone-derived
+lip sync, raw audio, spectral data, or transcript-derived cue crosses the
+Avatar bridge, and this is not a phoneme-accuracy system. Reduced Motion and
+the lip-sync setting are independent; disabling lip sync does not stop the
+rest of the Avatar lifecycle.
+
+High Quality is an explicit next-import/per-profile admission mode for models
+that exceed Lightweight. It uses finite captured-file, buffer, and
+accessor-referenced ceilings of 2.5 GiB each, expanded finite aggregate
+budgets, and 4x image dimensions. Integrity checks, cancellation, supported
+skin layouts, JSON nesting, and checked arithmetic remain enforced. A model
+can still fail at runtime from allocation or renderer limits below the policy
+ceiling. Lightweight remains the default and existing profiles keep their
+recorded mode across reload and retry.
+
 ## Tools with an authority boundary
 
 Miller supports local and remote MCP servers. It also imports reviewed portable

@@ -83,9 +83,23 @@ const runtimeInventory = [
   },
   {
     name: "Miller Avatar",
-    version: "0.1.0-alpha.8",
+    version: "0.1.1",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle",
     role: "renderer_resource_bundle",
+  },
+  {
+    name: "VRM Studio lip-sync classifier adaptation (bundle root)",
+    version: "dc077143a2bc279f384cc4e2acaa86c459efb489",
+    path: "Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js",
+    role: "played_output_lip_sync_classifier_runtime",
+    sha256: "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806",
+  },
+  {
+    name: "VRM Studio lip-sync classifier adaptation (LiveVoice copy)",
+    version: "dc077143a2bc279f384cc4e2acaa86c459efb489",
+    path: "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js",
+    role: "played_output_lip_sync_classifier_deployment",
+    sha256: "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806",
   },
   {
     name: "Three.js",
@@ -135,17 +149,17 @@ const avatarWebFiles = [
   {
     name: "app.js",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/app.js",
-    sha256: "008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5",
+    sha256: "7fb0012536d51ad8aa3291c227f16971fa4dc4894b705d235cc33ad735a3a08c",
   },
   {
     name: "bundle-manifest.json",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-manifest.json",
-    sha256: "f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e",
+    sha256: "c1f01bcefd91a0736debff35e8667e176aafe9480c55cda490546e884d27eabf",
   },
   {
     name: "bundle-metafile.json",
     path: "Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/bundle-metafile.json",
-    sha256: "a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62",
+    sha256: "7668c64aef579bd29a0fedc3670b653e71aad1402100b789b5208ed64610c9af",
   },
   {
     name: "index.html",
@@ -161,7 +175,7 @@ const avatarWebFiles = [
 const avatarLegalFiles = [
   {
     path: "Contents/Resources/Legal/miller-avatar-NOTICE.txt",
-    sha256: "3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b",
+    sha256: "3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb",
     requiredText: [
       "The distributed web renderer contains Three.js",
       "THIRD_PARTY_NOTICES.md",
@@ -170,7 +184,7 @@ const avatarLegalFiles = [
   },
   {
     path: "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
-    sha256: "60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173",
+    sha256: "b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531",
     requiredText: [
       "Model Context Protocol Swift SDK 0.12.1",
       "Three.js 0.180.0",
@@ -179,6 +193,15 @@ const avatarLegalFiles = [
       "Mapbox Earcut 3.0.1",
       "Copyright © 2016 Mapbox",
       "Permission to use, copy, modify",
+      "THE SOFTWARE IS PROVIDED",
+    ],
+  },
+  {
+    path: "Contents/Resources/Legal/vrm-studio-2-LICENSE.txt",
+    sha256: "5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5",
+    requiredText: [
+      "MIT License",
+      "Copyright (c) 2026 ZaberKo",
       "THE SOFTWARE IS PROVIDED",
     ],
   },
@@ -199,6 +222,8 @@ const exactFiles = new Set([
   "Contents/Resources/Gateway/runtime/node",
   "Contents/Resources/Gateway/runtime/LICENSE.node-22.22.0",
   "Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png",
+  "Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js",
+  "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js",
   ...avatarWebFiles.map(({ path }) => path),
   "Contents/Resources/WakeWord/model/encoder.onnx",
   "Contents/Resources/WakeWord/model/decoder.onnx",
@@ -211,6 +236,7 @@ const exactFiles = new Set([
   "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
   ...avatarLegalFiles.map(({ path }) => path),
   "Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt",
+  "Contents/Resources/Legal/vrm-studio-2-LICENSE.txt",
   "Contents/Resources/Legal/Miller.spdx.json",
 ]);
 
@@ -442,6 +468,28 @@ async function assertCanonicalDependencyClosure(bundle, expectedOverride) {
   }
 }
 
+async function assertLipSyncCopies(bundle) {
+  const bundleRootPath = join(
+    bundle,
+    "Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js",
+  );
+  const liveVoicePath = join(
+    bundle,
+    "Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js",
+  );
+  const bundleRootBytes = await readFile(bundleRootPath);
+  const liveVoiceBytes = await readFile(liveVoicePath);
+  if (!Buffer.from(bundleRootBytes).equals(liveVoiceBytes)) {
+    fail("bundle-root and LiveVoice lip-sync classifier copies differ");
+  }
+  if (sha256(bundleRootBytes) !== "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806") {
+    fail("bundle-root lip-sync classifier hash changed");
+  }
+  if (sha256(liveVoiceBytes) !== "1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806") {
+    fail("LiveVoice lip-sync classifier hash changed");
+  }
+}
+
 async function collectFiles(bundle, { allowSyntheticBinary = false } = {}) {
   const metadata = await requiredRegular(bundle, "bundle root");
   if (!metadata.isDirectory()) fail(`bundle root is not a directory: ${bundle}`);
@@ -509,13 +557,21 @@ async function buildInventory(
   await assertInventoryOutput(bundle, output, { allowExisting });
   await assertAvatarWebClosure(bundle);
   await assertAvatarLegalClosure(bundle);
+  await assertLipSyncCopies(bundle);
   const files = await collectFiles(bundle, { allowSyntheticBinary });
   for (const path of exactFiles) {
     await requiredRegular(join(bundle, path), `canonical release file ${path}`);
   }
   await assertCanonicalDependencyClosure(bundle, expectedDependencyInventory);
   for (const component of runtimeInventory) {
-    await requiredRegular(join(bundle, component.path), `runtime inventory ${component.path}`);
+    const componentPath = join(bundle, component.path);
+    await requiredRegular(componentPath, `runtime inventory ${component.path}`);
+    if (component.sha256) {
+      const digest = sha256(await readFile(componentPath));
+      if (digest !== component.sha256) {
+        fail(`runtime inventory hash changed: ${component.path}`);
+      }
+    }
   }
   return {
     schema: "miller-source-release-inventory",

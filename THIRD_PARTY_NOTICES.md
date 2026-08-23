@@ -13,12 +13,12 @@ Miller capability bridge; no SDK source tree is bundled. The exact reviewed
 license text is packaged at
 `Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
-## Miller Avatar v0.1.0-alpha.8 — Apache License 2.0
+## Miller Avatar v0.1.1 — Apache License 2.0
 
 Miller links `MillerAvatarCore` and `MillerAvatarHost` from
 `https://github.com/tim-osterhus/miller-avatar.git` at immutable commit
-`903bb8ae0c06d3c582c9a0ad3880da976d3b1439`, published as version
-`v0.1.0-alpha.8`. The package is
+`10ea95f3871289369130eeec77bba4b1efdee135`, published as version
+`v0.1.1`. The package is
 licensed under Apache-2.0. `MillerAvatarApp` is a diagnostic product and is
 not linked or packaged by Miller.
 
@@ -26,6 +26,29 @@ Only the following fixed host resource files are distributed under
 `Contents/Resources/MillerAvatar_MillerAvatarHost.bundle/Web/`:
 `app.js`, `bundle-manifest.json`, `bundle-metafile.json`, `index.html`, and
 `styles.css`. No VRM or VRMA character or motion assets are distributed.
+
+Miller's optional Live Voice lip-sync classifier is an adapted, not copied,
+pure behavioral core reviewed from the owner-controlled local VRM Studio donor
+at commit `dc077143a2bc279f384cc4e2acaa86c459efb489`. The reviewed donor files
+were `src/js/lip_sync_analysis.js`, `tests/lip_sync_analysis.test.js`, and
+smoothing behavior from `src/js/vrm_audio.js`. The donor root source license is
+MIT, copyright `(c) 2026 ZaberKo`. Its `package.json` declares ISC; that
+metadata discrepancy is recorded in `PROVENANCE.md` and does not change the
+source-code license. The exact reviewed MIT text is packaged at
+`Contents/Resources/Legal/vrm-studio-2-LICENSE.txt`.
+
+Only the pure played-output classifier behavior was adapted. Microphone
+acquisition, runtime audio ownership, UI, providers, models, motions, and
+media were excluded. Lip sync is Live Voice only, default On, uses bounded
+five-vowel approximation with scalar/partial-model fallback, and does not
+claim phoneme accuracy. Miller never sends raw audio or spectral data across
+the Avatar bridge and never derives lip sync from the microphone.
+
+Miller Avatar v0.1.1 also exposes an explicit per-import/per-profile High
+Quality admission mode. Lightweight remains the default. High Quality uses
+finite 2.5 GiB captured-file, buffer, and accessor ceilings, expanded finite
+structural budgets, retained integrity/cancellation checks, and truthful
+runtime allocation failures; it does not ship any model or motion asset.
 
 ## Three.js 0.180.0 — MIT License
 

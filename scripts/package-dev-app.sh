@@ -36,14 +36,17 @@ node_archive_bytes="49923798"
 node_archive_sha256="5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
 node_binary_sha256="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
 node_license_sha256="e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
-avatar_package_revision="903bb8ae0c06d3c582c9a0ad3880da976d3b1439"
-avatar_notice_sha256="3bf4701ddf53ddc2f54de43d8a86aaf74e988fd913844866b9e4239dfb07c50b"
-avatar_third_party_notices_sha256="37addfbef220c47fb1cd752fbc51a3f5f68f0b1b5694032a47ef5f474016ca2f"
-avatar_aggregate_third_party_notices_sha256="60bf37913a869902b64b9daf586d20f31f12f75aad283426903a7adfe4f94173"
+avatar_package_revision="10ea95f3871289369130eeec77bba4b1efdee135"
+avatar_notice_sha256="3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb"
+avatar_third_party_notices_sha256="4b551043c8e5076293ab51208646192bc2479ca632bc2d3c8c2200ed74508b01"
+avatar_aggregate_third_party_notices_sha256="b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531"
+vrm_studio_license_sha256="5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5"
+lip_sync_bundle_root_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
+lip_sync_live_voice_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
 typeset -A avatar_web_hashes=(
-  app.js 008e39a78629c610f4c17a631d35dfa44b50ff07adb26407b39570a7f6d7b1f5
-  bundle-manifest.json f9cf786f88868f24e8117a9f75a252c95b13a238e971efd12e1dc6a7b3de4c6e
-  bundle-metafile.json a8caf87e00feaa3257f2c6517fb2aaf0af86e9601621a0188fb92bda619d0e62
+  app.js 7fb0012536d51ad8aa3291c227f16971fa4dc4894b705d235cc33ad735a3a08c
+  bundle-manifest.json c1f01bcefd91a0736debff35e8667e176aafe9480c55cda490546e884d27eabf
+  bundle-metafile.json 7668c64aef579bd29a0fedc3670b653e71aad1402100b789b5208ed64610c9af
   index.html 5f7aced6cebbfe95873ea2c6ad40634d5994c9d18a1e6a247a3e609ec0736478
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
@@ -188,12 +191,19 @@ verify_avatar_notice_embedding() {
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const upstream = await readFile(process.argv[2]);
-const aggregate = await readFile(process.argv[3]);
-assert.ok(
-  aggregate.includes(upstream),
-  "aggregate Avatar notice does not contain the exact upstream runtime notice",
-);
+const upstream = (await readFile(process.argv[2])).toString("utf8");
+const aggregate = (await readFile(process.argv[3])).toString("utf8");
+for (const heading of [
+  "## Three.js 0.180.0 — MIT License",
+  "## pixiv three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families — MIT License",
+  "## Mapbox Earcut 3.0.1 — ISC License",
+]) {
+  const start = upstream.indexOf(heading);
+  assert.notEqual(start, -1, `upstream Avatar notice is missing ${heading}`);
+  const next = upstream.indexOf("\n## ", start + heading.length);
+  const section = upstream.slice(start, next === -1 ? upstream.length : next).trim();
+  assert.ok(aggregate.includes(section), `aggregate Avatar notice omitted ${heading}`);
+}
 EOF
 }
 
@@ -210,6 +220,9 @@ verify_avatar_legal_source() {
   test -f "$repo_root/THIRD_PARTY_NOTICES.md"
   test ! -L "$repo_root/THIRD_PARTY_NOTICES.md"
   test "$(shasum -a 256 "$repo_root/THIRD_PARTY_NOTICES.md" | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+  test -f "$repo_root/Gateway/vendor/LICENSES/vrm-studio-2-LICENSE.txt"
+  test ! -L "$repo_root/Gateway/vendor/LICENSES/vrm-studio-2-LICENSE.txt"
+  test "$(shasum -a 256 "$repo_root/Gateway/vendor/LICENSES/vrm-studio-2-LICENSE.txt" | awk '{print $1}')" = "$vrm_studio_license_sha256"
   verify_avatar_notice_embedding "$repo_root/THIRD_PARTY_NOTICES.md"
 }
 
@@ -221,6 +234,9 @@ verify_avatar_legal_output() {
   test ! -L "$legal_root/THIRD_PARTY_NOTICES.md"
   test "$(shasum -a 256 "$legal_root/miller-avatar-NOTICE.txt" | awk '{print $1}')" = "$avatar_notice_sha256"
   test "$(shasum -a 256 "$legal_root/THIRD_PARTY_NOTICES.md" | awk '{print $1}')" = "$avatar_aggregate_third_party_notices_sha256"
+  test -f "$legal_root/vrm-studio-2-LICENSE.txt"
+  test ! -L "$legal_root/vrm-studio-2-LICENSE.txt"
+  test "$(shasum -a 256 "$legal_root/vrm-studio-2-LICENSE.txt" | awk '{print $1}')" = "$vrm_studio_license_sha256"
   for required in \
     "Three.js 0.180.0" \
     "pixiv three-vrm 3.5.5" \
@@ -232,6 +248,8 @@ verify_avatar_legal_output() {
   do
     grep -Fq "$required" "$legal_root/THIRD_PARTY_NOTICES.md"
   done
+  grep -Fq "dc077143a2bc279f384cc4e2acaa86c459efb489" "$legal_root/PROVENANCE.md"
+  grep -Fq "2.5 GiB" "$legal_root/PROVENANCE.md"
   verify_avatar_notice_embedding "$legal_root/THIRD_PARTY_NOTICES.md"
 }
 
@@ -392,6 +410,9 @@ cp "$bridge_binary_path" \
   "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 cp -R "$resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
 cp -R "$avatar_resource_bundle" "$staging_root/Miller.app/Contents/Resources/"
+mkdir -p "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/LiveVoice"
+cp "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js" \
+  "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
 for wakeword_model in \
   encoder.onnx \
   decoder.onnx \
@@ -438,8 +459,10 @@ if [[ "$package_mode" == "release" ]]; then
     printf '# Miller v%s packaged provenance\n\n' "$release_version"
     printf 'This release candidate is not Developer ID-signed and is not notarized. It contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
     printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
-    printf 'Miller Avatar v0.1.0-alpha.8 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 903bb8ae0c06d3c582c9a0ad3880da976d3b1439 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
+    printf 'Miller Avatar v0.1.1 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 10ea95f3871289369130eeec77bba4b1efdee135 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
     printf 'The Avatar Web payload includes Three.js 0.180.0 and the @pixiv/three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families under MIT terms.\n\n'
+    printf 'Optional lip sync adapts only the pure played-output classifier behavior reviewed from VRM Studio at commit dc077143a2bc279f384cc4e2acaa86c459efb489. It is MIT, copyright (c) 2026 ZaberKo; its exact license is vrm-studio-2-LICENSE.txt. Microphone acquisition, raw audio, transcript-derived cues, models, motions, and media are excluded.\n\n'
+    printf 'Avatar High Quality admission is finite and opt-in: 2.5 GiB captured-file, buffer, and accessor ceilings, expanded finite structural budgets, and retained integrity/cancellation checks. Lightweight remains the default.\n\n'
     printf 'Signing status: ad-hoc structural verification only. Developer ID signing and notarization were not run.\n'
   } > "$legal_root/PROVENANCE.md"
   cp "$repo_root/THIRD_PARTY_NOTICES.md" \
@@ -447,6 +470,8 @@ if [[ "$package_mode" == "release" ]]; then
   cp "$avatar_checkout/NOTICE" "$legal_root/miller-avatar-NOTICE.txt"
   cp "$repo_root/Gateway/vendor/LICENSES/mcp-swift-sdk-LICENSE.txt" \
     "$legal_root/mcp-swift-sdk-LICENSE.txt"
+  cp "$repo_root/Gateway/vendor/LICENSES/vrm-studio-2-LICENSE.txt" \
+    "$legal_root/vrm-studio-2-LICENSE.txt"
   cp "$repo_root/Packaging/Miller.spdx.json" "$legal_root/Miller.spdx.json"
   verify_avatar_legal_output "$legal_root"
 fi
@@ -555,6 +580,13 @@ test -x "$staging_root/Miller.app/Contents/MacOS/Miller"
 test -x "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 test ! -L "$staging_root/Miller.app/Contents/Helpers/MillerCapabilityBridge"
 test -f "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/MillerStatusIcon.png"
+test -f "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js"
+test -f "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
+test "$(shasum -a 256 "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js" | awk '{print $1}')" = "$lip_sync_bundle_root_sha256"
+test "$(shasum -a 256 "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js" | awk '{print $1}')" = "$lip_sync_live_voice_sha256"
+cmp -s \
+  "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/lip-sync-analysis.js" \
+  "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle/LiveVoice/lip-sync-analysis.js"
 test -z "$(
   find -P "$staging_root/Miller.app/Contents/Resources/Miller_MillerApp.bundle" \
     -type l -print -quit
