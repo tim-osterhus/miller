@@ -36,10 +36,10 @@ node_archive_bytes="49923798"
 node_archive_sha256="5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
 node_binary_sha256="913b144fdb40638b1acef7974ab3c33fbd527cc0974cb5da467ab1e6ac51b4d4"
 node_license_sha256="e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49"
-avatar_package_revision="10ea95f3871289369130eeec77bba4b1efdee135"
+avatar_package_revision="932c66cc2e361f6132aba4ea1abc54ec1a57aa43"
 avatar_notice_sha256="3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb"
 avatar_third_party_notices_sha256="4b551043c8e5076293ab51208646192bc2479ca632bc2d3c8c2200ed74508b01"
-avatar_aggregate_third_party_notices_sha256="b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531"
+avatar_aggregate_third_party_notices_sha256="addffaace6dca2e0e4e272d89da75bdf399d7358666d8415b33bbef60224dcf9"
 vrm_studio_license_sha256="5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5"
 lip_sync_bundle_root_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
 lip_sync_live_voice_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
@@ -459,7 +459,7 @@ if [[ "$package_mode" == "release" ]]; then
     printf '# Miller v%s packaged provenance\n\n' "$release_version"
     printf 'This release candidate is not Developer ID-signed and is not notarized. It contains the Miller application, linked capability and wake native code, verified local wake model/token runtime files, the official MCP Swift SDK, the pinned Node.js runtime, and the reviewed Pi gateway overlay.\n\n'
     printf 'Wake archives, headers, compiler inputs, extraction roots, and private generated keyword files are not shipped. The separately installed Codex runtime is an external prerequisite and is not bundled.\n\n'
-    printf 'Miller Avatar v0.1.1 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 10ea95f3871289369130eeec77bba4b1efdee135 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
+    printf 'Miller Avatar v0.1.2 is linked from https://github.com/tim-osterhus/miller-avatar.git at commit 932c66cc2e361f6132aba4ea1abc54ec1a57aa43 under Apache-2.0. Its host resource bundle contains only Web/app.js, Web/bundle-manifest.json, Web/bundle-metafile.json, Web/index.html, and Web/styles.css; no VRM or VRMA character or motion assets are shipped.\n\n'
     printf 'The Avatar Web payload includes Three.js 0.180.0 and the @pixiv/three-vrm 3.5.5 and @pixiv/three-vrm-animation 3.5.5 package families under MIT terms.\n\n'
     printf 'Optional lip sync adapts only the pure played-output classifier behavior reviewed from VRM Studio at commit dc077143a2bc279f384cc4e2acaa86c459efb489. It is MIT, copyright (c) 2026 ZaberKo; its exact license is vrm-studio-2-LICENSE.txt. Microphone acquisition, raw audio, transcript-derived cues, models, motions, and media are excluded.\n\n'
     printf 'Avatar High Quality admission is finite and opt-in: 2.5 GiB captured-file, buffer, and accessor ceilings, expanded finite structural budgets, and retained integrity/cancellation checks. Lightweight remains the default.\n\n'

@@ -57,10 +57,10 @@ grep -Fq '## Node.js 22.22.0 bundled runtime' \
 grep -Fq '## Node.js 22.22.0' "$repo_root/THIRD_PARTY_NOTICES.md"
 grep -Fq '## Model Context Protocol Swift SDK 0.12.1' \
   "$repo_root/THIRD_PARTY_NOTICES.md"
-grep -Fq '10ea95f3871289369130eeec77bba4b1efdee135' \
+grep -Fq '932c66cc2e361f6132aba4ea1abc54ec1a57aa43' \
   "$repo_root/Package.resolved"
-grep -Fq '## Miller Avatar v0.1.1' "$repo_root/PROVENANCE.md"
-grep -Fq '## Miller Avatar v0.1.1' "$repo_root/THIRD_PARTY_NOTICES.md"
+grep -Fq '## Miller Avatar v0.1.2' "$repo_root/PROVENANCE.md"
+grep -Fq '## Miller Avatar v0.1.2' "$repo_root/THIRD_PARTY_NOTICES.md"
 grep -Fq 'MillerAvatar_MillerAvatarHost.bundle' "$repo_root/PROVENANCE.md"
 grep -Fq 'Web/bundle-manifest.json' "$repo_root/PROVENANCE.md"
 grep -Fq 'Web/bundle-metafile.json' "$repo_root/PROVENANCE.md"
@@ -73,7 +73,7 @@ for required in \
   "miller-avatar-NOTICE.txt" \
   "THIRD_PARTY_NOTICES.md" \
   "3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb" \
-  "b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531" \
+  "addffaace6dca2e0e4e272d89da75bdf399d7358666d8415b33bbef60224dcf9" \
   "Mapbox Earcut 3.0.1" \
   "Copyright © 2016 Mapbox" \
   "Permission to use, copy, modify"
@@ -129,8 +129,8 @@ const expectedBundleRoots = [
   "partial-json",
 ];
 const avatarPackageURL = "https://github.com/tim-osterhus/miller-avatar.git";
-const avatarPackageVersion = "0.1.1";
-const avatarPackageRevision = "10ea95f3871289369130eeec77bba4b1efdee135";
+const avatarPackageVersion = "0.1.2";
+const avatarPackageRevision = "932c66cc2e361f6132aba4ea1abc54ec1a57aa43";
 const avatarWebFiles = [
   "Web/app.js",
   "Web/bundle-manifest.json",
@@ -150,7 +150,7 @@ const avatarLegalHashes = {
   "THIRD_PARTY_NOTICES.md": "4b551043c8e5076293ab51208646192bc2479ca632bc2d3c8c2200ed74508b01",
 };
 const avatarAggregateNoticeSHA256 =
-  "b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531";
+  "addffaace6dca2e0e4e272d89da75bdf399d7358666d8415b33bbef60224dcf9";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -375,7 +375,7 @@ assert.equal(
   "tracked aggregate Avatar notice changed",
 );
 for (const required of [
-  "Miller Avatar v0.1.1",
+  "Miller Avatar v0.1.2",
   avatarPackageRevision,
   "Apache-2.0",
   "MillerAvatar_MillerAvatarHost.bundle",

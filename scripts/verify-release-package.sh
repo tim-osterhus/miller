@@ -19,7 +19,7 @@ typeset -A avatar_web_hashes=(
   styles.css 3164ff84bd29e3dd67896b21094049596ecf02c9ea76a3546cab3fd51304a4ff
 )
 avatar_notice_sha256="3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb"
-avatar_aggregate_third_party_notices_sha256="b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531"
+avatar_aggregate_third_party_notices_sha256="addffaace6dca2e0e4e272d89da75bdf399d7358666d8415b33bbef60224dcf9"
 vrm_studio_license_sha256="5f5d8db5d399eaa9dbc3c9c2a61a83c0d6d9404e00d44ae190e12acfd31a15a5"
 lip_sync_bundle_root_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
 lip_sync_live_voice_sha256="1543ccf20b688c0619bfd2654c777e4239031dbc9c837132b9e9d722a891a806"
@@ -155,8 +155,8 @@ do
   grep -Fq "$required" "$legal/THIRD_PARTY_NOTICES.md"
 done
 for required in \
-  'Miller Avatar v0.1.1' \
-  '10ea95f3871289369130eeec77bba4b1efdee135' \
+  'Miller Avatar v0.1.2' \
+  '932c66cc2e361f6132aba4ea1abc54ec1a57aa43' \
   'Web/bundle-manifest.json' \
   'Web/bundle-metafile.json' \
   'no VRM or VRMA character or motion assets'
@@ -164,7 +164,7 @@ do
   grep -Fq "$required" "$legal/PROVENANCE.md"
 done
 for required in \
-  'Miller Avatar v0.1.1' \
+  'Miller Avatar v0.1.2' \
   'MillerAvatarApp` is a diagnostic product' \
   '## Three.js 0.180.0 — MIT License' \
   '## @pixiv/three-vrm core family 3.5.5 — MIT License' \
@@ -269,7 +269,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.1",
+    "Miller Avatar@0.1.2",
     "VRM Studio lip-sync classifier adaptation@dc077143a2bc279f384cc4e2acaa86c459efb489",
     `Miller@${releaseVersion}`,
     `MillerCapabilityBridge@${releaseVersion}`,
@@ -436,7 +436,7 @@ assert.deepEqual(
   [
     "@miller/pi-mvp-overlay@0.82.0-a3",
     "MCP Swift SDK@0.12.1",
-    "Miller Avatar@0.1.1",
+    "Miller Avatar@0.1.2",
     "VRM Studio lip-sync classifier adaptation (LiveVoice copy)@dc077143a2bc279f384cc4e2acaa86c459efb489",
     "VRM Studio lip-sync classifier adaptation (bundle root)@dc077143a2bc279f384cc4e2acaa86c459efb489",
     `MillerCapabilityBridge@${releaseVersion}`,

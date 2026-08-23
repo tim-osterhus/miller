@@ -90,12 +90,12 @@ Task 18 tested official Codex CLI/App Server `0.146.0` on Apple Silicon; this is
 the v0.1.2 minimum tested/support boundary. The `0.145.0` material below is
 protocol reference/evidence only and is not a runtime support claim.
 
-## Miller Avatar v0.1.1
+## Miller Avatar v0.1.2
 
 Miller links the public Miller Avatar package from
 `https://github.com/tim-osterhus/miller-avatar.git` at the immutable reviewed
-commit `10ea95f3871289369130eeec77bba4b1efdee135`, published as version
-`v0.1.1`. The package is distributed under
+commit `932c66cc2e361f6132aba4ea1abc54ec1a57aa43`, published as version
+`v0.1.2`. The package is distributed under
 Apache-2.0. MillerApp links only `MillerAvatarCore` and `MillerAvatarHost`;
 the diagnostic `MillerAvatarApp` product is neither linked nor packaged.
 
@@ -111,7 +111,7 @@ inventory is exactly:
 
 The resource closure is checked at the source checkout, build output, release
 inventory, and release verifier boundaries. It contains no VRM or VRMA character or motion assets, model bytes, motion bytes, user profile, or
-private fixture. Miller Avatar v0.1.1 additionally provides the additive
+private fixture. Miller Avatar v0.1.2 additionally provides the additive
 five-vowel mouth-cue contract and finite Lightweight/High Quality admission
 policies. Lightweight remains the default; High Quality is an explicit
 per-import, per-profile opt-in with captured-file, buffer, and accessor

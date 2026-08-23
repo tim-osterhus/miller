@@ -13,12 +13,12 @@ Miller capability bridge; no SDK source tree is bundled. The exact reviewed
 license text is packaged at
 `Contents/Resources/Legal/mcp-swift-sdk-LICENSE.txt`.
 
-## Miller Avatar v0.1.1 — Apache License 2.0
+## Miller Avatar v0.1.2 — Apache License 2.0
 
 Miller links `MillerAvatarCore` and `MillerAvatarHost` from
 `https://github.com/tim-osterhus/miller-avatar.git` at immutable commit
-`10ea95f3871289369130eeec77bba4b1efdee135`, published as version
-`v0.1.1`. The package is
+`932c66cc2e361f6132aba4ea1abc54ec1a57aa43`, published as version
+`v0.1.2`. The package is
 licensed under Apache-2.0. `MillerAvatarApp` is a diagnostic product and is
 not linked or packaged by Miller.
 
@@ -44,7 +44,7 @@ five-vowel approximation with scalar/partial-model fallback, and does not
 claim phoneme accuracy. Miller never sends raw audio or spectral data across
 the Avatar bridge and never derives lip sync from the microphone.
 
-Miller Avatar v0.1.1 also exposes an explicit per-import/per-profile High
+Miller Avatar v0.1.2 also exposes an explicit per-import/per-profile High
 Quality admission mode. Lightweight remains the default. High Quality uses
 finite 2.5 GiB captured-file, buffer, and accessor ceilings, expanded finite
 structural budgets, retained integrity/cancellation checks, and truthful

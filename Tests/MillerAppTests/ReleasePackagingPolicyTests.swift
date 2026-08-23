@@ -135,7 +135,7 @@ struct ReleasePackagingPolicyTests {
             "Contents/Resources/Legal/THIRD_PARTY_NOTICES.md",
             "3cb4e702393d25c0484262aeb696740ba9d75aa983c5f70c86152f75b668d6eb",
             "4b551043c8e5076293ab51208646192bc2479ca632bc2d3c8c2200ed74508b01",
-            "b410c410512aa23e1f0ab6a7af3289ed7d4100a9c85d859f7bd148c1bb845531",
+            "addffaace6dca2e0e4e272d89da75bdf399d7358666d8415b33bbef60224dcf9",
             "7fb0012536d51ad8aa3291c227f16971fa4dc4894b705d235cc33ad735a3a08c",
             "c1f01bcefd91a0736debff35e8667e176aafe9480c55cda490546e884d27eabf",
             "7668c64aef579bd29a0fedc3670b653e71aad1402100b789b5208ed64610c9af",
@@ -632,7 +632,7 @@ struct ReleasePackagingPolicyTests {
         #expect(packageNames.sorted() == [
             "@miller/pi-mvp-overlay@0.82.0-a3",
             "MCP Swift SDK@0.12.1",
-            "Miller Avatar@0.1.1",
+            "Miller Avatar@0.1.2",
             "VRM Studio lip-sync classifier adaptation@dc077143a2bc279f384cc4e2acaa86c459efb489",
             "Miller@0.1.2",
             "MillerCapabilityBridge@0.1.2",
@@ -773,7 +773,7 @@ struct ReleasePackagingPolicyTests {
                 {
                   "sourceControl": [{
                     "location": {"remote": [{"urlString": "\(ReleasePackagingPolicy.officialAvatarURL)"}]},
-                    "requirement": {"exact": ["0.1.1"]}
+                    "requirement": {"exact": ["0.1.2"]}
                   }]
                 }
               ],
@@ -830,8 +830,8 @@ private enum ReleasePackagingPolicy {
     static let approvedSDKVersion = "0.12.1"
     static let approvedSDKRevision = "a0ae212ebf6eab5f754c3129608bc5557637e605"
     static let officialAvatarURL = "https://github.com/tim-osterhus/miller-avatar.git"
-    static let approvedAvatarVersion = "0.1.1"
-    static let approvedAvatarRevision = "10ea95f3871289369130eeec77bba4b1efdee135"
+    static let approvedAvatarVersion = "0.1.2"
+    static let approvedAvatarRevision = "932c66cc2e361f6132aba4ea1abc54ec1a57aa43"
 
     private static let productionRoots = ["Sources", "Gateway/src", "Packaging", "scripts"]
     private static let packageInventories = [
