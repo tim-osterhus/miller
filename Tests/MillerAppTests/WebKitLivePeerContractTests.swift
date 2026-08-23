@@ -66,6 +66,18 @@ struct WebKitLivePeerContractTests {
         #expect(html.contains("createMediaStreamSource(remoteStream)"))
         #expect(html.contains("createAnalyser()"))
         #expect(html.components(separatedBy: "createAnalyser()").count - 1 == 1)
+        #expect(html.contains("outputSource.connect(outputAnalyser)"))
+        #expect(!html.contains("microphoneSource.connect(outputAnalyser)"))
+        #expect(html.contains("globalThis.millerLipSyncAnalysis"))
+        #expect(html.contains("millerLipSyncAnalysis.classify"))
+        #expect(html.contains("outputAnalyser.fftSize = 2048"))
+        #expect(html.contains("getFloatTimeDomainData"))
+        #expect(html.contains("getByteFrequencyData"))
+        #expect(html.components(separatedBy: "new Float32Array").count - 1 == 1)
+        #expect(html.components(separatedBy: "new Uint8Array").count - 1 == 1)
+        #expect(html.contains("outputTimeDomain = null"))
+        #expect(html.contains("outputFrequencyDomain = null"))
+        #expect(html.contains("vowels = null"))
         #expect(html.contains("outputSample()"))
         #expect(html.contains("output_audio_buffer.started"))
         #expect(html.contains("output_audio_buffer.stopped"))
@@ -79,6 +91,78 @@ struct WebKitLivePeerContractTests {
         #expect(!html.contains("<iframe"))
         #expect(!html.contains("src=\"http"))
         #expect(!html.contains("window.open"))
+    }
+
+    @Test
+    func outputSampleDecodingPreservesScalarPlaybackWhenVowelsAreAbsentOrInvalid() async throws {
+        let payloads = [
+            "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5}",
+            "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5,\"vowels\":{\"aa\":0.1}}",
+            "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5,\"vowels\":{\"aa\":2,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}}",
+            "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5,\"vowels\":{\"aa\":\"NaN\",\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}}",
+            "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5,\"vowels\":{\"aa\":1e400,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}}",
+        ]
+
+        for payload in payloads {
+            let evaluator = FakeScriptEvaluator(results: [
+                .prepareOffer: syntheticOffer,
+                .applyAnswer: "connected",
+                .outputSample: payload,
+                .close: "ok",
+            ])
+            let peer = WebKitLivePeer(evaluator: evaluator)
+            _ = try await peer.prepareOffer()
+            try await peer.applyAnswerAndWaitForConnected("v=0\r\ns=-\r\n")
+
+            let stream = peer.outputSamples()
+            let sample = await Task<LiveAudioOutputSample?, Never> { @MainActor in
+                for await sample in stream {
+                    return sample
+                }
+                return nil
+            }.value
+
+            let requiredSample = try #require(sample)
+            #expect(requiredSample.isPlaying)
+            #expect(requiredSample.outputBufferActive == true)
+            #expect(requiredSample.offsetMilliseconds == 12)
+            #expect(requiredSample.envelope == 0.5)
+            #expect(requiredSample.vowels == nil)
+            await peer.close()
+        }
+    }
+
+    @Test
+    func outputSampleDecodingAcceptsACompleteBoundedVowelObject() async throws {
+        let evaluator = FakeScriptEvaluator(results: [
+            .prepareOffer: syntheticOffer,
+            .applyAnswer: "connected",
+            .outputSample: "{\"isPlaying\":true,\"outputBufferActive\":true,\"offsetMilliseconds\":12,\"envelope\":0.5,\"vowels\":{\"aa\":0.1,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}}",
+            .close: "ok",
+        ])
+        let peer = WebKitLivePeer(evaluator: evaluator)
+        _ = try await peer.prepareOffer()
+        try await peer.applyAnswerAndWaitForConnected("v=0\r\ns=-\r\n")
+
+        let stream = peer.outputSamples()
+        let sample = await Task<LiveAudioOutputSample?, Never> { @MainActor in
+            for await sample in stream {
+                return sample
+            }
+            return nil
+        }.value
+
+        #expect(sample?.vowels == AvatarVowelWeights(
+            aa: 0.1,
+            ih: 0.2,
+            ou: 0.3,
+            ee: 0.4,
+            oh: 0.5
+        ))
+        #expect(sample?.envelope == 0.5)
+        #expect(sample?.isPlaying == true)
+        #expect(sample?.offsetMilliseconds == 12)
+        await peer.close()
     }
 
     @Test

@@ -145,17 +145,115 @@ struct LiveAudioOutputObservationTests {
         ])
     }
 
+    @Test
+    func enrichedSamplesCarryCompleteVowelsWithoutChangingSpeakingThreshold() {
+        let vowels = AvatarVowelWeights(
+            aa: 0.1,
+            ih: 0.2,
+            ou: 0.3,
+            ee: 0.4,
+            oh: 0.5
+        )
+        var observation = LiveAudioOutputObservationProcessor()
+
+        #expect(observation.observe(
+            sample(isPlaying: true, offset: 100, envelope: 0.05),
+            atMilliseconds: 0
+        ).isEmpty)
+
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 132,
+                envelope: 0.06,
+                vowels: vowels
+            ),
+            atMilliseconds: 34
+        ).isEmpty)
+
+        let started = observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 164,
+                envelope: 0.06,
+                vowels: vowels
+            ),
+            atMilliseconds: 68
+        )
+
+        #expect(started == [
+            .playbackStarted(offsetMilliseconds: 164),
+            .mouthCue(offsetMilliseconds: 164, envelope: 0.06, vowels: vowels),
+        ])
+
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: true,
+                offset: 198,
+                envelope: 0,
+                vowels: vowels
+            ),
+            atMilliseconds: 102
+        ).isEmpty)
+
+        #expect(observation.observe(
+            sample(
+                isPlaying: true,
+                outputBufferActive: false,
+                offset: 232,
+                envelope: 0,
+                vowels: vowels
+            ),
+            atMilliseconds: 136
+        ) == [.playbackStopped(offsetMilliseconds: 232)])
+    }
+
+    @Test
+    func avatarVowelWeightsDecodeOnlyCompleteFiniteBoundedObjects() throws {
+        let valid = Data(
+            "{\"aa\":0.1,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}".utf8
+        )
+        #expect(try JSONDecoder().decode(AvatarVowelWeights.self, from: valid) == AvatarVowelWeights(
+            aa: 0.1,
+            ih: 0.2,
+            ou: 0.3,
+            ee: 0.4,
+            oh: 0.5
+        ))
+
+        for invalid in [
+            "{}",
+            "{\"aa\":0.1}",
+            "{\"aa\":2,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}",
+            "{\"aa\":\"NaN\",\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}",
+            "{\"aa\":1e400,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5}",
+            "{\"aa\":0.1,\"ih\":0.2,\"ou\":0.3,\"ee\":0.4,\"oh\":0.5,\"extra\":0}",
+        ] {
+            #expect(throws: (any Error).self) {
+                _ = try JSONDecoder().decode(
+                    AvatarVowelWeights.self,
+                    from: Data(invalid.utf8)
+                )
+            }
+        }
+    }
+
     private func sample(
         isPlaying: Bool,
         outputBufferActive: Bool? = nil,
         offset: UInt64,
-        envelope: Double
+        envelope: Double,
+        vowels: AvatarVowelWeights? = nil
     ) -> LiveAudioOutputSample {
         LiveAudioOutputSample(
             isPlaying: isPlaying,
             outputBufferActive: outputBufferActive,
             offsetMilliseconds: offset,
-            envelope: envelope
+            envelope: envelope,
+            vowels: vowels
         )
     }
 }

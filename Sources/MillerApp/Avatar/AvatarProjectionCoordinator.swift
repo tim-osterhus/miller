@@ -182,7 +182,7 @@ final class AvatarProjectionCoordinator {
                 generationID: currentGenerationID,
                 playbackID: playbackID
             )
-        case let .mouthCue(offsetMilliseconds, envelope):
+        case let .mouthCue(offsetMilliseconds, envelope, _):
             _ = emitMouthCue(
                 offsetMilliseconds: offsetMilliseconds,
                 envelope: envelope

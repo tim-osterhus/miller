@@ -849,7 +849,7 @@ actor GPTLiveController {
                 outputPlaybackOffsetMilliseconds,
                 offsetMilliseconds
             )
-        case let .mouthCue(offsetMilliseconds, _):
+        case let .mouthCue(offsetMilliseconds, _, _):
             outputPlaybackOffsetMilliseconds = max(
                 outputPlaybackOffsetMilliseconds,
                 offsetMilliseconds

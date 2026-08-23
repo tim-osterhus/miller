@@ -464,7 +464,8 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
             isPlaying: payload.isPlaying ?? false,
             outputBufferActive: payload.outputBufferActive,
             offsetMilliseconds: payload.offsetMilliseconds ?? 0,
-            envelope: envelope
+            envelope: envelope,
+            vowels: payload.vowels
         )
     }
 
@@ -514,10 +515,27 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
             && value.split(whereSeparator: \.isNewline).first == "v=0"
     }
 
-    static let localHTML = """
+    private static let missingLipSyncClassifierSource =
+        "globalThis.millerLipSyncAnalysis = Object.freeze({ classify() { throw new Error('classifier unavailable'); } });"
+
+    private static let lipSyncClassifierSource: String = {
+        guard let resourceURL = Bundle.module.url(
+            forResource: "lip-sync-analysis",
+            withExtension: "js"
+        ) else {
+            return missingLipSyncClassifierSource
+        }
+        return (try? String(contentsOf: resourceURL, encoding: .utf8))
+            ?? missingLipSyncClassifierSource
+    }()
+
+    static let localHTML: String = {
+        let classifierSource = lipSyncClassifierSource
+        return """
     <!doctype html>
     <meta charset="utf-8">
     <script>
+    \(classifierSource)
     (() => {
       let pc = null;
       let localStream = null;
@@ -528,8 +546,11 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
       let remoteStream = null;
       let outputSource = null;
       let outputAnalyser = null;
+      let outputTimeDomain = null;
+      let outputFrequencyDomain = null;
       let lastOutputOffset = 0;
       let outputBufferActive = null;
+      const vowelNames = Object.freeze(["aa", "ih", "ou", "ee", "oh"]);
       const maximumSafeInteger = 9007199254740991;
       const maximumEventCharacters = 65536;
       let channel = null;
@@ -591,7 +612,9 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
               if (!outputAnalyser) {
                 outputSource = audioContext.createMediaStreamSource(remoteStream);
                 outputAnalyser = audioContext.createAnalyser();
-                outputAnalyser.fftSize = 256;
+                outputAnalyser.fftSize = 2048;
+                outputTimeDomain = new Float32Array(outputAnalyser.fftSize);
+                outputFrequencyDomain = new Uint8Array(outputAnalyser.frequencyBinCount);
                 outputSource.connect(outputAnalyser);
               }
             }
@@ -660,7 +683,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (!pc || closed || !audio) {
             throw new Error("output unavailable");
           }
-          if (!outputAnalyser) {
+          if (!outputAnalyser || !outputTimeDomain || !outputFrequencyDomain) {
             return JSON.stringify({
               isPlaying: false,
               outputBufferActive,
@@ -668,17 +691,44 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
               envelope: 0
             });
           }
-          const values = new Uint8Array(outputAnalyser.fftSize);
-          outputAnalyser.getByteTimeDomainData(values);
+          outputAnalyser.getFloatTimeDomainData(outputTimeDomain);
+          outputAnalyser.getByteFrequencyData(outputFrequencyDomain);
           let sum = 0;
-          for (const value of values) {
-            const centered = (value - 128) / 128;
+          for (const value of outputTimeDomain) {
+            const centered = Number.isFinite(value) ? value : 0;
             sum += centered * centered;
           }
-          const measured = values.length === 0
-            ? 0 : Math.sqrt(sum / values.length) * 2;
+          const measured = outputTimeDomain.length === 0
+            ? 0 : Math.sqrt(sum / outputTimeDomain.length) * 2;
           const envelope = Number.isFinite(measured)
             ? Math.min(1, Math.max(0, measured)) : 0;
+          let vowels = null;
+          try {
+            const analysis = globalThis.millerLipSyncAnalysis.classify(
+              outputTimeDomain,
+              outputFrequencyDomain,
+              audioContext.sampleRate,
+              outputAnalyser.fftSize
+            );
+            const candidate = analysis && analysis.vowels;
+            if (candidate
+                && Object.keys(candidate).length === vowelNames.length
+                && vowelNames.every(name =>
+                  Object.prototype.hasOwnProperty.call(candidate, name)
+                  && Number.isFinite(candidate[name])
+                  && candidate[name] >= 0
+                  && candidate[name] <= 1)) {
+              vowels = {
+                aa: candidate.aa,
+                ih: candidate.ih,
+                ou: candidate.ou,
+                ee: candidate.ee,
+                oh: candidate.oh
+              };
+            }
+          } catch (_) {
+            vowels = null;
+          }
           const currentTime = Number(audio.currentTime);
           const measuredOffset = Number.isFinite(currentTime)
             && currentTime >= 0 ? Math.floor(currentTime * 1000) : 0;
@@ -691,12 +741,14 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           const isPlaying = !audio.paused && !audio.ended
             && audio.readyState >= 2
             && tracks.some(track => track.readyState === "live");
-          return JSON.stringify({
+          const payload = {
             isPlaying,
             outputBufferActive,
             offsetMilliseconds: lastOutputOffset,
             envelope
-          });
+          };
+          if (vowels) payload.vowels = vowels;
+          return JSON.stringify(payload);
         },
         async close() {
           if (closed) return "ok";
@@ -710,6 +762,8 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
           if (outputAnalyser) outputAnalyser.disconnect();
           outputSource = null;
           outputAnalyser = null;
+          outputTimeDomain = null;
+          outputFrequencyDomain = null;
           if (audioContext) { try { await audioContext.close(); } catch (_) {} }
           if (remoteStream) for (const track of remoteStream.getTracks()) track.stop();
           if (audio) { audio.pause(); audio.srcObject = null; audio.removeAttribute("src"); audio.load(); }
@@ -721,6 +775,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
     })();
     </script>
     """
+    }()
 }
 
 private final class WebKitLivePeerCallRace<Value: Sendable>: @unchecked Sendable {
@@ -756,6 +811,30 @@ private struct OutputSamplePayload: Decodable {
     let outputBufferActive: Bool?
     let offsetMilliseconds: UInt64?
     let envelope: Double?
+    let vowels: AvatarVowelWeights?
+
+    private enum CodingKeys: String, CodingKey {
+        case isPlaying
+        case outputBufferActive
+        case offsetMilliseconds
+        case envelope
+        case vowels
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isPlaying = try container.decodeIfPresent(Bool.self, forKey: .isPlaying)
+        outputBufferActive = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .outputBufferActive
+        )
+        offsetMilliseconds = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .offsetMilliseconds
+        )
+        envelope = try container.decodeIfPresent(Double.self, forKey: .envelope)
+        vowels = try? container.decode(AvatarVowelWeights.self, forKey: .vowels)
+    }
 }
 
 @MainActor

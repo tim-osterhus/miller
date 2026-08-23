@@ -1,5 +1,116 @@
 import Foundation
 
+/// Bounded vowel weights derived from the played remote output stream.
+///
+/// The public initializer is deliberately forgiving for native callers. JSON
+/// decoding is strict, and the peer's payload decoder treats a failed decode
+/// as scalar-only output instead of failing the live session.
+public struct AvatarVowelWeights: Codable, Equatable, Sendable {
+    public let aa: Double
+    public let ih: Double
+    public let ou: Double
+    public let ee: Double
+    public let oh: Double
+
+    public init(aa: Double, ih: Double, ou: Double, ee: Double, oh: Double) {
+        self.init(clamping: aa, ih: ih, ou: ou, ee: ee, oh: oh)
+    }
+
+    init(clamping aa: Double, ih: Double, ou: Double, ee: Double, oh: Double) {
+        self.aa = Self.clamp(aa)
+        self.ih = Self.clamp(ih)
+        self.ou = Self.clamp(ou)
+        self.ee = Self.clamp(ee)
+        self.oh = Self.clamp(oh)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: AnyCodingKey.self)
+        let expectedKeys = Set(CodingKeys.allCases.map(\.stringValue))
+        let actualKeys = Set(container.allKeys.map(\.stringValue))
+        guard actualKeys == expectedKeys else {
+            throw DecodingError.dataCorruptedError(
+                forKey: AnyCodingKey(stringValue: "aa")!,
+                in: container,
+                debugDescription: "vowel weights must contain exactly aa, ih, ou, ee, and oh"
+            )
+        }
+
+        let values = try [
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "aa")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ih")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ou")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ee")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "oh")!),
+        ]
+        guard values.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: AnyCodingKey(stringValue: "aa")!,
+                in: container,
+                debugDescription: "vowel weights must be finite and within 0...1"
+            )
+        }
+        self.init(
+            uncheckedAA: values[0],
+            ih: values[1],
+            ou: values[2],
+            ee: values[3],
+            oh: values[4]
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(aa, forKey: .aa)
+        try container.encode(ih, forKey: .ih)
+        try container.encode(ou, forKey: .ou)
+        try container.encode(ee, forKey: .ee)
+        try container.encode(oh, forKey: .oh)
+    }
+
+    private init(
+        uncheckedAA aa: Double,
+        ih: Double,
+        ou: Double,
+        ee: Double,
+        oh: Double
+    ) {
+        self.aa = aa
+        self.ih = ih
+        self.ou = ou
+        self.ee = ee
+        self.oh = oh
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case aa
+        case ih
+        case ou
+        case ee
+        case oh
+    }
+
+    private struct AnyCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int?
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+            self.intValue = nil
+        }
+
+        init?(intValue: Int) {
+            self.stringValue = String(intValue)
+            self.intValue = intValue
+        }
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+}
+
 /// A bounded observation of the audio element that plays the admitted remote
 /// WebRTC stream. It intentionally contains no PCM, media object, or provider
 /// data.
@@ -8,17 +119,20 @@ public struct LiveAudioOutputSample: Equatable, Sendable {
     public let outputBufferActive: Bool?
     public let offsetMilliseconds: UInt64
     public let envelope: Double
+    public let vowels: AvatarVowelWeights?
 
     public init(
         isPlaying: Bool,
         outputBufferActive: Bool? = nil,
         offsetMilliseconds: UInt64,
-        envelope: Double
+        envelope: Double,
+        vowels: AvatarVowelWeights? = nil
     ) {
         self.isPlaying = isPlaying
         self.outputBufferActive = outputBufferActive
         self.offsetMilliseconds = offsetMilliseconds
         self.envelope = envelope
+        self.vowels = vowels
     }
 }
 
@@ -27,7 +141,11 @@ public struct LiveAudioOutputSample: Equatable, Sendable {
 /// not by this low-level observer.
 public enum LiveAudioOutputObservation: Equatable, Sendable {
     case playbackStarted(offsetMilliseconds: UInt64)
-    case mouthCue(offsetMilliseconds: UInt64, envelope: Double)
+    case mouthCue(
+        offsetMilliseconds: UInt64,
+        envelope: Double,
+        vowels: AvatarVowelWeights? = nil
+    )
     case playbackStopped(offsetMilliseconds: UInt64)
 }
 
@@ -123,12 +241,22 @@ public struct LiveAudioOutputObservationProcessor: Sendable {
             active = true
             return [
                 .playbackStarted(offsetMilliseconds: offset),
-                .mouthCue(offsetMilliseconds: offset, envelope: envelope),
+                .mouthCue(
+                    offsetMilliseconds: offset,
+                    envelope: envelope,
+                    vowels: sample.vowels
+                ),
             ]
         }
 
         if aboveThreshold {
-            return [.mouthCue(offsetMilliseconds: offset, envelope: envelope)]
+            return [
+                .mouthCue(
+                    offsetMilliseconds: offset,
+                    envelope: envelope,
+                    vowels: sample.vowels
+                ),
+            ]
         }
 
         guard sample.outputBufferActive == nil,
