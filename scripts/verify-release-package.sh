@@ -319,7 +319,7 @@ assert.match(mcpLicense, /Apache License/i);
 assert.match(mcpLicense, /MIT License/i);
 const avatar = sbom.packages.find((entry) => entry.name === "Miller Avatar");
 assert.ok(avatar);
-assert.equal(avatar.versionInfo, "0.1.1");
+assert.equal(avatar.versionInfo, "0.1.2");
 assert.equal(avatar.licenseConcluded, "Apache-2.0");
 assert.equal(avatar.licenseDeclared, "Apache-2.0");
 assert.equal(avatar.downloadLocation, "https://github.com/tim-osterhus/miller-avatar.git");
