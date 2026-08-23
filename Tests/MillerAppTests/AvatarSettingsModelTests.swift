@@ -35,6 +35,126 @@ struct AvatarSettingsModelTests {
 
     @Test
     @MainActor
+    func loadRestoresLipSyncAndNextImportQualityAndPersistsChanges() async {
+        let profileID = UUID()
+        let profile = makeProfile(id: profileID, revision: 2)
+        let writes = AvatarPresentationPreferenceRecorder()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: false,
+                selectedProfileID: profileID,
+                reduceMotion: false,
+                mouthCuesEnabled: false,
+                importQualityMode: AvatarAssetQualityMode.highQuality.rawValue
+            ),
+            profiles: [profile],
+            setMouthCuesEnabled: { value in await writes.recordMouth(value) },
+            setImportQualityMode: { value in await writes.recordQuality(value) },
+            importMotion: { _, _, _ in
+                .init(profileID: profileID, profileRevision: 3)
+            }
+        ))
+
+        await model.load()
+
+        #expect(!model.mouthCuesEnabled)
+        #expect(model.importQualityMode == .highQuality)
+        #expect(await model.setMouthCuesEnabled(true))
+        #expect(await model.setImportQualityMode(.lightweight))
+        #expect(model.mouthCuesEnabled)
+        #expect(model.importQualityMode == .lightweight)
+        #expect(await writes.values == [
+            .mouth(true),
+            .quality(.lightweight),
+        ])
+    }
+
+    @Test
+    @MainActor
+    func importUsesSelectedQualityOnceWithoutReclassifyingExistingProfiles() async {
+        let profileID = UUID()
+        let profile = makeProfile(
+            id: profileID,
+            revision: 2,
+            qualityMode: .lightweight
+        )
+        let imported = AvatarCommittedProfileChange(
+            profileID: UUID(),
+            profileRevision: 1
+        )
+        let qualities = AvatarQualityRecorder()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: true,
+                selectedProfileID: profileID,
+                reduceMotion: false,
+                importQualityMode: AvatarAssetQualityMode.highQuality.rawValue
+            ),
+            profiles: [profile],
+            importModelWithQuality: { _, _, quality in
+                await qualities.record(quality)
+                return imported
+            },
+            importMotion: { _, _, _ in
+                .init(profileID: profileID, profileRevision: 3)
+            }
+        ))
+
+        await model.load()
+        #expect(model.selectedProfile?.qualityMode == .lightweight)
+        #expect(await model.importModel(
+            at: URL(fileURLWithPath: "/tmp/quality.vrm"),
+            displayName: "Quality"
+        ) == imported)
+        #expect(await qualities.values == [.highQuality])
+        #expect(model.profiles.first?.qualityMode == .lightweight)
+    }
+
+    @Test
+    @MainActor
+    func importCapturesQualityBeforeAnInFlightOperationCanChangeTheSelection() async {
+        let profile = makeProfile(id: UUID(), revision: 2)
+        let imported = AvatarCommittedProfileChange(
+            profileID: UUID(),
+            profileRevision: 1
+        )
+        let qualities = AvatarQualityRecorder()
+        let gate = AvatarSettingsGate()
+        let model = AvatarSettingsModel(dependencies: dependencies(
+            preferences: .init(
+                enabled: false,
+                selectedProfileID: nil,
+                reduceMotion: false,
+                importQualityMode: AvatarAssetQualityMode.highQuality.rawValue
+            ),
+            profiles: [profile],
+            importModelWithQuality: { _, _, quality in
+                await qualities.record(quality)
+                await gate.waitUntilReleased()
+                return imported
+            },
+            importMotion: { _, _, _ in
+                .init(profileID: profile.id, profileRevision: 3)
+            }
+        ))
+
+        await model.load()
+        let pendingImport = Task {
+            await model.importModel(
+                at: URL(fileURLWithPath: "/tmp/quality.vrm"),
+                displayName: "Quality"
+            )
+        }
+        await gate.waitUntilEntered()
+        #expect(await model.setImportQualityMode(.lightweight))
+        await gate.release()
+
+        #expect(await pendingImport.value == imported)
+        #expect(await qualities.values == [.highQuality])
+    }
+
+    @Test
+    @MainActor
     func loadRestoresProfileLocalPaneWidthAndUsesDefaultWhenMissing() async {
         let profileID = UUID()
         let otherProfileID = UUID()
@@ -210,7 +330,7 @@ struct AvatarSettingsModelTests {
             ),
             profiles: [profile],
             setSelectedProfile: { value in await writes.recordSelected(value) },
-            importModel: { _, _ in change },
+            importModelWithQuality: { _, _, _ in change },
             importMotion: { _, _, _ in throw AvatarSettingsError.unavailable }
         ))
 
@@ -416,7 +536,9 @@ struct AvatarSettingsModelTests {
             preferences: .init(
                 enabled: true,
                 selectedProfileID: profileID,
-                reduceMotion: true
+                reduceMotion: true,
+                mouthCuesEnabled: false,
+                importQualityMode: AvatarAssetQualityMode.highQuality.rawValue
             ),
             profiles: [profile],
             clearAvatarPreferences: { await calls.record("preferences") },
@@ -425,6 +547,8 @@ struct AvatarSettingsModelTests {
         ))
 
         await model.load()
+        #expect(!model.mouthCuesEnabled)
+        #expect(model.importQualityMode == .highQuality)
         let result = await model.withResetFence {
             (
                 await model.resetMetadataWhileFenced(),
@@ -439,6 +563,8 @@ struct AvatarSettingsModelTests {
         #expect(!model.isEnabled)
         #expect(model.selectedProfileID == nil)
         #expect(!model.reduceMotion)
+        #expect(model.mouthCuesEnabled)
+        #expect(model.importQualityMode == .lightweight)
     }
 
     @Test
@@ -498,7 +624,11 @@ struct AvatarSettingsModelTests {
         #expect(source.value)
     }
 
-    private func makeProfile(id: UUID, revision: UInt64) -> AvatarProfileSummary {
+    private func makeProfile(
+        id: UUID,
+        revision: UInt64,
+        qualityMode: AvatarAssetQualityMode = .lightweight
+    ) -> AvatarProfileSummary {
         AvatarProfileSummary(
             id: id,
             displayName: "Miller",
@@ -507,7 +637,8 @@ struct AvatarSettingsModelTests {
             modelConsecutiveLoadFailures: 0,
             modelStatus: .available,
             motions: [],
-            motionBindings: [:]
+            motionBindings: [:],
+            qualityMode: qualityMode
         )
     }
 
@@ -519,12 +650,14 @@ struct AvatarSettingsModelTests {
         setEnabled: (@Sendable (Bool) async throws -> Void)? = nil,
         setSelectedProfile: (@Sendable (UUID?) async throws -> Void)? = nil,
         setReduceMotion: (@Sendable (Bool) async throws -> Void)? = nil,
+        setMouthCuesEnabled: (@Sendable (Bool) async throws -> Void)? = nil,
+        setImportQualityMode: (@Sendable (AvatarAssetQualityMode) async throws -> Void)? = nil,
         loadPaneWidths: (@Sendable () async throws -> [UUID: Double])? = nil,
         setPaneWidth: (@Sendable (UUID, Double) async throws -> Void)? = nil,
         replacePaneWidths: (@Sendable ([UUID: Double]) async throws -> Void)? = nil,
         clearAvatarPreferences: (@Sendable () async throws -> Void)? = nil,
         resetMetadata: (@Sendable () async throws -> Void)? = nil,
-        importModel: (@Sendable (URL, String) async throws -> AvatarCommittedProfileChange)? = nil,
+        importModelWithQuality: (@Sendable (URL, String, AvatarAssetQualityMode) async throws -> AvatarCommittedProfileChange)? = nil,
         renameProfile: (@Sendable (UUID, String) async throws -> AvatarCommittedProfileChange?)? = nil,
         removeProfile: (@Sendable (UUID) async throws -> AvatarCommittedProfileChange?)? = nil,
         importMotion: @escaping @Sendable (UUID, URL, String) async throws -> AvatarCommittedProfileChange?,
@@ -534,26 +667,70 @@ struct AvatarSettingsModelTests {
         retryProfile: (@Sendable (UUID) async throws -> AvatarCommittedProfileChange?)? = nil,
         retryMotion: (@Sendable (UUID, UUID) async throws -> AvatarCommittedProfileChange?)? = nil
     ) -> AvatarSettingsDependencies {
-        AvatarSettingsDependencies(
-            loadPreferences: loadPreferences ?? { preferences },
-            setEnabled: setEnabled ?? { _ in },
-            setSelectedProfile: setSelectedProfile ?? { _ in },
-            setReduceMotion: setReduceMotion ?? { _ in },
-            loadPaneWidths: loadPaneWidths ?? { paneWidths },
-            setPaneWidth: setPaneWidth ?? { _, _ in },
-            replacePaneWidths: replacePaneWidths ?? { _ in },
-            clearAvatarPreferences: clearAvatarPreferences ?? {},
-            listProfiles: { profiles },
-            importModel: importModel ?? { _, _ in throw AvatarSettingsError.unavailable },
-            renameProfile: renameProfile ?? { _, _ in throw AvatarSettingsError.unavailable },
-            removeProfile: removeProfile ?? { _ in throw AvatarSettingsError.unavailable },
+        let resolvedLoadPreferences: @Sendable () async throws -> AvatarPreferences =
+            loadPreferences ?? { preferences }
+        let resolvedSetEnabled: @Sendable (Bool) async throws -> Void =
+            setEnabled ?? { _ in }
+        let resolvedSetSelectedProfile: @Sendable (UUID?) async throws -> Void =
+            setSelectedProfile ?? { _ in }
+        let resolvedSetReduceMotion: @Sendable (Bool) async throws -> Void =
+            setReduceMotion ?? { _ in }
+        let resolvedSetMouthCuesEnabled: @Sendable (Bool) async throws -> Void =
+            setMouthCuesEnabled ?? { _ in }
+        let resolvedSetImportQualityMode: @Sendable (AvatarAssetQualityMode) async throws -> Void =
+            setImportQualityMode ?? { _ in }
+        let resolvedLoadPaneWidths: @Sendable () async throws -> [UUID: Double] =
+            loadPaneWidths ?? { paneWidths }
+        let resolvedSetPaneWidth: @Sendable (UUID, Double) async throws -> Void =
+            setPaneWidth ?? { _, _ in }
+        let resolvedReplacePaneWidths: @Sendable ([UUID: Double]) async throws -> Void =
+            replacePaneWidths ?? { _ in }
+        let resolvedClearAvatarPreferences: @Sendable () async throws -> Void =
+            clearAvatarPreferences ?? { }
+        let resolvedListProfiles: @Sendable () async throws -> [AvatarProfileSummary] =
+            { profiles }
+        let resolvedImportModelWithQuality: @Sendable (URL, String, AvatarAssetQualityMode) async throws -> AvatarCommittedProfileChange =
+            importModelWithQuality ?? { _, _, _ in
+                throw AvatarSettingsError.unavailable
+            }
+        let resolvedRenameProfile: @Sendable (UUID, String) async throws -> AvatarCommittedProfileChange? =
+            renameProfile ?? { _, _ in throw AvatarSettingsError.unavailable }
+        let resolvedRemoveProfile: @Sendable (UUID) async throws -> AvatarCommittedProfileChange? =
+            removeProfile ?? { _ in throw AvatarSettingsError.unavailable }
+        let resolvedRenameMotion: @Sendable (UUID, UUID, String) async throws -> AvatarCommittedProfileChange? =
+            renameMotion ?? { _, _, _ in throw AvatarSettingsError.unavailable }
+        let resolvedRemoveMotion: @Sendable (UUID, UUID) async throws -> AvatarCommittedProfileChange? =
+            removeMotion ?? { _, _ in throw AvatarSettingsError.unavailable }
+        let resolvedBindMotion: @Sendable (UUID, AvatarMotionRole, UUID?) async throws -> AvatarCommittedProfileChange? =
+            bindMotion ?? { _, _, _ in throw AvatarSettingsError.unavailable }
+        let resolvedRetryProfile: @Sendable (UUID) async throws -> AvatarCommittedProfileChange? =
+            retryProfile ?? { _ in throw AvatarSettingsError.unavailable }
+        let resolvedRetryMotion: @Sendable (UUID, UUID) async throws -> AvatarCommittedProfileChange? =
+            retryMotion ?? { _, _ in throw AvatarSettingsError.unavailable }
+        let resolvedResetMetadata: @Sendable () async throws -> Void =
+            resetMetadata ?? { }
+        return AvatarSettingsDependencies(
+            loadPreferences: resolvedLoadPreferences,
+            setEnabled: resolvedSetEnabled,
+            setSelectedProfile: resolvedSetSelectedProfile,
+            setReduceMotion: resolvedSetReduceMotion,
+            setMouthCuesEnabled: resolvedSetMouthCuesEnabled,
+            setImportQualityMode: resolvedSetImportQualityMode,
+            loadPaneWidths: resolvedLoadPaneWidths,
+            setPaneWidth: resolvedSetPaneWidth,
+            replacePaneWidths: resolvedReplacePaneWidths,
+            clearAvatarPreferences: resolvedClearAvatarPreferences,
+            listProfiles: resolvedListProfiles,
+            importModelWithQuality: resolvedImportModelWithQuality,
+            renameProfile: resolvedRenameProfile,
+            removeProfile: resolvedRemoveProfile,
             importMotion: importMotion,
-            renameMotion: renameMotion ?? { _, _, _ in throw AvatarSettingsError.unavailable },
-            removeMotion: removeMotion ?? { _, _ in throw AvatarSettingsError.unavailable },
-            bindMotion: bindMotion ?? { _, _, _ in throw AvatarSettingsError.unavailable },
-            retryProfile: retryProfile ?? { _ in throw AvatarSettingsError.unavailable },
-            retryMotion: retryMotion ?? { _, _ in throw AvatarSettingsError.unavailable },
-            resetMetadata: resetMetadata ?? { }
+            renameMotion: resolvedRenameMotion,
+            removeMotion: resolvedRemoveMotion,
+            bindMotion: resolvedBindMotion,
+            retryProfile: resolvedRetryProfile,
+            retryMotion: resolvedRetryMotion,
+            resetMetadata: resolvedResetMetadata
         )
     }
 }
@@ -583,6 +760,31 @@ private enum AvatarPreferenceWrite: Hashable, Sendable {
     case enabled(Bool)
     case selected(UUID?)
     case reduceMotion(Bool)
+}
+
+private enum AvatarPresentationPreferenceWrite: Equatable, Sendable {
+    case mouth(Bool)
+    case quality(AvatarAssetQualityMode)
+}
+
+private actor AvatarPresentationPreferenceRecorder {
+    private(set) var values: [AvatarPresentationPreferenceWrite] = []
+
+    func recordMouth(_ value: Bool) {
+        values.append(.mouth(value))
+    }
+
+    func recordQuality(_ value: AvatarAssetQualityMode) {
+        values.append(.quality(value))
+    }
+}
+
+private actor AvatarQualityRecorder {
+    private(set) var values: [AvatarAssetQualityMode] = []
+
+    func record(_ value: AvatarAssetQualityMode) {
+        values.append(value)
+    }
 }
 
 private actor AvatarPreferenceWriteRecorder {

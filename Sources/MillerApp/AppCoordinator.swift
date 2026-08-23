@@ -3727,7 +3727,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             avatarIntegration?.update(
                 enabled: avatarSettings.isEnabled,
                 selectedProfileID: avatarSettings.selectedProfileID,
-                reduceMotion: avatarSettings.effectiveReducedMotion
+                reduceMotion: avatarSettings.effectiveReducedMotion,
+                mouthCuesEnabled: avatarSettings.mouthCuesEnabled
+            )
+            avatarProjectionCoordinator.setMouthCuesEnabled(
+                avatarSettings.mouthCuesEnabled
             )
         }
         avatarSettings.onCommittedProfileChange = { [weak avatarIntegration] change in
@@ -4419,7 +4423,11 @@ final class AppCoordinator: NSObject, NSMenuDelegate {
             avatarIntegration?.update(
                 enabled: avatarSettings.isEnabled,
                 selectedProfileID: avatarSettings.selectedProfileID,
-                reduceMotion: avatarSettings.effectiveReducedMotion
+                reduceMotion: avatarSettings.effectiveReducedMotion,
+                mouthCuesEnabled: avatarSettings.mouthCuesEnabled
+            )
+            avatarProjectionCoordinator.setMouthCuesEnabled(
+                avatarSettings.mouthCuesEnabled
             )
             self.overlayController.setAvatarPaneWidth(
                 CGFloat(avatarSettings.selectedPaneWidth)

@@ -369,6 +369,81 @@ struct OverlayAvatarPresentationTests {
     }
 
     @Test
+    func directUpdateMouthPolicyClearsCueBeforeReplacementAndOnlyChangesSurfaceWhenNeeded()
+        async throws
+    {
+        let profileA = UUID()
+        let profileB = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileA, additionalID: profileB),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileA,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let first = try #require(factory.records.first)
+
+        let cue = try AvatarMouthCue(
+            generationID: UUID(),
+            playbackID: UUID(),
+            cueIndex: 1,
+            playbackOffsetMilliseconds: 100,
+            envelope: 0.8
+        )
+        integration.project(try AvatarProjection(
+            projectionSequence: 1,
+            generationID: cue.generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: cue.playbackID,
+            mouthCue: cue
+        ))
+        #expect(first.mouthCalls.count == 1)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileA,
+            reduceMotion: false,
+            mouthCuesEnabled: false
+        )
+        #expect(first.mouthCuesEnabledCalls == [true, false])
+        #expect(first.mouthCalls.count == 1)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileA,
+            reduceMotion: false,
+            mouthCuesEnabled: false
+        )
+        #expect(first.mouthCuesEnabledCalls == [true, false])
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileB,
+            reduceMotion: false
+        )
+        try await eventually { factory.records.count == 2 }
+        let replacement = try #require(factory.records.last)
+        #expect(replacement.mouthCuesEnabledCalls == [false])
+        #expect(replacement.mouthCalls.isEmpty)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileB,
+            reduceMotion: false,
+            mouthCuesEnabled: true
+        )
+        #expect(replacement.mouthCuesEnabledCalls == [false, true])
+        #expect(replacement.mouthCalls.isEmpty)
+    }
+
+    @Test
     func synchronousMouthFailureFencesStalePresentationUntilFreshProjection()
         async throws
     {
@@ -1248,7 +1323,11 @@ private actor TestProfileStore: MillerAvatarProfileStoreAPI {
         return profile
     }
 
-    func importModel(at: URL, displayName: String) async throws -> AvatarProfileSummary {
+    func importModel(
+        at: URL,
+        displayName: String,
+        qualityMode: AvatarAssetQualityMode
+    ) async throws -> AvatarProfileSummary {
         throw AvatarProfileStoreError.assetRejected
     }
 

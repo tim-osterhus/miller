@@ -15,7 +15,11 @@ struct AvatarCommittedProfileChange: Equatable, Sendable {
 protocol MillerAvatarProfileStoreAPI: Sendable {
     func list() async throws -> [AvatarProfileSummary]
     func profile(id: UUID) async throws -> AvatarProfileSummary
-    func importModel(at url: URL, displayName: String) async throws -> AvatarProfileSummary
+    func importModel(
+        at url: URL,
+        displayName: String,
+        qualityMode: AvatarAssetQualityMode
+    ) async throws -> AvatarProfileSummary
     func renameCommitted(
         id: UUID,
         displayName: String
@@ -82,7 +86,23 @@ final class MillerAvatarProfileAdapter: Sendable {
         at url: URL,
         displayName: String
     ) async throws -> AvatarCommittedProfileChange {
-        let summary = try await store.importModel(at: url, displayName: displayName)
+        try await importModel(
+            at: url,
+            displayName: displayName,
+            qualityMode: .lightweight
+        )
+    }
+
+    func importModel(
+        at url: URL,
+        displayName: String,
+        qualityMode: AvatarAssetQualityMode
+    ) async throws -> AvatarCommittedProfileChange {
+        let summary = try await store.importModel(
+            at: url,
+            displayName: displayName,
+            qualityMode: qualityMode
+        )
         return Self.change(from: summary)
     }
 

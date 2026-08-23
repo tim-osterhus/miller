@@ -119,15 +119,21 @@ struct SQLitePreferenceRepositoryTests {
         #expect(defaults.enabled == false)
         #expect(defaults.selectedProfileID == nil)
         #expect(defaults.reduceMotion == false)
+        #expect(defaults.mouthCuesEnabled)
+        #expect(defaults.importQualityMode == "lightweight")
 
         let selected = UUID()
         try await repository.set(true, for: .avatarEnabled)
         try await repository.set(selected, for: .selectedAvatarProfileID)
         try await repository.set(true, for: .reduceAvatarMotion)
+        try await repository.set(false, for: .avatarMouthCuesEnabled)
+        try await repository.set("high_quality", for: .avatarImportQualityMode)
         #expect(try await repository.avatarPreferences() == .init(
             enabled: true,
             selectedProfileID: selected,
-            reduceMotion: true
+            reduceMotion: true,
+            mouthCuesEnabled: false,
+            importQualityMode: "high_quality"
         ))
 
         let database = try SQLiteDatabase(path: fixture.path)
@@ -155,14 +161,26 @@ struct SQLitePreferenceRepositoryTests {
         #expect(!malformedMotion.enabled)
         #expect(malformedMotion.selectedProfileID == nil)
         #expect(!malformedMotion.reduceMotion)
+        #expect(!malformedMotion.mouthCuesEnabled)
+        #expect(malformedMotion.importQualityMode == "high_quality")
+
+        try database.execute(
+            "UPDATE miller_preferences SET value_json = 'not-json' WHERE key = 'avatar_import_quality_mode'"
+        )
+        let malformedQuality = try await repository.avatarPreferences()
+        #expect(malformedQuality.importQualityMode == "lightweight")
 
         try await repository.delete(.avatarEnabled)
         try await repository.delete(.selectedAvatarProfileID)
         try await repository.delete(.reduceAvatarMotion)
+        try await repository.delete(.avatarMouthCuesEnabled)
+        try await repository.delete(.avatarImportQualityMode)
         #expect(try await repository.avatarPreferences() == .init(
             enabled: false,
             selectedProfileID: nil,
-            reduceMotion: false
+            reduceMotion: false,
+            mouthCuesEnabled: true,
+            importQualityMode: "lightweight"
         ))
 
         try await repository.set(true, for: .avatarEnabled)
@@ -171,10 +189,14 @@ struct SQLitePreferenceRepositoryTests {
         try await repository.delete(.avatarEnabled)
         try await repository.delete(.selectedAvatarProfileID)
         try await repository.delete(.reduceAvatarMotion)
+        try await repository.delete(.avatarMouthCuesEnabled)
+        try await repository.delete(.avatarImportQualityMode)
         #expect(try await repository.avatarPreferences() == .init(
             enabled: false,
             selectedProfileID: nil,
-            reduceMotion: false
+            reduceMotion: false,
+            mouthCuesEnabled: true,
+            importQualityMode: "lightweight"
         ))
     }
 

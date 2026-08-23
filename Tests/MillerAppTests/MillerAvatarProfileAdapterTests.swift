@@ -228,6 +228,30 @@ struct MillerAvatarProfileAdapterTests {
     }
 
     @Test
+    func adapterPassesSelectedQualityModeExactlyOnce() async throws {
+        let profile = AvatarProfileSummary(
+            id: UUID(),
+            displayName: "Miller",
+            profileRevision: 1,
+            modelCapturedByteCount: 12,
+            modelConsecutiveLoadFailures: 0,
+            modelStatus: .available,
+            motions: [],
+            motionBindings: [:]
+        )
+        let store = RecordingAvatarProfileStore(profile: profile)
+        let adapter = MillerAvatarProfileAdapter(store: store)
+
+        _ = try await adapter.importModel(
+            at: URL(fileURLWithPath: "/tmp/high-quality.vrm"),
+            displayName: "High Quality",
+            qualityMode: .highQuality
+        )
+
+        #expect(await store.qualityModes == [.highQuality])
+    }
+
+    @Test
     func adapterExposesSixPackageMotionRolesWithoutCopyingStorePolicy() async throws {
         let profileID = UUID()
         let profile = AvatarProfileSummary(
@@ -321,6 +345,7 @@ private actor RecordingAvatarProfileStore: MillerAvatarProfileStoreAPI {
     var failProfileReads = false
     var nextRenameCommit: AvatarProfileCommit?
     var operations: [String] = []
+    var qualityModes: [AvatarAssetQualityMode] = []
 
     init(profile: AvatarProfileSummary) {
         self.profile = profile
@@ -337,8 +362,13 @@ private actor RecordingAvatarProfileStore: MillerAvatarProfileStoreAPI {
         guard id == profile.id else { throw AvatarProfileStoreError.unknownProfile }
         return profile
     }
-    func importModel(at: URL, displayName: String) async throws -> AvatarProfileSummary {
+    func importModel(
+        at: URL,
+        displayName: String,
+        qualityMode: AvatarAssetQualityMode
+    ) async throws -> AvatarProfileSummary {
         operations.append("importModel")
+        qualityModes.append(qualityMode)
         return profile
     }
     func renameCommitted(

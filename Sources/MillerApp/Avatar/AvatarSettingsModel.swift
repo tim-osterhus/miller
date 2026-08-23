@@ -20,12 +20,14 @@ struct AvatarSettingsDependencies: Sendable {
     let setEnabled: @Sendable (Bool) async throws -> Void
     let setSelectedProfile: @Sendable (UUID?) async throws -> Void
     let setReduceMotion: @Sendable (Bool) async throws -> Void
+    let setMouthCuesEnabled: @Sendable (Bool) async throws -> Void
+    let setImportQualityMode: @Sendable (AvatarAssetQualityMode) async throws -> Void
     let loadPaneWidths: @Sendable () async throws -> [UUID: Double]
     let setPaneWidth: @Sendable (UUID, Double) async throws -> Void
     let replacePaneWidths: @Sendable ([UUID: Double]) async throws -> Void
     let clearAvatarPreferences: @Sendable () async throws -> Void
     let listProfiles: @Sendable () async throws -> [AvatarProfileSummary]
-    let importModel: @Sendable (URL, String) async throws -> AvatarCommittedProfileChange
+    let importModelWithQuality: @Sendable (URL, String, AvatarAssetQualityMode) async throws -> AvatarCommittedProfileChange
     let renameProfile: @Sendable (UUID, String) async throws -> AvatarCommittedProfileChange?
     let removeProfile: @Sendable (UUID) async throws -> AvatarCommittedProfileChange?
     let importMotion: @Sendable (UUID, URL, String) async throws -> AvatarCommittedProfileChange?
@@ -43,12 +45,14 @@ struct AvatarSettingsDependencies: Sendable {
         setEnabled: { _ in },
         setSelectedProfile: { _ in },
         setReduceMotion: { _ in },
+        setMouthCuesEnabled: { _ in },
+        setImportQualityMode: { _ in },
         loadPaneWidths: { [:] },
         setPaneWidth: { _, _ in },
         replacePaneWidths: { _ in },
         clearAvatarPreferences: { throw AvatarSettingsError.unavailable },
         listProfiles: { [] },
-        importModel: { _, _ in throw AvatarSettingsError.unavailable },
+        importModelWithQuality: { _, _, _ in throw AvatarSettingsError.unavailable },
         renameProfile: { _, _ in throw AvatarSettingsError.unavailable },
         removeProfile: { _ in throw AvatarSettingsError.unavailable },
         importMotion: { _, _, _ in throw AvatarSettingsError.unavailable },
@@ -65,12 +69,14 @@ struct AvatarSettingsDependencies: Sendable {
         setEnabled: @escaping @Sendable (Bool) async throws -> Void,
         setSelectedProfile: @escaping @Sendable (UUID?) async throws -> Void,
         setReduceMotion: @escaping @Sendable (Bool) async throws -> Void,
+        setMouthCuesEnabled: @escaping @Sendable (Bool) async throws -> Void,
+        setImportQualityMode: @escaping @Sendable (AvatarAssetQualityMode) async throws -> Void,
         loadPaneWidths: @escaping @Sendable () async throws -> [UUID: Double],
         setPaneWidth: @escaping @Sendable (UUID, Double) async throws -> Void,
         replacePaneWidths: @escaping @Sendable ([UUID: Double]) async throws -> Void,
         clearAvatarPreferences: @escaping @Sendable () async throws -> Void,
         listProfiles: @escaping @Sendable () async throws -> [AvatarProfileSummary],
-        importModel: @escaping @Sendable (URL, String) async throws -> AvatarCommittedProfileChange,
+        importModelWithQuality: @escaping @Sendable (URL, String, AvatarAssetQualityMode) async throws -> AvatarCommittedProfileChange,
         renameProfile: @escaping @Sendable (UUID, String) async throws -> AvatarCommittedProfileChange?,
         removeProfile: @escaping @Sendable (UUID) async throws -> AvatarCommittedProfileChange?,
         importMotion: @escaping @Sendable (UUID, URL, String) async throws -> AvatarCommittedProfileChange?,
@@ -85,12 +91,14 @@ struct AvatarSettingsDependencies: Sendable {
         self.setEnabled = setEnabled
         self.setSelectedProfile = setSelectedProfile
         self.setReduceMotion = setReduceMotion
+        self.setMouthCuesEnabled = setMouthCuesEnabled
+        self.setImportQualityMode = setImportQualityMode
         self.loadPaneWidths = loadPaneWidths
         self.setPaneWidth = setPaneWidth
         self.replacePaneWidths = replacePaneWidths
         self.clearAvatarPreferences = clearAvatarPreferences
         self.listProfiles = listProfiles
-        self.importModel = importModel
+        self.importModelWithQuality = importModelWithQuality
         self.renameProfile = renameProfile
         self.removeProfile = removeProfile
         self.importMotion = importMotion
@@ -117,6 +125,12 @@ struct AvatarSettingsDependencies: Sendable {
             setReduceMotion: { value in
                 try await preferences.set(value, for: .reduceAvatarMotion)
             },
+            setMouthCuesEnabled: { value in
+                try await preferences.set(value, for: .avatarMouthCuesEnabled)
+            },
+            setImportQualityMode: { value in
+                try await preferences.set(value.rawValue, for: .avatarImportQualityMode)
+            },
             loadPaneWidths: { try await preferences.avatarPaneWidths() },
             setPaneWidth: { profileID, width in
                 try await preferences.setAvatarPaneWidth(width, for: profileID)
@@ -128,11 +142,17 @@ struct AvatarSettingsDependencies: Sendable {
                 try await preferences.delete(.avatarEnabled)
                 try await preferences.delete(.selectedAvatarProfileID)
                 try await preferences.delete(.reduceAvatarMotion)
+                try await preferences.delete(.avatarMouthCuesEnabled)
+                try await preferences.delete(.avatarImportQualityMode)
                 try await preferences.delete(.avatarPaneWidths)
             },
             listProfiles: { try await adapter.list() },
-            importModel: { url, displayName in
-                try await adapter.importModel(at: url, displayName: displayName)
+            importModelWithQuality: { url, displayName, qualityMode in
+                try await adapter.importModel(
+                    at: url,
+                    displayName: displayName,
+                    qualityMode: qualityMode
+                )
             },
             renameProfile: { id, displayName in
                 try await adapter.rename(id: id, displayName: displayName)
@@ -187,6 +207,8 @@ final class AvatarSettingsModel: ObservableObject {
     @Published private(set) var isEnabled = false
     @Published private(set) var selectedProfileID: UUID?
     @Published private(set) var reduceMotion = false
+    @Published private(set) var mouthCuesEnabled = true
+    @Published private(set) var importQualityMode: AvatarAssetQualityMode = .lightweight
     @Published private(set) var paneWidths: [UUID: Double] = [:]
     @Published private(set) var profiles: [AvatarProfileSummary] = []
     @Published private(set) var status = ""
@@ -386,6 +408,26 @@ final class AvatarSettingsModel: ObservableObject {
     }
 
     @discardableResult
+    func setMouthCuesEnabled(_ value: Bool) async -> Bool {
+        let save = dependencies.setMouthCuesEnabled
+        return await persistPreference(
+            .mouthCuesEnabled,
+            operation: { try await save(value) },
+            apply: { self.mouthCuesEnabled = value }
+        )
+    }
+
+    @discardableResult
+    func setImportQualityMode(_ value: AvatarAssetQualityMode) async -> Bool {
+        let save = dependencies.setImportQualityMode
+        return await persistPreference(
+            .importQualityMode,
+            operation: { try await save(value) },
+            apply: { self.importQualityMode = value }
+        )
+    }
+
+    @discardableResult
     func setPaneWidth(_ value: Double, for profileID: UUID) async -> Bool {
         let normalized = AvatarPaneWidth.normalized(value)
         let save = dependencies.setPaneWidth
@@ -398,10 +440,15 @@ final class AvatarSettingsModel: ObservableObject {
 
     @discardableResult
     func importModel(at url: URL, displayName: String) async -> AvatarCommittedProfileChange? {
-        await performMutation(
+        let selectedQuality = importQualityMode
+        return await performMutation(
             "Avatar model could not be imported",
             operation: {
-                try await self.dependencies.importModel(url, displayName)
+                try await self.dependencies.importModelWithQuality(
+                    url,
+                    displayName,
+                    selectedQuality
+                )
             },
             afterSuccess: { change in
                 _ = await self.persistSelectedProfile(change.profileID)
@@ -536,6 +583,8 @@ final class AvatarSettingsModel: ObservableObject {
             isEnabled = false
             selectedProfileID = nil
             reduceMotion = false
+            mouthCuesEnabled = true
+            importQualityMode = .lightweight
             paneWidths = [:]
             preferenceGeneration &+= 1
             status = ""
@@ -626,6 +675,10 @@ final class AvatarSettingsModel: ObservableObject {
         isEnabled = preferences.enabled
         selectedProfileID = preferences.selectedProfileID
         reduceMotion = preferences.reduceMotion
+        mouthCuesEnabled = preferences.mouthCuesEnabled
+        importQualityMode = AvatarAssetQualityMode(
+            rawValue: preferences.importQualityMode
+        ) ?? .lightweight
         onStateChange?()
     }
 
@@ -710,6 +763,8 @@ private enum AvatarPreferenceField: Hashable {
     case enabled
     case selectedProfile
     case reduceMotion
+    case mouthCuesEnabled
+    case importQualityMode
     case paneWidth(UUID)
 }
 

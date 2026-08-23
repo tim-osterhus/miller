@@ -21,15 +21,21 @@ public struct AvatarPreferences: Equatable, Sendable {
     public let enabled: Bool
     public let selectedProfileID: UUID?
     public let reduceMotion: Bool
+    public let mouthCuesEnabled: Bool
+    public let importQualityMode: String
 
     public init(
         enabled: Bool,
         selectedProfileID: UUID?,
-        reduceMotion: Bool
+        reduceMotion: Bool,
+        mouthCuesEnabled: Bool = true,
+        importQualityMode: String = "lightweight"
     ) {
         self.enabled = enabled
         self.selectedProfileID = selectedProfileID
         self.reduceMotion = reduceMotion
+        self.mouthCuesEnabled = mouthCuesEnabled
+        self.importQualityMode = importQualityMode
     }
 }
 
@@ -72,6 +78,10 @@ public extension MillerPreferenceKey where Value == Bool {
         Self(rawValue: "avatar_reduce_motion", defaultValue: false)
     }
 
+    static var avatarMouthCuesEnabled: Self {
+        Self(rawValue: "avatar_mouth_cues_enabled", defaultValue: true)
+    }
+
 }
 
 public extension MillerPreferenceKey where Value == String {
@@ -85,6 +95,10 @@ public extension MillerPreferenceKey where Value == String {
 
     static var selectedSettingsTab: Self {
         Self(rawValue: "selected_settings_tab", defaultValue: "general")
+    }
+
+    static var avatarImportQualityMode: Self {
+        Self(rawValue: "avatar_import_quality_mode", defaultValue: "lightweight")
     }
 }
 
@@ -209,7 +223,9 @@ public actor SQLitePreferenceRepository {
         AvatarPreferences(
             enabled: try avatarValue(for: .avatarEnabled),
             selectedProfileID: try avatarValue(for: .selectedAvatarProfileID),
-            reduceMotion: try avatarValue(for: .reduceAvatarMotion)
+            reduceMotion: try avatarValue(for: .reduceAvatarMotion),
+            mouthCuesEnabled: try avatarValue(for: .avatarMouthCuesEnabled),
+            importQualityMode: try avatarValue(for: .avatarImportQualityMode)
         )
     }
 

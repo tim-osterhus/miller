@@ -60,6 +60,21 @@ struct AvatarSettingsTab: View {
                         set: { value in Task { _ = await model.setReduceMotion(value) } }
                     )
                 )
+                Toggle(
+                    "Enable Lip Sync",
+                    isOn: Binding(
+                        get: { model.mouthCuesEnabled },
+                        set: { value in
+                            Task { _ = await model.setMouthCuesEnabled(value) }
+                        }
+                    )
+                )
+                Text(
+                    "Uses five-vowel lip sync when the selected model supports it, "
+                        + "with basic mouth movement as a fallback."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Text(
                     model.effectiveReducedMotion
                         ? "Reduced Motion is active for Avatar."
@@ -91,6 +106,31 @@ struct AvatarSettingsTab: View {
                 .pickerStyle(.menu)
                 .disabled(!model.isEnabled || model.isBusy)
 
+                Picker(
+                    "Import quality",
+                    selection: Binding(
+                        get: { model.importQualityMode },
+                        set: { value in
+                            Task { _ = await model.setImportQualityMode(value) }
+                        }
+                    )
+                ) {
+                    Text("Lightweight").tag(AvatarAssetQualityMode.lightweight)
+                    Text("High Quality").tag(AvatarAssetQualityMode.highQuality)
+                }
+                .pickerStyle(.menu)
+                .disabled(model.isBusy)
+
+                if model.importQualityMode == .highQuality {
+                    Text(
+                        "High Quality permits substantially larger models and may use "
+                            + "substantial memory, GPU memory, load time, and animation performance "
+                            + "within finite safety ceilings."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
                 Button("Choose VRM 1.0 Model…") { chooseModel() }
                     .disabled(!model.isEnabled || model.isBusy)
 
@@ -99,6 +139,9 @@ struct AvatarSettingsTab: View {
                         HStack {
                             Text(profile.displayName)
                             Text(Self.modelStatus(profile))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(Self.qualityLabel(profile.qualityMode))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -332,6 +375,13 @@ struct AvatarSettingsTab: View {
         return switch profile.modelStatus {
         case .available: "Available"
         case .quarantined: "Quarantined"
+        }
+    }
+
+    private static func qualityLabel(_ mode: AvatarAssetQualityMode) -> String {
+        switch mode {
+        case .lightweight: "Lightweight"
+        case .highQuality: "High Quality"
         }
     }
 

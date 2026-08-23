@@ -203,13 +203,21 @@ final class AvatarIntegrationController {
     func update(
         enabled: Bool,
         selectedProfileID: UUID?,
-        reduceMotion: Bool
+        reduceMotion: Bool,
+        mouthCuesEnabled: Bool? = nil
     ) {
         guard !terminated else { return }
         let selectionChanged = self.selectedProfileID != selectedProfileID
+        let mouthCuesChanged = mouthCuesEnabled.map {
+            $0 != self.mouthCuesEnabled
+        } ?? false
         self.enabled = enabled
         self.selectedProfileID = selectedProfileID
         self.reduceMotion = reduceMotion
+        if let mouthCuesEnabled, mouthCuesChanged {
+            self.mouthCuesEnabled = mouthCuesEnabled
+            clearLatestMouthCue()
+        }
 
         if !enabled {
             resetRetryAuthority()
@@ -231,6 +239,9 @@ final class AvatarIntegrationController {
             resetRetryAuthority()
             disposeCurrent(reason: .operator)
         } else if let surface {
+            if mouthCuesChanged {
+                surface.setMouthCuesEnabled(self.mouthCuesEnabled)
+            }
             surface.setReducedMotion(reduceMotion)
             applyVisibilityToCurrentSurface()
             notifyPresentationPolicy()
@@ -289,8 +300,12 @@ final class AvatarIntegrationController {
     func setMouthCuesEnabled(_ enabled: Bool) {
         guard !terminated, enabled != mouthCuesEnabled else { return }
         mouthCuesEnabled = enabled
-        if !enabled,
-           let projection = latestProjection,
+        clearLatestMouthCue()
+        surface?.setMouthCuesEnabled(enabled)
+    }
+
+    private func clearLatestMouthCue() {
+        if let projection = latestProjection,
            projection.mouthCue != nil
         {
             latestProjection = try? AvatarProjection(
@@ -302,7 +317,6 @@ final class AvatarIntegrationController {
                 playbackID: projection.playbackID
             )
         }
-        surface?.setMouthCuesEnabled(enabled)
     }
 
     func show() {
