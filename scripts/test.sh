@@ -37,6 +37,7 @@ fi
 mkdir -p "$build_root" "$swift_cache" "$clang_cache"
 test "$("$node_path" --version)" = "v22.22.0"
 "$node_path" --test "$repo_root/Gateway/tests/protocol.test.mjs"
+"$node_path" --test "$repo_root/Tests/JavaScript/lip-sync-analysis.test.mjs"
 env \
   SWIFTPM_MODULECACHE_OVERRIDE="$swift_cache" \
   CLANG_MODULE_CACHE_PATH="$clang_cache" \

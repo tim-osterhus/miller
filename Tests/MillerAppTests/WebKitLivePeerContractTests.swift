@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import MillerLiveAudio
 import Testing
 @testable import MillerApp
@@ -78,6 +79,36 @@ struct WebKitLivePeerContractTests {
         #expect(!html.contains("<iframe"))
         #expect(!html.contains("src=\"http"))
         #expect(!html.contains("window.open"))
+    }
+
+    @Test
+    func packagedLipSyncClassifierIsReadableAndPure() throws {
+        let resourceURL = try #require(
+            Bundle.module.url(
+                forResource: "lip-sync-analysis",
+                withExtension: "js"
+            )
+        )
+        let source = try String(contentsOf: resourceURL, encoding: .utf8)
+
+        #expect(source.contains("globalThis.millerLipSyncAnalysis"))
+        #expect(source.contains("Object.freeze({ classify })"))
+        #expect(source.contains("function classify("))
+        for forbidden in [
+            "navigator.mediaDevices",
+            "MediaStream",
+            "RTCPeerConnection",
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "localStorage",
+            "sessionStorage",
+            "setTimeout",
+            "setInterval",
+            "console.",
+        ] {
+            #expect(!source.contains(forbidden), "classifier must remain pure: \(forbidden)")
+        }
     }
 
     @Test
