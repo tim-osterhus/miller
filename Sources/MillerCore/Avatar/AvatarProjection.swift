@@ -31,19 +31,132 @@ private enum AvatarProjectionContract {
     static let maximumSafeInteger: UInt64 = 9_007_199_254_740_991
 }
 
+/// Optional five-vowel weights carried across Miller's typed Avatar boundary.
+///
+/// Native analyser output is clamped at construction. Decoding is deliberately
+/// strict so an externally supplied present object cannot silently degrade to a
+/// scalar-only cue.
+public struct AvatarVowelWeights: Codable, Equatable, Sendable {
+    public let aa: Double
+    public let ih: Double
+    public let ou: Double
+    public let ee: Double
+    public let oh: Double
+
+    public init(aa: Double, ih: Double, ou: Double, ee: Double, oh: Double) {
+        self.init(clamping: aa, ih: ih, ou: ou, ee: ee, oh: oh)
+    }
+
+    init(clamping aa: Double, ih: Double, ou: Double, ee: Double, oh: Double) {
+        self.aa = Self.clamp(aa)
+        self.ih = Self.clamp(ih)
+        self.ou = Self.clamp(ou)
+        self.ee = Self.clamp(ee)
+        self.oh = Self.clamp(oh)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: AnyCodingKey.self)
+        let expectedKeys = Set(CodingKeys.allCases.map(\.stringValue))
+        let actualKeys = Set(container.allKeys.map(\.stringValue))
+        guard actualKeys == expectedKeys else {
+            throw DecodingError.dataCorruptedError(
+                forKey: AnyCodingKey(stringValue: "aa")!,
+                in: container,
+                debugDescription: "vowel weights must contain exactly aa, ih, ou, ee, and oh"
+            )
+        }
+
+        let values = try [
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "aa")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ih")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ou")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "ee")!),
+            container.decode(Double.self, forKey: AnyCodingKey(stringValue: "oh")!),
+        ]
+        guard values.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: AnyCodingKey(stringValue: "aa")!,
+                in: container,
+                debugDescription: "vowel weights must be finite and within 0...1"
+            )
+        }
+        self.init(
+            uncheckedAA: values[0],
+            ih: values[1],
+            ou: values[2],
+            ee: values[3],
+            oh: values[4]
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(aa, forKey: .aa)
+        try container.encode(ih, forKey: .ih)
+        try container.encode(ou, forKey: .ou)
+        try container.encode(ee, forKey: .ee)
+        try container.encode(oh, forKey: .oh)
+    }
+
+    private init(
+        uncheckedAA aa: Double,
+        ih: Double,
+        ou: Double,
+        ee: Double,
+        oh: Double
+    ) {
+        self.aa = aa
+        self.ih = ih
+        self.ou = ou
+        self.ee = ee
+        self.oh = oh
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case aa
+        case ih
+        case ou
+        case ee
+        case oh
+    }
+
+    private struct AnyCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int?
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+            self.intValue = nil
+        }
+
+        init?(intValue: Int) {
+            self.stringValue = String(intValue)
+            self.intValue = intValue
+        }
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+}
+
 public struct AvatarMouthCue: Codable, Equatable, Sendable {
     public let generationID: UUID
     public let playbackID: UUID
     public let cueIndex: UInt64
     public let playbackOffsetMilliseconds: UInt64
     public let envelope: Double
+    public let vowels: AvatarVowelWeights?
 
     public init(
         generationID: UUID,
         playbackID: UUID,
         cueIndex: UInt64,
         playbackOffsetMilliseconds: UInt64,
-        envelope: Double
+        envelope: Double,
+        vowels: AvatarVowelWeights? = nil
     ) throws {
         guard cueIndex > 0 else {
             throw AvatarProjectionError.invalidCueIndex
@@ -62,10 +175,14 @@ public struct AvatarMouthCue: Codable, Equatable, Sendable {
         self.cueIndex = cueIndex
         self.playbackOffsetMilliseconds = playbackOffsetMilliseconds
         self.envelope = min(max(envelope, 0), 1)
+        self.vowels = vowels
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let vowels = container.contains(.vowels)
+            ? try container.decode(AvatarVowelWeights.self, forKey: .vowels)
+            : nil
         try self.init(
             generationID: container.decode(UUID.self, forKey: .generationID),
             playbackID: container.decode(UUID.self, forKey: .playbackID),
@@ -74,7 +191,8 @@ public struct AvatarMouthCue: Codable, Equatable, Sendable {
                 UInt64.self,
                 forKey: .playbackOffsetMilliseconds
             ),
-            envelope: container.decode(Double.self, forKey: .envelope)
+            envelope: container.decode(Double.self, forKey: .envelope),
+            vowels: vowels
         )
     }
 
@@ -84,6 +202,7 @@ public struct AvatarMouthCue: Codable, Equatable, Sendable {
         case cueIndex
         case playbackOffsetMilliseconds
         case envelope
+        case vowels
     }
 }
 

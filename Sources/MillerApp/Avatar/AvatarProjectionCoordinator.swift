@@ -40,12 +40,14 @@ final class AvatarProjectionCoordinator {
     private(set) var lastProjection: AvatarProjection?
     private(set) var visibility: AvatarVisibility
     private(set) var reduceMotion: Bool
+    private(set) var mouthCuesEnabled: Bool
     var onProjection: ProjectionSink
 
     init(
         initialProjectionSequence: UInt64 = 0,
         visibility: AvatarVisibility = .visible,
         reduceMotion: Bool = false,
+        mouthCuesEnabled: Bool = true,
         speakingSilenceGrace: Duration = .milliseconds(1_500),
         onProjection: @escaping ProjectionSink = { _ in }
     ) {
@@ -55,6 +57,7 @@ final class AvatarProjectionCoordinator {
         )
         self.visibility = visibility
         self.reduceMotion = reduceMotion
+        self.mouthCuesEnabled = mouthCuesEnabled
         self.speakingSilenceGrace = speakingSilenceGrace
         self.onProjection = onProjection
     }
@@ -182,22 +185,24 @@ final class AvatarProjectionCoordinator {
                 generationID: currentGenerationID,
                 playbackID: playbackID
             )
-        case let .mouthCue(offsetMilliseconds, envelope, _):
+        case let .mouthCue(offsetMilliseconds, envelope, vowels):
             _ = emitMouthCue(
                 offsetMilliseconds: offsetMilliseconds,
-                envelope: envelope
+                envelope: envelope,
+                vowels: vowels
             )
         case let .playbackStopped(offsetMilliseconds):
             guard playbackID != nil, !playbackSilenced else { return }
             playbackSilenced = true
             if semanticPhase == .responding,
                visibility == .visible,
-               !reduceMotion,
-               emitMouthCue(
-                   offsetMilliseconds: offsetMilliseconds,
-                   envelope: 0
-               )
+               !reduceMotion
             {
+                _ = emitMouthCue(
+                    offsetMilliseconds: offsetMilliseconds,
+                    envelope: 0,
+                    vowels: nil
+                )
                 scheduleSpeakingSilenceExpiry()
                 return
             }
@@ -245,6 +250,16 @@ final class AvatarProjectionCoordinator {
 
     func setReducedMotion(_ enabled: Bool) {
         setPresentationPolicy(visibility: visibility, reduceMotion: enabled)
+    }
+
+    /// Updates mouth presentation policy in place. Disabling mouth cues only
+    /// clears the current cue; playback identity and speaking lifecycle remain
+    /// owned by the played-output path.
+    func setMouthCuesEnabled(_ enabled: Bool) {
+        guard enabled != mouthCuesEnabled else { return }
+        mouthCuesEnabled = enabled
+        guard !enabled else { return }
+        clearMouthPresentation()
     }
 
     func setPresentationPolicy(
@@ -451,6 +466,19 @@ final class AvatarProjectionCoordinator {
         playbackSilenced = false
     }
 
+    private func clearMouthPresentation() {
+        guard let playbackID,
+              let generationID = currentGenerationID,
+              lastProjection?.mouthCue != nil
+        else { return }
+        _ = emit(
+            .speaking,
+            generationID: generationID,
+            playbackID: playbackID,
+            mouthCue: nil
+        )
+    }
+
     private func scheduleSpeakingSilenceExpiry() {
         guard let playbackID, let generationID = currentGenerationID else {
             return
@@ -479,7 +507,8 @@ final class AvatarProjectionCoordinator {
     @discardableResult
     private func emitMouthCue(
         offsetMilliseconds: UInt64,
-        envelope: Double
+        envelope: Double,
+        vowels: MillerLiveAudio.AvatarVowelWeights? = nil
     ) -> Bool {
         guard let playbackID,
               let generationID = currentGenerationID,
@@ -499,13 +528,23 @@ final class AvatarProjectionCoordinator {
                 playbackID: playbackID,
                 cueIndex: nextCueIndex,
                 playbackOffsetMilliseconds: offset,
-                envelope: envelope
+                envelope: envelope,
+                vowels: vowels.map {
+                    AvatarVowelWeights(
+                        aa: $0.aa,
+                        ih: $0.ih,
+                        ou: $0.ou,
+                        ee: $0.ee,
+                        oh: $0.oh
+                    )
+                }
             )
         } catch {
             return false
         }
         cueIndex = nextCueIndex
         playbackOffsetMilliseconds = offset
+        guard mouthCuesEnabled else { return false }
         return emit(
             .speaking,
             generationID: generationID,

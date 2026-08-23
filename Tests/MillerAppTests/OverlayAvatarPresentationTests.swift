@@ -170,8 +170,19 @@ struct OverlayAvatarPresentationTests {
         #expect(surface.mouthCalls.isEmpty)
         surface.resetPresentationRecords()
 
+        let vowels = MillerLiveAudio.AvatarVowelWeights(
+            aa: 0,
+            ih: 0.73,
+            ou: 0,
+            ee: 0.1,
+            oh: 0
+        )
         coordinator.projectLiveOutput(
-            .mouthCue(offsetMilliseconds: 132, envelope: 0.73),
+            .mouthCue(
+                offsetMilliseconds: 132,
+                envelope: 0.73,
+                vowels: vowels
+            ),
             for: sessionID
         )
 
@@ -190,10 +201,171 @@ struct OverlayAvatarPresentationTests {
                 == cue.playbackOffsetMilliseconds
         )
         #expect(payload.scalar == cue.envelope)
+        #expect(payload.vowels == MillerAvatarCore.MouthVowelWeights(
+            aa: 0,
+            ih: 0.73,
+            ou: 0,
+            ee: 0.1,
+            oh: 0
+        ))
         #expect(
             surface.callOrder
                 == [.project, .mouth, .visibility, .reducedMotion]
         )
+    }
+
+    @Test
+    func mouthPolicyReachesCurrentSurfaceWithoutReplacingRenderer() async throws {
+        let profileID = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileID),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileID,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let surface = try #require(factory.records.first)
+
+        let generationID = UUID()
+        let playbackID = UUID()
+        let cue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 1,
+            playbackOffsetMilliseconds: 100,
+            envelope: 0.8,
+            vowels: AvatarVowelWeights(
+                aa: 0,
+                ih: 0.8,
+                ou: 0,
+                ee: 0,
+                oh: 0
+            )
+        )
+        integration.project(try AvatarProjection(
+            projectionSequence: 1,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: cue
+        ))
+        #expect(surface.mouthCalls.count == 1)
+
+        integration.setMouthCuesEnabled(false)
+        #expect(factory.records.count == 1)
+        #expect(surface.mouthCuesEnabledCalls == [true, false])
+        #expect(surface.disposeReasons.isEmpty)
+
+        let suppressedCue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 2,
+            playbackOffsetMilliseconds: 200,
+            envelope: 0.9,
+            vowels: AvatarVowelWeights(
+                aa: 0,
+                ih: 0.9,
+                ou: 0,
+                ee: 0,
+                oh: 0
+            )
+        )
+        integration.project(try AvatarProjection(
+            projectionSequence: 2,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: suppressedCue
+        ))
+        #expect(surface.mouthCalls.count == 1)
+
+        integration.setMouthCuesEnabled(true)
+        #expect(factory.records.count == 1)
+        #expect(surface.mouthCuesEnabledCalls == [true, false, true])
+        #expect(surface.mouthCalls.count == 1)
+
+        let freshCue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 3,
+            playbackOffsetMilliseconds: 300,
+            envelope: 0.7
+        )
+        integration.project(try AvatarProjection(
+            projectionSequence: 3,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: freshCue
+        ))
+        #expect(surface.mouthCalls.count == 2)
+        #expect(surface.mouthCalls.last?.cueIndex == freshCue.cueIndex)
+    }
+
+    @Test
+    func mouthPolicyOffSurvivesRendererReplacement() async throws {
+        let profileA = UUID()
+        let profileB = UUID()
+        let factory = SurfaceFactory()
+        let integration = AvatarIntegrationController(
+            adapter: makeAdapter(profileID: profileA, additionalID: profileB),
+            surfaceFactory: factory.make
+        )
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileA,
+            reduceMotion: false
+        )
+        integration.show()
+        try await eventually { factory.records.count == 1 }
+        let first = try #require(factory.records.first)
+
+        let generationID = UUID()
+        let playbackID = UUID()
+        let cue = try AvatarMouthCue(
+            generationID: generationID,
+            playbackID: playbackID,
+            cueIndex: 1,
+            playbackOffsetMilliseconds: 100,
+            envelope: 0.8
+        )
+        integration.project(try AvatarProjection(
+            projectionSequence: 1,
+            generationID: generationID,
+            phase: .speaking,
+            visibility: .visible,
+            reduceMotion: false,
+            playbackID: playbackID,
+            mouthCue: cue
+        ))
+        #expect(first.mouthCalls.count == 1)
+
+        integration.setMouthCuesEnabled(false)
+        #expect(first.mouthCuesEnabledCalls == [true, false])
+        #expect(first.disposeReasons.isEmpty)
+
+        integration.update(
+            enabled: true,
+            selectedProfileID: profileB,
+            reduceMotion: false
+        )
+        try await eventually { factory.records.count == 2 }
+        let replacement = try #require(factory.records.last)
+
+        #expect(first.disposeReasons == [.operator])
+        #expect(replacement.mouthCuesEnabledCalls == [false])
+        #expect(replacement.mouthCalls.isEmpty)
     }
 
     @Test
@@ -948,6 +1120,7 @@ private final class SurfaceFactory {
 private enum RecordingSurfaceCall: Equatable {
     case project
     case mouth
+    case mouthCuesEnabled
     case visibility
     case reducedMotion
 }
@@ -963,6 +1136,7 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     var disposeReasons: [DisposalReason] = []
     var projectionCalls: [ProjectPhasePayload] = []
     var mouthCalls: [SetMouthPayload] = []
+    var mouthCuesEnabledCalls: [Bool] = []
     var visibilityCalls: [EffectiveVisibility] = []
     var reducedMotionCalls: [Bool] = []
     var callOrder: [RecordingSurfaceCall] = []
@@ -1002,6 +1176,12 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
         }
     }
 
+    func setMouthCuesEnabled(_ enabled: Bool) {
+        if disposed { callsAfterDetach = true }
+        mouthCuesEnabledCalls.append(enabled)
+        callOrder.append(.mouthCuesEnabled)
+    }
+
     func setVisibility(_ visibility: EffectiveVisibility) {
         emitPreStartConfigurationIfNeeded()
         if disposed { callsAfterDetach = true }
@@ -1028,6 +1208,7 @@ private final class RecordingSurface: MillerAvatarSurfaceControlling {
     func resetPresentationRecords() {
         projectionCalls.removeAll()
         mouthCalls.removeAll()
+        mouthCuesEnabledCalls.removeAll()
         visibilityCalls.removeAll()
         reducedMotionCalls.removeAll()
         callOrder.removeAll()

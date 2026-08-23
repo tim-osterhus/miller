@@ -48,6 +48,7 @@ protocol MillerAvatarSurfaceControlling: AnyObject {
     ) async -> ProfileLoadDisposition
     func project(_ payload: ProjectPhasePayload)
     func setMouth(_ payload: SetMouthPayload)
+    func setMouthCuesEnabled(_ enabled: Bool)
     func setVisibility(_ visibility: EffectiveVisibility)
     func setReducedMotion(_ enabled: Bool)
     func dispose(reason: DisposalReason)
@@ -95,6 +96,10 @@ private final class PackageAvatarSurface: MillerAvatarSurfaceControlling {
 
     func setMouth(_ payload: SetMouthPayload) {
         surface.setMouth(payload)
+    }
+
+    func setMouthCuesEnabled(_ enabled: Bool) {
+        surface.setMouthCuesEnabled(enabled)
     }
 
     func dispose(reason: DisposalReason) {
@@ -147,6 +152,7 @@ final class AvatarIntegrationController {
     private var enabled = false
     private var selectedProfileID: UUID?
     private var reduceMotion = false
+    private var mouthCuesEnabled = true
     private var desiredVisibility: EffectiveVisibility = .hidden
     private var activeProfileKey: ProfileKey?
     private var awaitingExplicitRetry = false
@@ -278,6 +284,25 @@ final class AvatarIntegrationController {
         reduceMotion = enabled
         surface?.setReducedMotion(enabled)
         notifyPresentationPolicy()
+    }
+
+    func setMouthCuesEnabled(_ enabled: Bool) {
+        guard !terminated, enabled != mouthCuesEnabled else { return }
+        mouthCuesEnabled = enabled
+        if !enabled,
+           let projection = latestProjection,
+           projection.mouthCue != nil
+        {
+            latestProjection = try? AvatarProjection(
+                projectionSequence: projection.projectionSequence,
+                generationID: projection.generationID,
+                phase: projection.phase,
+                visibility: projection.visibility,
+                reduceMotion: projection.reduceMotion,
+                playbackID: projection.playbackID
+            )
+        }
+        surface?.setMouthCuesEnabled(enabled)
     }
 
     func show() {
@@ -466,6 +491,7 @@ final class AvatarIntegrationController {
         isSurfaceAttached = true
         onSurfaceAttachmentChange?(true)
         fresh.start()
+        fresh.setMouthCuesEnabled(mouthCuesEnabled)
         fresh.setReducedMotion(reduceMotion)
         fresh.setVisibility(.visible)
         applyLatestProjection()
@@ -573,13 +599,22 @@ final class AvatarIntegrationController {
             playbackID: projection.playbackID
         ))
         guard isCurrent(surface, owner: owner) else { return }
-        if let mouthCue = projection.mouthCue {
+        if mouthCuesEnabled, let mouthCue = projection.mouthCue {
             surface.setMouth(SetMouthPayload(
                 generationID: mouthCue.generationID,
                 playbackID: mouthCue.playbackID,
                 cueIndex: mouthCue.cueIndex,
                 playbackOffsetMilliseconds: mouthCue.playbackOffsetMilliseconds,
-                scalar: mouthCue.envelope
+                scalar: mouthCue.envelope,
+                vowels: mouthCue.vowels.map {
+                    MillerAvatarCore.MouthVowelWeights(
+                        aa: $0.aa,
+                        ih: $0.ih,
+                        ou: $0.ou,
+                        ee: $0.ee,
+                        oh: $0.oh
+                    )
+                }
             ))
         }
         guard isCurrent(surface, owner: owner) else { return }

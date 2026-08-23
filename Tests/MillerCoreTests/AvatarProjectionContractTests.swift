@@ -134,6 +134,71 @@ struct AvatarProjectionContractTests {
     }
 
     @Test
+    func vowelWeightsClampInternalValuesButDecodeOnlyCompleteFiniteRanges() throws {
+        let clamped = AvatarVowelWeights(
+            aa: 2,
+            ih: -1,
+            ou: 0.4,
+            ee: .nan,
+            oh: .infinity
+        )
+        #expect(clamped.aa == 1)
+        #expect(clamped.ih == 0)
+        #expect(clamped.ou == 0.4)
+        #expect(clamped.ee == 0)
+        #expect(clamped.oh == 0)
+
+        let enriched = try AvatarMouthCue(
+            generationID: generationA,
+            playbackID: playbackP,
+            cueIndex: 1,
+            playbackOffsetMilliseconds: 100,
+            envelope: 0.6,
+            vowels: AvatarVowelWeights(
+                aa: 0,
+                ih: 0.6,
+                ou: 0,
+                ee: 0.1,
+                oh: 0
+            )
+        )
+        #expect(enriched.vowels?.ih == 0.6)
+        #expect(
+            try JSONDecoder().decode(
+                AvatarMouthCue.self,
+                from: JSONEncoder().encode(enriched)
+            ) == enriched
+        )
+
+        let malformed: [Data] = [
+            Data("{\"aa\":0,\"ih\":0,\"ou\":0,\"ee\":0}".utf8),
+            Data("{\"aa\":0,\"ih\":0,\"ou\":0,\"ee\":0,\"oh\":0,\"x\":0}".utf8),
+            Data("{\"aa\":2,\"ih\":0,\"ou\":0,\"ee\":0,\"oh\":0}".utf8),
+            Data("{\"aa\":\"NaN\",\"ih\":0,\"ou\":0,\"ee\":0,\"oh\":0}".utf8),
+        ]
+        for data in malformed {
+            // A present malformed object must not silently become scalar-only.
+            #expect(throws: Error.self) {
+                try JSONDecoder().decode(AvatarVowelWeights.self, from: data)
+            }
+        }
+
+        let scalarCue = """
+        {
+          "generationID": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "playbackID": "11111111-1111-4111-8111-111111111111",
+          "cueIndex": 1,
+          "playbackOffsetMilliseconds": 100,
+          "envelope": 0.5,
+          "vowels": null
+        }
+        """
+        #expect(throws: Error.self) {
+            try JSONDecoder().decode(AvatarMouthCue.self, from: Data(scalarCue.utf8))
+        }
+    }
+
+    @Test
     func mouthCueRequiresAnActiveVisibleUnreducedMatchingLease() throws {
         let cue = try cue()
         let admitted = try projection(
@@ -218,7 +283,7 @@ struct AvatarProjectionContractTests {
 
         let document = try AvatarFixtureDecoder.decode(data: data)
         #expect(document.schema == "miller-avatar.integration-fixture/v1")
-        #expect(document.operations.count == 18)
+        #expect(document.operations.count == 23)
 
         let projects = document.operations.compactMap { operation -> AvatarFixtureProjectInput? in
             guard case .project(let input) = operation.input else { return nil }
@@ -237,7 +302,7 @@ struct AvatarProjectionContractTests {
             guard case .mouth(let input) = operation.input else { return nil }
             return input
         }
-        #expect(mouthInputs.count == 2)
+        #expect(mouthInputs.count == 5)
         for input in mouthInputs {
             let admitted = try makeProjection(
                 from: speaking,
@@ -245,6 +310,11 @@ struct AvatarProjectionContractTests {
             )
             #expect(admitted.mouthCue != nil)
         }
+        #expect(mouthInputs[0].vowels == nil)
+        #expect(mouthInputs[1].vowels == nil)
+        #expect(mouthInputs[2].vowels?.ih == 0.6)
+        #expect(mouthInputs[3].vowels?.ih == 0.9)
+        #expect(mouthInputs[4].vowels == nil)
 
         let visibilityInputs = document.operations.compactMap { operation -> AvatarVisibility? in
             guard case .visibility(let visibility) = operation.input else { return nil }
@@ -256,6 +326,13 @@ struct AvatarProjectionContractTests {
             return enabled
         }
         #expect(policyInputs == [true, false])
+        let mouthPolicyInputs = document.operations.compactMap { operation -> Bool? in
+            guard case .mouthCuesEnabled(let enabled) = operation.input else {
+                return nil
+            }
+            return enabled
+        }
+        #expect(mouthPolicyInputs == [false, true])
 
         let cue = try makeCue(from: mouthInputs[0])
         for visibility in visibilityInputs {
@@ -316,14 +393,14 @@ struct AvatarProjectionContractTests {
         #expect(data == sourceData)
 
         let document = try AvatarFixtureDecoder.decode(data: data)
-        #expect(document.cases.count == 8)
+        #expect(document.cases.count == 10)
 
         for testCase in document.cases {
             switch testCase.name {
             case "duplicate-projection-sequence", "decreasing-projection-sequence":
                 let input = try projectInput(from: testCase.input)
                 #expect((try? makeProjection(from: input)) != nil)
-            case "stale-generation", "stale-playback", "mouth-outside-speaking":
+            case "stale-generation", "stale-playback", "mouth-outside-speaking", "stale-playback-cannot-restore-vowels":
                 let active = try projectInput(from: testCase.prelude[0])
                 let mouth = try mouthInput(from: testCase.input)
                 #expect(throws: AvatarProjectionError.mouthCueNotAdmitted) {
@@ -341,6 +418,15 @@ struct AvatarProjectionContractTests {
                         mouthCue: try makeCue(from: mouth)
                     )) != nil
                 )
+            case "stale-cue-after-policy-cycle":
+                #expect(testCase.prelude.contains {
+                    if case .mouthCuesEnabled(false) = $0 { return true }
+                    return false
+                })
+                #expect(testCase.prelude.contains {
+                    if case .mouthCuesEnabled(true) = $0 { return true }
+                    return false
+                })
             case "nonfinite-equivalent-scalar-type":
                 let mouth = try mouthInput(from: testCase.input)
                 guard case .string(let scalar) = mouth.envelope else {
@@ -412,6 +498,7 @@ private struct AvatarFixtureCase {
 private enum AvatarFixtureInput {
     case project(AvatarFixtureProjectInput)
     case mouth(AvatarFixtureMouthInput)
+    case mouthCuesEnabled(Bool)
     case visibility(AvatarVisibility)
     case reducedMotion(Bool)
     case reset(generationID: UUID?, reason: String)
@@ -430,6 +517,15 @@ private struct AvatarFixtureMouthInput {
     let cueIndex: UInt64
     let playbackOffsetMilliseconds: UInt64
     let envelope: AvatarFixtureEnvelope
+    let vowels: AvatarFixtureVowelWeights?
+}
+
+private struct AvatarFixtureVowelWeights: Equatable {
+    let aa: Double
+    let ih: Double
+    let ou: Double
+    let ee: Double
+    let oh: Double
 }
 
 private enum AvatarFixtureEnvelope: Equatable {
@@ -534,8 +630,14 @@ private enum AvatarFixtureDecoder {
                 playbackID: playbackID,
                 cueIndex: cueIndex,
                 playbackOffsetMilliseconds: playbackOffsetMilliseconds,
-                envelope: envelope
+                envelope: envelope,
+                vowels: try optionalVowels(input["vowels"])
             ))
+        case "set_mouth_cues_enabled":
+            guard isBoolean(input["enabled"]),
+                  let enabled = input["enabled"] as? Bool
+            else { throw AvatarFixtureError.invalid }
+            return .mouthCuesEnabled(enabled)
         case "suspend", "resume":
             guard let rawValue = input["visibility"] as? String,
                   let visibility = AvatarVisibility(rawValue: rawValue)
@@ -574,6 +676,31 @@ private enum AvatarFixtureDecoder {
               let uuid = UUID(uuidString: string)
         else { throw AvatarFixtureError.invalid }
         return uuid
+    }
+
+    private static func optionalVowels(
+        _ value: Any?
+    ) throws -> AvatarFixtureVowelWeights? {
+        guard let value else { return nil }
+        if value is NSNull { return nil }
+        guard let object = value as? [String: Any],
+              Set(object.keys) == Set(["aa", "ih", "ou", "ee", "oh"])
+        else { throw AvatarFixtureError.invalid }
+        let values = try ["aa", "ih", "ou", "ee", "oh"].map { key -> Double in
+            guard let number = object[key] as? NSNumber,
+                  !isBoolean(object[key]),
+                  number.doubleValue.isFinite,
+                  (0...1).contains(number.doubleValue)
+            else { throw AvatarFixtureError.invalid }
+            return number.doubleValue
+        }
+        return AvatarFixtureVowelWeights(
+            aa: values[0],
+            ih: values[1],
+            ou: values[2],
+            ee: values[3],
+            oh: values[4]
+        )
     }
 
     private static func safeUInt(_ value: Any?) -> UInt64? {
@@ -633,6 +760,15 @@ private func makeCue(from input: AvatarFixtureMouthInput) throws -> AvatarMouthC
         playbackID: input.playbackID,
         cueIndex: input.cueIndex,
         playbackOffsetMilliseconds: input.playbackOffsetMilliseconds,
-        envelope: envelope
+        envelope: envelope,
+        vowels: input.vowels.map {
+            AvatarVowelWeights(
+                aa: $0.aa,
+                ih: $0.ih,
+                ou: $0.ou,
+                ee: $0.ee,
+                oh: $0.oh
+            )
+        }
     )
 }

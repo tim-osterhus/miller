@@ -1,5 +1,5 @@
 {
-  "originHash" : "bdfd6db4fdd18ae0a92988bdb83dcb5d9f62b2258a81ab0aabcdb0dd9578d54d",
+  "originHash" : "d72553f73c096f4e3664d666be70773d62ff42e49b5ce7725b9880c565faf8bf",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tim-osterhus/miller-avatar.git",
       "state" : {
-        "revision" : "903bb8ae0c06d3c582c9a0ad3880da976d3b1439",
-        "version" : "0.1.0-alpha.8"
+        "revision" : "10ea95f3871289369130eeec77bba4b1efdee135",
+        "version" : "0.1.1"
       }
     },
     {
