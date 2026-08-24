@@ -49,9 +49,10 @@ struct CodexLiveTextCompatibilityTests {
         #expect(root["method"] as? String == "thread/realtime/start")
         let params = try #require(root["params"] as? [String: Any])
         #expect(params.keys.sorted() == [
-            "initialItems", "outputModality", "prompt", "realtimeSessionId",
+            "initialItems", "model", "outputModality", "prompt", "realtimeSessionId",
             "threadId", "transport", "version", "voice",
         ])
+        #expect(params["model"] as? String == "gpt-live-1-codex")
         #expect(params["version"] as? String == "v3")
         #expect(params["outputModality"] as? String == "audio")
         #expect(params["prompt"] as? String == "synthetic-prompt")

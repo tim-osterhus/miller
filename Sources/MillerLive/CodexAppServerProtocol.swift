@@ -142,6 +142,7 @@ public struct CodexAppServerProtocol: Sendable {
             "id": id,
             "method": "thread/realtime/start",
             "params": [
+                "model": GPTLiveModel.codex.rawValue,
                 "threadId": threadID,
                 "outputModality": "audio",
                 "prompt": prompt,

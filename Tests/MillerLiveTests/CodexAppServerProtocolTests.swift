@@ -154,9 +154,10 @@ struct CodexAppServerProtocolTests {
         ))
         let params = try #require(start["params"] as? [String: Any])
         #expect(params.keys.sorted() == [
-            "outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice",
+            "model", "outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice",
         ])
         #expect(params["threadId"] as? String == "thread-1")
+        #expect(params["model"] as? String == "gpt-live-1-codex")
         #expect(params["version"] as? String == "v3")
         #expect(params["realtimeSessionId"] is NSNull)
         #expect(params["voice"] is NSNull)
@@ -343,9 +344,10 @@ struct CodexAppServerProtocolTests {
         #expect(start["method"] as? String == "thread/realtime/start")
         let startParams = try #require(start["params"] as? [String: Any])
         #expect(startParams.keys.sorted() == [
-            "outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice",
+            "model", "outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice",
         ])
         #expect(startParams["threadId"] as? String == "thread-1")
+        #expect(startParams["model"] as? String == "gpt-live-1-codex")
         #expect(startParams["version"] as? String == "v3")
         #expect(startParams["realtimeSessionId"] is NSNull)
         let transport = try #require(startParams["transport"] as? [String: Any])

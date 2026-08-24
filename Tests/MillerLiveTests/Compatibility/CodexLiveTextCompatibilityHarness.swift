@@ -69,6 +69,7 @@ enum LiveTextCompatibilityFrame {
             "method": "thread/realtime/start",
             "params": [
                 "initialItems": encodedItems,
+                "model": GPTLiveModel.codex.rawValue,
                 "outputModality": "audio",
                 "prompt": "synthetic-prompt",
                 "realtimeSessionId": NSNull(),

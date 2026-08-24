@@ -1223,7 +1223,7 @@ lines.on("line", async (line) => {
     if (liveTextCompatibility) {
       const keys = Object.keys(params).sort();
       const expectedKeys = [
-        "initialItems", "outputModality", "prompt", "realtimeSessionId",
+        "initialItems", "model", "outputModality", "prompt", "realtimeSessionId",
         "threadId", "transport", "version", "voice",
       ];
       const initialItems = params.initialItems;
@@ -1236,6 +1236,7 @@ lines.on("line", async (line) => {
           && item.text.length <= 768);
       if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
           || !validItems
+          || params.model !== "gpt-live-1-codex"
           || params.outputModality !== "audio"
           || typeof params.prompt !== "string"
           || params.prompt.length === 0
@@ -1257,9 +1258,9 @@ lines.on("line", async (line) => {
       return;
     }
     const keys = Object.keys(params).sort();
-    const expectedKeys = ["outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice"];
+    const expectedKeys = ["model", "outputModality", "prompt", "realtimeSessionId", "threadId", "transport", "version", "voice"];
     if (JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
-        params.outputModality !== "audio" || typeof params.prompt !== "string" || params.prompt.length === 0 ||
+        params.model !== "gpt-live-1-codex" || params.outputModality !== "audio" || typeof params.prompt !== "string" || params.prompt.length === 0 ||
         params.realtimeSessionId !== null || params.version !== "v3" || params.voice !== null ||
         params.transport?.type !== "webrtc" || typeof params.transport?.sdp !== "string" ||
         !params.transport.sdp.startsWith("v=0\r\n") ||
