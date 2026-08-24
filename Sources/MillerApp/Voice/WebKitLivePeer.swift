@@ -519,7 +519,30 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
         "globalThis.millerLipSyncAnalysis = Object.freeze({ classify() { throw new Error('classifier unavailable'); } });"
 
     private static let lipSyncClassifierSource: String = {
-        guard let resourceURL = Bundle.module.url(
+        loadLipSyncClassifierSource(
+            mainBundle: Bundle.main,
+            fallbackBundle: { Bundle.module }
+        )
+    }()
+
+    static func loadLipSyncClassifierSource(
+        mainBundle: Bundle,
+        fallbackBundle: () -> Bundle?
+    ) -> String {
+        let resourceBundle: Bundle?
+        if mainBundle.bundleURL.pathExtension.lowercased() == "app" {
+            resourceBundle = mainBundle.resourceURL.flatMap {
+                Bundle(
+                    url: $0.appendingPathComponent(
+                        "Miller_MillerApp.bundle",
+                        isDirectory: true
+                    )
+                )
+            }
+        } else {
+            resourceBundle = fallbackBundle()
+        }
+        guard let resourceURL = resourceBundle?.url(
             forResource: "lip-sync-analysis",
             withExtension: "js"
         ) else {
@@ -527,7 +550,7 @@ final class WebKitLivePeer: LiveAudioPeer, LiveAudioPeerConnectionMonitoring,
         }
         return (try? String(contentsOf: resourceURL, encoding: .utf8))
             ?? missingLipSyncClassifierSource
-    }()
+    }
 
     static let localHTML: String = {
         let classifierSource = lipSyncClassifierSource

@@ -207,6 +207,21 @@ struct ReleasePackagingPolicyTests {
     }
 
     @Test
+    func packagedLivePeerResolvesLipSyncFromApplicationResources() throws {
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/MillerApp/Voice/WebKitLivePeer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("mainBundle.resourceURL"))
+        #expect(source.contains("Miller_MillerApp.bundle"))
+        #expect(source.contains("fallbackBundle: { Bundle.module }"))
+        #expect(!source.contains("guard let resourceURL = Bundle.module.url("))
+    }
+
+    @Test
     func sbomDeclaresTheCapabilityBridgeAsAContainedComponent() throws {
         let data = try Data(contentsOf: repositoryRoot.appending(
             path: "Packaging/Miller.spdx.json"

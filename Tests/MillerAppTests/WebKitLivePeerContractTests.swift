@@ -196,6 +196,89 @@ struct WebKitLivePeerContractTests {
     }
 
     @Test
+    func packagedLipSyncClassifierUsesTheApplicationResourceBundle() throws {
+        let fileManager = FileManager.default
+        let appURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "MillerLipSync-\(UUID().uuidString).app",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: appURL) }
+        let resourcesURL = appURL.appendingPathComponent(
+            "Contents/Resources/Miller_MillerApp.bundle",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: resourcesURL,
+            withIntermediateDirectories: true
+        )
+        try Data("marker-from-packaged-resources".utf8).write(
+            to: resourcesURL.appendingPathComponent("lip-sync-analysis.js")
+        )
+        let info = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+        <key>CFBundleIdentifier</key><string>ai.millrace.miller.test</string>
+        <key>CFBundlePackageType</key><string>APPL</string>
+        </dict></plist>
+        """
+        try Data(info.utf8).write(
+            to: appURL.appendingPathComponent("Contents/Info.plist")
+        )
+        let appBundle = try #require(Bundle(url: appURL))
+        var fallbackWasCalled = false
+
+        let source = WebKitLivePeer.loadLipSyncClassifierSource(
+            mainBundle: appBundle,
+            fallbackBundle: {
+                fallbackWasCalled = true
+                return nil
+            }
+        )
+
+        #expect(source == "marker-from-packaged-resources")
+        #expect(!fallbackWasCalled)
+    }
+
+    @Test
+    func packagedLipSyncClassifierMissingResourceDoesNotInvokeSwiftPMFallback() throws {
+        let fileManager = FileManager.default
+        let appURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "MillerLipSyncMissing-\(UUID().uuidString).app",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: appURL) }
+        try fileManager.createDirectory(
+            at: appURL.appendingPathComponent("Contents/Resources", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let info = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+        <key>CFBundleIdentifier</key><string>ai.millrace.miller.missing-test</string>
+        <key>CFBundlePackageType</key><string>APPL</string>
+        </dict></plist>
+        """
+        try Data(info.utf8).write(
+            to: appURL.appendingPathComponent("Contents/Info.plist")
+        )
+        let appBundle = try #require(Bundle(url: appURL))
+        var fallbackWasCalled = false
+
+        let source = WebKitLivePeer.loadLipSyncClassifierSource(
+            mainBundle: appBundle,
+            fallbackBundle: {
+                fallbackWasCalled = true
+                return nil
+            }
+        )
+
+        #expect(source.contains("classifier unavailable"))
+        #expect(!fallbackWasCalled)
+    }
+
+    @Test
     func outputSampleIsAClosedTypedOperationOnTheExistingPeer() async throws {
         let evaluator = FakeScriptEvaluator(results: [
             .prepareOffer: syntheticOffer,
